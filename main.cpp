@@ -20,6 +20,8 @@
 #define ROUND_DOWN(x, SZ) ((x) - (x) % (SZ))
 #define ROUND_UP(x, SZ) ( (x) % (SZ) ? (x) - ((x) % (SZ)) + (SZ) : (x))
 
+#define ARRLEN(arr) ( sizeof(arr) / sizeof(arr[0]) )
+
 static void dumpElfHdr(Elf64_Ehdr *elfHdr) {
     printf("ELF HEADER DUMP:\n"
         "\te_ident: %s\n"
@@ -98,7 +100,7 @@ struct Module {
     std::string name;
     uint64_t baseVA;
     // total memory this takes from baseVA onwards
-    // next module can be placed at ALIGN(baseVA + memSz)
+    // should be a multiple of pagesz, s.t. next module can start at this->baseVA + this->memSz
     uint64_t memSz;
     // VA ranges (without base offset of module)
     // mmap will be called on ranges with baseVA added
@@ -183,20 +185,20 @@ static bool processDynamicSegment(Elf64_Phdr *phdr, FILE *elf, DynamicTableInfo 
                 assert(val == 0);
                 break;
             case DT_FLAGS:
-                assert(val == DF_TEXTREL);
+                //assert(val == DF_TEXTREL);
                 break;
             case DT_NEEDED:
                 info.neededLibs.push_back(val);
                 break;
             case DT_SCE_IMPORT_LIB:
-                printf("dyn case DT_SCE_IMPORT_LIB: %lx\n", val);
+                //printf("dyn case DT_SCE_IMPORT_LIB: %lx\n", val);
                 break;
             case DT_SCE_IMPORT_LIB_ATTR:
-                printf("dyn case DT_SCE_IMPORT_LIB_ATTR: %lx\n", val);
+                //printf("dyn case DT_SCE_IMPORT_LIB_ATTR: %lx\n", val);
                 break;
             case DT_SCE_NEEDED_MODULE:
                 info.neededModules.push_back(val);
-                printf("dyn case DT_SCE_NEEDED_MODULE: %lx\n", val);
+                //printf("dyn case DT_SCE_NEEDED_MODULE: %lx\n", val);
                 break;
             default:
                 break;
@@ -206,39 +208,60 @@ static bool processDynamicSegment(Elf64_Phdr *phdr, FILE *elf, DynamicTableInfo 
     return true;
 }
 
-bool handleRelocations(std::map<std::string, Module> &modules) {
-    std::map<std::basic_string<char>, Module>::iterator it = modules.begin();
-    for (; it != modules.end(); it++) {
-        Module &mod = it->second;
-        printf("MODULE: %s ***************************\n", mod.name.c_str());
-        for (int j = 0; j < mod.relocs.size(); j++) {
-            Elf64_Rela reloc = mod.relocs[j];
-            uint64_t type = ELF64_R_TYPE(reloc.r_info);
-            uint64_t symIdx = ELF64_R_SYM(reloc.r_info);
-            Elf64_Sym sym = mod.symbols[symIdx];
-            const char *symName = &mod.strtab[sym.st_name];
+bool handleRelocations(Module &mod, std::map<std::string, Module> &modules) {
+    //std::map<std::basic_string<char>, Module>::iterator it = modules.begin();
+    printf("MODULE: %s ***************************\n", mod.name.c_str());
+    printf("baseVA: 0x%lx, memSz: 0x%lx\n", mod.baseVA, mod.memSz);
+    for (int j = 0; j < mod.relocs.size(); j++) {
+        Elf64_Rela reloc = mod.relocs[j];
+        uint64_t type = ELF64_R_TYPE(reloc.r_info);
+        uint64_t symIdx = ELF64_R_SYM(reloc.r_info);
+        Elf64_Sym sym = mod.symbols[symIdx];
+        const char *symName = &mod.strtab[sym.st_name];
 
-            if (symIdx != STN_UNDEF) {
-                printf("reloc:\n"
-                        "\ttype: %lx\n"
-                        "\tsym idx: %lx\n"
-                        "\tsym: %s\n"
-                        "\toffset: %lx\n"
-                        "\taddend: %lx\n"
-                        ,
-                    type,
-                    symIdx,
-                    symName,
-                    reloc.r_offset,
-                    reloc.r_addend
-                );
-            } else {
-                // reloc uses val 0
-            }
+        if (symIdx != STN_UNDEF) {
+            printf("reloc:\n"
+                    "\ttype: %lx\n"
+                    "\tsym idx: %lx\n"
+                    "\tsym: %s\n"
+                    "\toffset: %lx\n"
+                    "\taddend: %lx\n"
+                    ,
+                type,
+                symIdx,
+                symName,
+                reloc.r_offset,
+                reloc.r_addend
+            );
+        } else {
+            // reloc uses val 0
         }
     }
 
     return true;
+}
+
+FILE *openWithSearchPaths(std::string name, std::string mode) {
+    const char *paths[] = {
+        "./",
+        "libs/",
+        "../dynlibs/lib/"
+    };
+
+    // TODO replace .prx extension with .sprx
+    int extPos = name.find_last_of('.');
+    if (extPos != std::string::npos && name.substr(extPos) == ".prx") {
+        name = name.substr(0, extPos) + ".sprx";
+    }
+
+    FILE *file;
+    for (int i = 0; i < ARRLEN(paths); i++) {
+        std::string fpath = std::string(paths[i]) + std::string("/") + name;
+        file = fopen(fpath.c_str(), mode.c_str());
+        if (file)
+            return file;
+    }
+    return NULL;
 }
 
 // fill out Module struct with metadata for module at given path and put in Module table
@@ -250,21 +273,22 @@ bool getModuleInfo(std::string &path, std::map<std::string, Module> &modules, El
     DynamicTableInfo dynTableInfo;
     std::vector<Elf64_Phdr> progHdrs;
 
-
     if (modules.find(path) != modules.end()) {
         return true;
     }
 
-    elf = fopen(path.c_str(), "r");
+    printf("getModuleInfo: %s\n", path.c_str());
+
+    elf = openWithSearchPaths(path, "r");
     if (!elf) {
-        printf("couldn't open %s\n", path.c_str());
-        return 1;
+        fprintf(stderr, "couldn't open %s\n", path.c_str());
+        return false;
     }
 
     Elf64_Ehdr elfHdr;
     fseek(elf, 0, SEEK_SET);
     if (1 != fread(&elfHdr, sizeof(elfHdr), 1, elf)) {
-        return 1;
+        return false;
     }
 
     dumpElfHdr(&elfHdr);
@@ -272,13 +296,15 @@ bool getModuleInfo(std::string &path, std::map<std::string, Module> &modules, El
     progHdrs.resize(elfHdr.e_phnum);
     fseek(elf, elfHdr.e_phoff, SEEK_SET);
     if (elfHdr.e_phnum != fread(progHdrs.data(), sizeof(Elf64_Phdr), elfHdr.e_phnum, elf)) {
-        return 1;
+        return false;
     }
 
     std::vector<MappedSegment> mappedSegments;
 
     for (int i = 0; i < progHdrs.size(); i++) {
         Elf64_Phdr *phdr = &progHdrs[i];
+        // guarantees that we can put dynamic libraries in memory at the start of the next page after the last module ended
+//        assert(pgsz % phdr->p_align == 0);
         switch (progHdrs[i].p_type) {
             //case PT_PHDR:
             //case PT_INTERP:
@@ -319,7 +345,7 @@ bool getModuleInfo(std::string &path, std::map<std::string, Module> &modules, El
                     // coalesce into new interval
                     MappedSegment replacedSeg;
                     replacedSeg.mStart = segA.mStart;
-                    replacedSeg.mSize = segB.mStart - segA.mStart + segB.mSize;
+                    replacedSeg.mSize = (segB.mStart - segA.mStart) + segB.mSize;
                     mappedSegments[j] = replacedSeg;
                     shouldCreateSeg = false;
                     break;
@@ -338,6 +364,13 @@ bool getModuleInfo(std::string &path, std::map<std::string, Module> &modules, El
         }
     }
 
+    Elf64_Off highestAddr = 0;
+    for (int i = 0; i < mappedSegments.size(); i++) {
+        MappedSegment *seg = &mappedSegments[i];
+        assert(seg->mSize % pgsz == 0);
+        highestAddr = std::max(highestAddr, seg->mStart + seg->mSize);
+    }
+
     /////////////////////////////////////////////////////////////////////////////////////////
     // parse dynlibdata for relocations, symbols, strings
 
@@ -349,7 +382,7 @@ bool getModuleInfo(std::string &path, std::map<std::string, Module> &modules, El
     dynLibDataContents.resize(dynTableInfo.dynlibdataPHdr.p_filesz);
     fseek(elf, dynTableInfo.dynlibdataPHdr.p_offset, SEEK_SET);
     if (1 != fread(dynLibDataContents.data(), dynTableInfo.dynlibdataPHdr.p_filesz, 1, elf)) {
-        return 1;
+        return false;
     }
 
     for (int i = 0; i < dynTableInfo.neededLibs.size(); i++) {
@@ -373,9 +406,11 @@ bool getModuleInfo(std::string &path, std::map<std::string, Module> &modules, El
     }
 
     //////////////////////////////////////////////////////////////////////////////////////////////////////
+    assert(lastModuleEndAddr % pgsz == 0);
+
     mod.name = path;
-    mod.baseVA = 0; // TODO
-    mod.memSz = 0; // TODO
+    mod.baseVA = lastModuleEndAddr;
+    mod.memSz = highestAddr;
     mod.mappedSegments = mappedSegments;
     mod.pHeaders = progHdrs;
     mod.dynTableInfo = dynTableInfo;
@@ -394,7 +429,7 @@ bool getModuleInfo(std::string &path, std::map<std::string, Module> &modules, El
     for (int i = 0; i < dynLibStrings.size(); i++) {
         std::string lib = dynLibStrings[i];
         if (!getModuleInfo(lib, modules, lastModuleEndAddr))
-            return false;
+            ;//return false;
     }
     fclose(elf);
 
@@ -403,7 +438,13 @@ bool getModuleInfo(std::string &path, std::map<std::string, Module> &modules, El
 
 // map one module into memory and do relocations
 bool mapModule(Module &mod, std::map<std::string, Module> &modules) {
-    FILE *elf = fopen(mod.name.c_str(), "r");
+    FILE *elf = openWithSearchPaths(mod.name, "r");
+    if (!elf) {
+        fprintf(stderr, "couldn't open %s to map module\n", mod.name.c_str());
+        return 1;
+    }
+
+    printf("mapping %s\n", mod.name.c_str());
 
     for (int i = 0; i < mod.mappedSegments.size(); i++) {
         MappedSegment seg = mod.mappedSegments[i];
@@ -411,12 +452,7 @@ bool mapModule(Module &mod, std::map<std::string, Module> &modules) {
                 PROT_EXEC | PROT_READ | PROT_WRITE,
                 MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS,
                 -1, 0 );
-        assert((uint64_t) addr == seg.mStart);
-    }
-
-    if (!elf) {
-        printf("couldn't open %s to map module\n", mod.name.c_str());
-        return 1;
+        assert((uint64_t) addr == mod.baseVA + seg.mStart);
     }
 
     std::vector<unsigned char> buf;
@@ -439,7 +475,7 @@ bool mapModule(Module &mod, std::map<std::string, Module> &modules) {
 
     fclose(elf);
 
-    if (!handleRelocations(modules))
+    if (!handleRelocations(mod, modules))
         return false;
 
     return true;
@@ -451,10 +487,15 @@ bool loadFirstModule(std::string name, std::map<std::string, Module> &modules) {
     if (!getModuleInfo(name, modules, lastModuleEndAddr))
         return false;
 
-    mapModule(modules["eboot.bin"], modules);
-    //for () {
-        //mapModule(it->second, modules);
-    //}
+    //mapModule(modules["eboot.bin"], modules);
+
+    std::map<std::basic_string<char>, Module>::iterator it = modules.begin();
+    for (; it != modules.end(); it++) {
+        if (!mapModule(it->second, modules)) {
+            fprintf(stderr, "Error while mapping %s\n", it->second.name.c_str());
+            return false;
+        }
+    }
     
     return true;
 }
@@ -464,9 +505,9 @@ int main() {
     FILE *eboot;
     std::map<std::string, Module> modules;
     
-    eboot = fopen(ebootPath.c_str(), "r");
+    eboot = openWithSearchPaths(ebootPath, "r");
     if (!eboot) {
-        printf("couldn't open eboot.bin\n");
+        fprintf(stderr, "couldn't open eboot.bin\n");
         return 1;
     }
 
@@ -476,8 +517,6 @@ int main() {
         return 1;
     }
 
-    dumpElfHdr(&elfHdr);    
-
     // loadEntryModule will open file again
     fclose(eboot);
     if ( !loadFirstModule(ebootPath, modules)) {
@@ -485,6 +524,8 @@ int main() {
     }
 
     void (*entry)(void) = (void (*)(void)) elfHdr.e_entry; 
+
+    return 0;
 
     pthread_t ps4Thread;
     EntryPointWrapperArg arg;
