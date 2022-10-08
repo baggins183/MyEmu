@@ -395,25 +395,40 @@ bool handleRelocations(Module &mod, std::map<std::string, Module> &modules) {
     return true;
 }
 
-FILE *openWithSearchPaths(std::string name, std::string mode) {
-    const char *paths[] = {
-        "./",
-        "libs/",
-        "../dynlibs/lib/"
-    };
+FILE *openWithSearchPaths(std::string name, std::string pkgDumpPath, std::string mode, 
+        /* ret */ std::string *path) {
+
+    std::vector<std::string> paths;
+    paths.push_back("./");
+    paths.push_back(pkgDumpPath);
+    paths.push_back(pkgDumpPath + "/sce_sys/");
+    paths.push_back(pkgDumpPath + "/sce_module/");
+    paths.push_back("libs/"),
+    paths.push_back("../dynlibs/lib/");
+
+    std::vector<std::string> basenamePermutations;
+    basenamePermutations.push_back(name);
 
     // TODO replace .prx extension with .sprx
     int extPos = name.find_last_of('.');
     if (extPos != std::string::npos && name.substr(extPos) == ".prx") {
-        name = name.substr(0, extPos) + ".sprx";
+        std::string sprx = name.substr(0, extPos) + ".sprx";
+        basenamePermutations.push_back(sprx);
     }
 
     FILE *file;
-    for (int i = 0; i < ARRLEN(paths); i++) {
-        std::string fpath = std::string(paths[i]) + std::string("/") + name;
-        file = fopen(fpath.c_str(), mode.c_str());
-        if (file)
-            return file;
+    for (int i = 0; i < paths.size(); i++) {
+        for (int j = 0; j < basenamePermutations.size(); j++) {
+            std::string basename = basenamePermutations[j];
+            std::string fpath = std::string(paths[i]) + std::string("/") + basename;
+            file = fopen(fpath.c_str(), mode.c_str());
+            if (file) {
+                if (path) {
+                    *path = fpath;
+                }
+                return file;
+            }
+        }
     }
     return NULL;
 }
@@ -421,21 +436,22 @@ FILE *openWithSearchPaths(std::string name, std::string mode) {
 // fill out Module struct with metadata for module at given path and put in Module table
 // don't decide on baseVA yet
 // recurse to other necessary modules
-bool getModuleInfo(std::string &path, std::map<std::string, Module> &modules, Elf64_Addr &lastModuleEndAddr) {
+bool getModuleInfo(std::string &basename, std::string pkgDumpPath, std::map<std::string, Module> &modules, Elf64_Addr &lastModuleEndAddr) {
     FILE *elf;
     Module mod;
     DynamicTableInfo dynTableInfo;
     std::vector<Elf64_Phdr> progHdrs;
 
-    if (modules.find(path) != modules.end()) {
+    if (modules.find(basename) != modules.end()) {
         return true;
     }
 
     //printf("getModuleInfo: %s\n", path.c_str());
 
-    elf = openWithSearchPaths(path, "r");
+    std::string fullModulePath;
+    elf = openWithSearchPaths(basename, pkgDumpPath, "r", &fullModulePath);
     if (!elf) {
-        fprintf(stderr, "couldn't open %s\n", path.c_str());
+        fprintf(stderr, "couldn't open %s\n", basename.c_str());
         return false;
     }
 
@@ -562,7 +578,7 @@ bool getModuleInfo(std::string &path, std::map<std::string, Module> &modules, El
     //////////////////////////////////////////////////////////////////////////////////////////////////////
     assert(lastModuleEndAddr % pgsz == 0);
 
-    mod.name = path;
+    mod.name = fullModulePath;
     mod.baseVA = lastModuleEndAddr;
     mod.memSz = highestAddr;
     mod.mappedSegments = mappedSegments;
@@ -577,7 +593,7 @@ bool getModuleInfo(std::string &path, std::map<std::string, Module> &modules, El
     mod.symbols = symbols;
     // TODO
 
-    modules[path] = mod;
+    modules[basename] = mod;
 
     lastModuleEndAddr += mod.memSz;
     for (int i = 0; i < dynLibStrings.size(); i++) {
@@ -592,7 +608,7 @@ bool getModuleInfo(std::string &path, std::map<std::string, Module> &modules, El
 
 // map one module into memory and do relocations
 bool mapModule(Module &mod, std::map<std::string, Module> &modules) {
-    FILE *elf = openWithSearchPaths(mod.name, "r");
+    FILE *elf = fopen(mod.name.c_str(), "r");
     if (!elf) {
         fprintf(stderr, "couldn't open %s to map module\n", mod.name.c_str());
         return 1;
@@ -636,9 +652,9 @@ bool mapModule(Module &mod, std::map<std::string, Module> &modules) {
 }
 
 // get info about all necessary dynamic libraries, map process memory, and do relocations
-bool loadFirstModule(std::string name, std::map<std::string, Module> &modules) {
+bool loadFirstModule(std::string name, std::string pkgDumpPath, std::map<std::string, Module> &modules) {
     Elf64_Addr lastModuleEndAddr = 0;
-    if (!getModuleInfo(name, modules, lastModuleEndAddr))
+    if (!getModuleInfo(name, pkgDumpPath, modules, lastModuleEndAddr))
         return false;
 
     //mapModule(modules["eboot.bin"], modules);
@@ -658,12 +674,17 @@ bool loadFirstModule(std::string name, std::map<std::string, Module> &modules) {
     return true;
 }
 
-int main() {
+int main(int argc, char **argv) {
     const std::string ebootPath = "eboot.bin";
     FILE *eboot;
     std::map<std::string, Module> modules;
+
+    if (argc < 2) {
+        fprintf(stderr, "usage: %s <PATH TO PKG DUMP>\n", argv[0]);
+    }
+    std::string pkgDumpPath(argv[1]);
     
-    eboot = openWithSearchPaths(ebootPath, "r");
+    eboot = openWithSearchPaths(ebootPath, pkgDumpPath, "r", nullptr);
     if (!eboot) {
         fprintf(stderr, "couldn't open eboot.bin\n");
         return 1;
@@ -677,7 +698,7 @@ int main() {
 
     // loadEntryModule will open file again
     fclose(eboot);
-    if ( !loadFirstModule(ebootPath, modules)) {
+    if ( !loadFirstModule(ebootPath, pkgDumpPath, modules)) {
         return 1;
     }
 
