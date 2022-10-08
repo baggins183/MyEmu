@@ -337,11 +337,11 @@ bool handleRelocations(Module &mod, std::map<std::string, Module> &modules) {
                 case R_AMD64_64:
                 {
                     uint64_t addr = mod.baseVA + reloc.r_offset;
-                    //uint64_t value = symDef.st_value + reloc.r_addend;
                     uint64_t value = defLocation.baseVA + symDef.st_value + reloc.r_addend;
+                    //uint64_t value = symDef.st_value + reloc.r_addend;
                     *((uint64_t *) addr) = value;
 
-                    printf("symbol: %s, addr: %lx, value: %lx, addend %lx, \n", symName, addr, value, reloc.r_addend);
+                    printf("symbol: %s, type: R_AMD64_64, addr: 0x%lx, value: 0x%lx, addend %lx, \n", symName, addr, value, reloc.r_addend);
                     break;
                 }
                 case R_AMD64_PC32:
@@ -350,6 +350,14 @@ bool handleRelocations(Module &mod, std::map<std::string, Module> &modules) {
                 case R_AMD64_COPY:
                 case R_AMD64_GLOB_DAT:
                 case R_AMD64_JUMP_SLOT:
+                {
+                    uint64_t addr = mod.baseVA + reloc.r_offset;
+                    uint64_t value = defLocation.baseVA + symDef.st_value;
+                    //uint64_t value = symDef.st_value;
+                    *((uint64_t *) addr) = value;
+                    printf("symbol: %s, type: R_AMD64_JUMP_SLOT, addr: 0x%lx, value: 0x%lx, \n", symName, addr, value);
+                    break;
+                }
                 case R_AMD64_RELATIVE:
                 case R_AMD64_GOTPCREL:
                 case R_AMD64_32:
@@ -359,6 +367,11 @@ bool handleRelocations(Module &mod, std::map<std::string, Module> &modules) {
                 case R_AMD64_8:
                 case R_AMD64_PC8:
                 case R_AMD64_DTPMOD64:
+                {
+                    // "https://chao-tic.github.io/blog/2018/12/25/tls"
+                    uint64_t addr = mod.baseVA + reloc.r_offset;
+                    fprintf(stderr, "mod %s, symbol: %s, type: R_AMD64_JUMP_SLOT, addr: 0x%lx\n", mod.name.c_str(), symName, addr);    
+                }
                 case R_AMD64_DTPOFF64:
                 case R_AMD64_TPOFF64:
                 case R_AMD64_TLSGD:
@@ -372,7 +385,8 @@ bool handleRelocations(Module &mod, std::map<std::string, Module> &modules) {
                 default:
                 {
                     // See the R_X86_64* types if the type is > R_AMD64_GOTPC32
-                    fprintf(stderr, "unhandled relocation type: %lu\n", r_type);                    
+                    fprintf(stderr, "unhandled relocation type: %lu\n", r_type);
+                    //assert(false && "unhandled relocation type");        
                 }
             }            
         }
@@ -531,9 +545,9 @@ bool getModuleInfo(std::string &path, std::map<std::string, Module> &modules, El
         dynLibStrings.push_back(path);
     }
 
-    for (int i = 0; i < dynTableInfo.relaSz / dynTableInfo.relaEntSz; i++) {
+    for (int i = 0; i < (dynTableInfo.jmprelSz + dynTableInfo.relaSz) / dynTableInfo.relaEntSz; i++) {
         // handle endianess TODO
-        uint64_t relaOff = dynTableInfo.relaOff + i * dynTableInfo.relaEntSz;
+        uint64_t relaOff = dynTableInfo.jmprelOff + i * dynTableInfo.relaEntSz;
         Elf64_Rela *ent = (Elf64_Rela *) &dynLibDataContents[relaOff];
         relocs.push_back(*ent);
     }
@@ -615,8 +629,8 @@ bool mapModule(Module &mod, std::map<std::string, Module> &modules) {
 
     fclose(elf);
 
-    //if (!handleRelocations(mod, modules))
-    //    return false;   TODO
+    if (!handleRelocations(mod, modules))
+        return false;  // TODO
 
     return true;
 }
@@ -638,9 +652,8 @@ bool loadFirstModule(std::string name, std::map<std::string, Module> &modules) {
     }
 
     // TODO put in mapModule()
-    if (!handleRelocations(modules[name], modules)) {
-        return false;
-    }
+    //if (!handleRelocations(modules[name], modules))
+        //return false;
     
     return true;
 }
