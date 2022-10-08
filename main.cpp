@@ -1,4 +1,5 @@
 #include "elf-sce.h"
+#include "elf_amd64.h"
 #ifdef __linux
 #include <cstdint>
 #endif
@@ -89,9 +90,10 @@ struct DynamicTableInfo {
     uint64_t relaSz;
     uint64_t relaEntSz;
     uint64_t pltgotOff;
-    uint64_t pltgotSz;
+    //uint64_t pltgotSz;  // should figure this one out
     uint64_t pltrel;  /* Type of reloc in PLT */
     uint64_t jmprelOff;
+    uint64_t jmprelSz;
     std::vector<uint64_t> neededLibs; // offsets into strtab for filenames
     std::vector<uint64_t> neededModules;
 };
@@ -171,7 +173,7 @@ static bool processDynamicSegment(Elf64_Phdr *phdr, FILE *elf, DynamicTableInfo 
                 info.pltgotOff = val;
                 break;
             case DT_SCE_PLTRELSZ:
-                info.pltgotSz = val;
+                info.jmprelSz = val;
                 break;
             case DT_SCE_PLTREL:
                 assert(val == DT_RELA);
@@ -208,33 +210,171 @@ static bool processDynamicSegment(Elf64_Phdr *phdr, FILE *elf, DynamicTableInfo 
     return true;
 }
 
+bool findSymbolDef(Elf64_Sym sym, Module &referenceLocation, std::map<std::string, Module> &modules,  
+                /* ret */Module &defLocation, Elf64_Sym &symDef) {
+    bool isHashed = false;
+    std::string symName(&referenceLocation.strtab[sym.st_name]);
+    std::string origName = symName;
+
+    if (symName.length() == 15) {
+        std::string suffix = symName.substr(11);
+        if (suffix[0] == '#' && suffix[2] == '#') {
+            isHashed = true;
+            symName = symName.substr(0, 11);
+        }
+    }
+
+    bool found = false;
+
+    for (int i = 0; i < referenceLocation.neededLibsStrings.size(); i++) {
+        std::string modName = referenceLocation.neededLibsStrings[i];
+        if (modules.find(modName) == modules.end()) {
+            continue;
+        }
+        Module &mod = modules[modName];
+        bool found = false;
+
+        for (int i = 0; i < mod.symbols.size(); i++) {
+            Elf64_Sym modSym = mod.symbols[i];
+
+            if (modSym.st_value == STN_UNDEF) {
+                continue;
+            }
+
+            std::string defName(&mod.strtab[modSym.st_name]);
+
+            if (isHashed) {
+                defName = defName.substr(0, 11);
+            }
+
+            if (symName != defName) {
+                continue;
+            }
+
+            uint8_t bind_type = ELF64_ST_BIND(sym.st_info);
+            switch(bind_type) {
+                case STB_LOCAL:
+                    fprintf(stderr, "found local symbol matching name: %s\n", origName.c_str());
+                    continue;
+                case STB_GLOBAL:
+                    assert(ELF64_ST_TYPE(modSym.st_info) == ELF64_ST_TYPE(sym.st_info));
+                    symDef = modSym;
+                    defLocation = mod;
+                    printf("resolved GLOBAL symbol: %s, needed in module %s, found in %s\n", 
+                            origName.c_str(), referenceLocation.name.c_str(), mod.name.c_str());                    
+                    return true;                
+                case STB_WEAK:
+                    // TODO just skip if mismatch, this is legal
+                    assert(ELF64_ST_TYPE(modSym.st_info) == ELF64_ST_TYPE(sym.st_info));
+                    symDef = modSym;
+                    defLocation = mod;
+                    break;                
+                //case STB_NUM: // not defined in FreeBSD 9.0
+                case STB_LOOS:
+                case STB_HIOS:
+                case STB_LOPROC:
+                case STB_HIPROC:
+                default:
+                    fprintf(stderr, "unhandled binding type: %d\n", bind_type);
+            }
+
+            return true;
+        }
+    }
+
+    if (found) {
+        printf("resolved WEAK symbol: %s, needed in module %s, found in %s\n", 
+                origName.c_str(), referenceLocation.name.c_str(), defLocation.name.c_str());
+    }
+
+    return found;
+}
+
+void printReloc(Elf64_Rela reloc, Module &mod) {
+    Elf64_Sym sym = mod.symbols[ELF64_R_SYM(reloc.r_info)];
+    printf("reloc:\n"
+            "\ttype: %lx\n"
+            "\tsym idx: %lx\n"
+            "\tsym: %s\n"
+            "\toffset: %lx\n"
+            "\taddend: %lx\n",
+        ELF64_R_TYPE(reloc.r_info),
+        ELF64_R_SYM(reloc.r_info),
+        &mod.strtab[sym.st_name],
+        reloc.r_offset,
+        reloc.r_addend
+    );
+}
+
 bool handleRelocations(Module &mod, std::map<std::string, Module> &modules) {
     //std::map<std::basic_string<char>, Module>::iterator it = modules.begin();
     printf("MODULE: %s ***************************\n", mod.name.c_str());
     printf("baseVA: 0x%lx, memSz: 0x%lx\n", mod.baseVA, mod.memSz);
     for (int j = 0; j < mod.relocs.size(); j++) {
         Elf64_Rela reloc = mod.relocs[j];
-        uint64_t type = ELF64_R_TYPE(reloc.r_info);
+        uint64_t r_type = ELF64_R_TYPE(reloc.r_info);
         uint64_t symIdx = ELF64_R_SYM(reloc.r_info);
-        Elf64_Sym sym = mod.symbols[symIdx];
-        const char *symName = &mod.strtab[sym.st_name];
 
-        if (symIdx != STN_UNDEF) {
-            printf("reloc:\n"
-                    "\ttype: %lx\n"
-                    "\tsym idx: %lx\n"
-                    "\tsym: %s\n"
-                    "\toffset: %lx\n"
-                    "\taddend: %lx\n"
-                    ,
-                type,
-                symIdx,
-                symName,
-                reloc.r_offset,
-                reloc.r_addend
-            );
+        if (symIdx == STN_UNDEF) {
+            // "If the index is STN_UNDEF, the undefined symbol index, the relocation uses 0 as the symbol value"
+            // TODO write 0
         } else {
-            // reloc uses val 0
+            Elf64_Sym sym = mod.symbols[ELF64_R_SYM(reloc.r_info)];
+            const char *symName = &mod.strtab[sym.st_name];            
+            //printReloc(reloc, mod);
+
+            Module defLocation;
+            Elf64_Sym symDef;
+            bool res = findSymbolDef(sym, mod, modules, defLocation, symDef);
+            if (!res) {
+                fprintf(stderr, "couldn't find definition for relocation sym %s in module %s\n", symName, mod.name.c_str());
+                continue;
+            }
+
+            switch (r_type) {
+                case R_AMD64_NONE:
+                    break;
+                case R_AMD64_64:
+                {
+                    uint64_t addr = mod.baseVA + reloc.r_offset;
+                    //uint64_t value = symDef.st_value + reloc.r_addend;
+                    uint64_t value = defLocation.baseVA + symDef.st_value + reloc.r_addend;
+                    *((uint64_t *) addr) = value;
+
+                    printf("symbol: %s, addr: %lx, value: %lx, addend %lx, \n", symName, addr, value, reloc.r_addend);
+                    break;
+                }
+                case R_AMD64_PC32:
+                case R_AMD64_GOT32:
+                case R_AMD64_PLT32:
+                case R_AMD64_COPY:
+                case R_AMD64_GLOB_DAT:
+                case R_AMD64_JUMP_SLOT:
+                case R_AMD64_RELATIVE:
+                case R_AMD64_GOTPCREL:
+                case R_AMD64_32:
+                case R_AMD64_32S:
+                case R_AMD64_16:
+                case R_AMD64_PC16:
+                case R_AMD64_8:
+                case R_AMD64_PC8:
+                case R_AMD64_DTPMOD64:
+                case R_AMD64_DTPOFF64:
+                case R_AMD64_TPOFF64:
+                case R_AMD64_TLSGD:
+                case R_AMD64_TLSLD:
+                case R_AMD64_DTPOFF32:
+                case R_AMD64_GOTTPOFF:
+                case R_AMD64_TPOFF32:
+                case R_AMD64_PC64:
+                case R_AMD64_GOTOFF64:
+                case R_AMD64_GOTPC32:
+                default:
+                {
+                    // See the R_X86_64* types if the type is > R_AMD64_GOTPC32
+                    fprintf(stderr, "unhandled relocation type: %lu\n", r_type);                    
+                }
+            }            
         }
     }
 
@@ -277,7 +417,7 @@ bool getModuleInfo(std::string &path, std::map<std::string, Module> &modules, El
         return true;
     }
 
-    printf("getModuleInfo: %s\n", path.c_str());
+    //printf("getModuleInfo: %s\n", path.c_str());
 
     elf = openWithSearchPaths(path, "r");
     if (!elf) {
@@ -291,7 +431,7 @@ bool getModuleInfo(std::string &path, std::map<std::string, Module> &modules, El
         return false;
     }
 
-    dumpElfHdr(&elfHdr);
+    //dumpElfHdr(&elfHdr);
 
     progHdrs.resize(elfHdr.e_phnum);
     fseek(elf, elfHdr.e_phoff, SEEK_SET);
@@ -444,7 +584,7 @@ bool mapModule(Module &mod, std::map<std::string, Module> &modules) {
         return 1;
     }
 
-    printf("mapping %s\n", mod.name.c_str());
+    //printf("mapping %s\n", mod.name.c_str());
 
     for (int i = 0; i < mod.mappedSegments.size(); i++) {
         MappedSegment seg = mod.mappedSegments[i];
@@ -475,8 +615,8 @@ bool mapModule(Module &mod, std::map<std::string, Module> &modules) {
 
     fclose(elf);
 
-    if (!handleRelocations(mod, modules))
-        return false;
+    //if (!handleRelocations(mod, modules))
+    //    return false;   TODO
 
     return true;
 }
@@ -495,6 +635,11 @@ bool loadFirstModule(std::string name, std::map<std::string, Module> &modules) {
             fprintf(stderr, "Error while mapping %s\n", it->second.name.c_str());
             return false;
         }
+    }
+
+    // TODO put in mapModule()
+    if (!handleRelocations(modules[name], modules)) {
+        return false;
     }
     
     return true;
@@ -525,7 +670,7 @@ int main() {
 
     void (*entry)(void) = (void (*)(void)) elfHdr.e_entry; 
 
-    return 0;
+    //return 0;
 
     pthread_t ps4Thread;
     EntryPointWrapperArg arg;
