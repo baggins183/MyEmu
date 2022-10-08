@@ -598,7 +598,7 @@ bool getModuleInfo(std::string &basename, std::string pkgDumpPath, std::map<std:
     lastModuleEndAddr += mod.memSz;
     for (int i = 0; i < dynLibStrings.size(); i++) {
         std::string lib = dynLibStrings[i];
-        if (!getModuleInfo(lib, modules, lastModuleEndAddr))
+        if (!getModuleInfo(lib, pkgDumpPath, modules, lastModuleEndAddr))
             ;//return false;
     }
     fclose(elf);
