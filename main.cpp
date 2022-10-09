@@ -726,9 +726,14 @@ int main(int argc, char **argv) {
     });
     for (Module &mod: sortedModules) {
         printf("module %s, path %s\n"
-                "\tbaseVA: 0x%lx, endVA: 0x%lx, memSz: 0x%lx\n", 
+                "\tbaseVA: 0x%lx, endVA: 0x%lx, memSz: 0x%lx\n",
                 mod.name.c_str(), mod.path.c_str(), mod.baseVA, mod.baseVA + mod.memSz, mod.memSz
         );
+
+        for (Elf64_Sym &sym: mod.symbols) {
+            printf("Module: %s\n", mod.name.c_str());
+            printf("SYMBOL DUMP: %s\n", &mod.strtab[sym.st_name]);
+        }
     }
 #endif
 
@@ -736,6 +741,8 @@ int main(int argc, char **argv) {
     void (*entry)(void) = (void (*)(void)) elfHdr.e_entry; 
 
 #ifdef __linux
+
+
     return 0;
 #endif
 
