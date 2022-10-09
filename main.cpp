@@ -18,6 +18,8 @@
 #include <map>
 #include <utility>
 
+#include <algorithm>
+
 #define ROUND_DOWN(x, SZ) ((x) - (x) % (SZ))
 #define ROUND_UP(x, SZ) ( (x) % (SZ) ? (x) - ((x) % (SZ)) + (SZ) : (x))
 
@@ -100,6 +102,7 @@ struct DynamicTableInfo {
 
 struct Module {
     std::string name;
+    std::string path; // location in filesystem
     uint64_t baseVA;
     // total memory this takes from baseVA onwards
     // should be a multiple of pagesz, s.t. next module can start at this->baseVA + this->memSz
@@ -260,8 +263,7 @@ bool findSymbolDef(Elf64_Sym sym, Module &referenceLocation, std::map<std::strin
                     assert(ELF64_ST_TYPE(modSym.st_info) == ELF64_ST_TYPE(sym.st_info));
                     symDef = modSym;
                     defLocation = mod;
-                    printf("resolved GLOBAL symbol: %s, needed in module %s, found in %s\n", 
-                            origName.c_str(), referenceLocation.name.c_str(), mod.name.c_str());                    
+                    //printf("resolved GLOBAL symbol: %s, needed in module %s, found in %s\n", origName.c_str(), referenceLocation.name.c_str(), mod.name.c_str());                    
                     return true;                
                 case STB_WEAK:
                     // TODO just skip if mismatch, this is legal
@@ -283,33 +285,32 @@ bool findSymbolDef(Elf64_Sym sym, Module &referenceLocation, std::map<std::strin
     }
 
     if (found) {
-        printf("resolved WEAK symbol: %s, needed in module %s, found in %s\n", 
-                origName.c_str(), referenceLocation.name.c_str(), defLocation.name.c_str());
+        //printf("resolved WEAK symbol: %s, needed in module %s, found in %s\n", origName.c_str(), referenceLocation.name.c_str(), defLocation.name.c_str());
     }
 
     return found;
 }
 
-void printReloc(Elf64_Rela reloc, Module &mod) {
+void printReloc(Elf64_Rela reloc, Module &mod, FILE *stream = stdout) {
     Elf64_Sym sym = mod.symbols[ELF64_R_SYM(reloc.r_info)];
-    printf("reloc:\n"
-            "\ttype: %lx\n"
-            "\tsym idx: %lx\n"
-            "\tsym: %s\n"
-            "\toffset: %lx\n"
-            "\taddend: %lx\n",
+    fprintf(stream, "reloc:\n"
+                "\tr_type: %lu\n"
+                "\tsym idx: %lu\n"
+                "\tsym: %s\n"
+                "\tr_offset: 0x%lx\n"
+                "\taddend: 0x%lx\n"
+                "\tMapped Addr (mod.baseVA + r_offset): 0x%lx\n",
         ELF64_R_TYPE(reloc.r_info),
         ELF64_R_SYM(reloc.r_info),
         &mod.strtab[sym.st_name],
         reloc.r_offset,
-        reloc.r_addend
+        reloc.r_addend,
+        mod.baseVA + reloc.r_offset
     );
 }
 
 bool handleRelocations(Module &mod, std::map<std::string, Module> &modules) {
     //std::map<std::basic_string<char>, Module>::iterator it = modules.begin();
-    printf("MODULE: %s ***************************\n", mod.name.c_str());
-    printf("baseVA: 0x%lx, memSz: 0x%lx\n", mod.baseVA, mod.memSz);
     for (int j = 0; j < mod.relocs.size(); j++) {
         Elf64_Rela reloc = mod.relocs[j];
         uint64_t r_type = ELF64_R_TYPE(reloc.r_info);
@@ -327,7 +328,10 @@ bool handleRelocations(Module &mod, std::map<std::string, Module> &modules) {
             Elf64_Sym symDef;
             bool res = findSymbolDef(sym, mod, modules, defLocation, symDef);
             if (!res) {
-                fprintf(stderr, "couldn't find definition for relocation sym %s in module %s\n", symName, mod.name.c_str());
+                fprintf(stderr, "couldn't find definition for relocation sym %s in module %s, path %s\n",
+                        symName, mod.name.c_str(), mod.path.c_str()
+                );
+                printReloc(reloc, mod, stderr);
                 continue;
             }
 
@@ -341,23 +345,29 @@ bool handleRelocations(Module &mod, std::map<std::string, Module> &modules) {
                     //uint64_t value = symDef.st_value + reloc.r_addend;
                     *((uint64_t *) addr) = value;
 
-                    printf("symbol: %s, type: R_AMD64_64, addr: 0x%lx, value: 0x%lx, addend %lx, \n", symName, addr, value, reloc.r_addend);
+                    //printf("symbol: %s, type: R_AMD64_64, addr: 0x%lx, value: 0x%lx, addend %lx, \n", symName, addr, value, reloc.r_addend);
                     break;
                 }
-                case R_AMD64_PC32:
-                case R_AMD64_GOT32:
-                case R_AMD64_PLT32:
-                case R_AMD64_COPY:
-                case R_AMD64_GLOB_DAT:
                 case R_AMD64_JUMP_SLOT:
                 {
                     uint64_t addr = mod.baseVA + reloc.r_offset;
                     uint64_t value = defLocation.baseVA + symDef.st_value;
                     //uint64_t value = symDef.st_value;
                     *((uint64_t *) addr) = value;
-                    printf("symbol: %s, type: R_AMD64_JUMP_SLOT, addr: 0x%lx, value: 0x%lx, \n", symName, addr, value);
+                    //printf("symbol: %s, type: R_AMD64_JUMP_SLOT, addr: 0x%lx, value: 0x%lx, \n", symName, addr, value);
                     break;
                 }
+                case R_AMD64_DTPMOD64:
+                {
+                    // "https://chao-tic.github.io/blog/2018/12/25/tls"
+                    uint64_t addr = mod.baseVA + reloc.r_offset;
+                    fprintf(stderr, "mod %s, symbol: %s, type: R_AMD64_JUMP_SLOT, addr: 0x%lx\n", mod.name.c_str(), symName, addr);    
+                }                
+                case R_AMD64_PC32:
+                case R_AMD64_GOT32:
+                case R_AMD64_PLT32:
+                case R_AMD64_COPY:
+                case R_AMD64_GLOB_DAT:                
                 case R_AMD64_RELATIVE:
                 case R_AMD64_GOTPCREL:
                 case R_AMD64_32:
@@ -366,12 +376,6 @@ bool handleRelocations(Module &mod, std::map<std::string, Module> &modules) {
                 case R_AMD64_PC16:
                 case R_AMD64_8:
                 case R_AMD64_PC8:
-                case R_AMD64_DTPMOD64:
-                {
-                    // "https://chao-tic.github.io/blog/2018/12/25/tls"
-                    uint64_t addr = mod.baseVA + reloc.r_offset;
-                    fprintf(stderr, "mod %s, symbol: %s, type: R_AMD64_JUMP_SLOT, addr: 0x%lx\n", mod.name.c_str(), symName, addr);    
-                }
                 case R_AMD64_DTPOFF64:
                 case R_AMD64_TPOFF64:
                 case R_AMD64_TLSGD:
@@ -578,7 +582,8 @@ bool getModuleInfo(std::string &basename, std::string pkgDumpPath, std::map<std:
     //////////////////////////////////////////////////////////////////////////////////////////////////////
     assert(lastModuleEndAddr % pgsz == 0);
 
-    mod.name = fullModulePath;
+    mod.name = basename;
+    mod.path = fullModulePath;
     mod.baseVA = lastModuleEndAddr;
     mod.memSz = highestAddr;
     mod.mappedSegments = mappedSegments;
@@ -608,7 +613,7 @@ bool getModuleInfo(std::string &basename, std::string pkgDumpPath, std::map<std:
 
 // map one module into memory and do relocations
 bool mapModule(Module &mod, std::map<std::string, Module> &modules) {
-    FILE *elf = fopen(mod.name.c_str(), "r");
+    FILE *elf = fopen(mod.path.c_str(), "r");
     if (!elf) {
         fprintf(stderr, "couldn't open %s to map module\n", mod.name.c_str());
         return 1;
@@ -661,10 +666,16 @@ bool loadFirstModule(std::string name, std::string pkgDumpPath, std::map<std::st
 
     std::map<std::basic_string<char>, Module>::iterator it = modules.begin();
     for (; it != modules.end(); it++) {
-        if (!mapModule(it->second, modules)) {
+        Module &mod = it->second;
+        //printf("MODULE %s, path: %s ***************************\n", mod.name.c_str(), mod.path.c_str());
+        //printf("baseVA: 0x%lx, endVA: 0x%lx, memSz: 0x%lx\n", mod.baseVA, mod.baseVA + mod.memSz, mod.memSz);        
+
+#ifndef __linux
+        if (!mapModule(mod, modules)) {
             fprintf(stderr, "Error while mapping %s\n", it->second.name.c_str());
             return false;
         }
+#endif
     }
 
     // TODO put in mapModule()
@@ -685,7 +696,7 @@ int main(int argc, char **argv) {
     }
     std::string pkgDumpPath(argv[1]);
     
-    eboot = openWithSearchPaths(ebootPath, pkgDumpPath, "r", nullptr);
+    eboot = openWithSearchPaths(ebootPath, pkgDumpPath, "r", NULL);
     if (!eboot) {
         fprintf(stderr, "couldn't open eboot.bin\n");
         return 1;
@@ -703,9 +714,30 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    std::vector<Module> sortedModules;
+    std::map<std::basic_string<char>, Module>::iterator it = modules.begin();
+    for (; it != modules.end(); it++) {
+        sortedModules.push_back(it->second);
+    }
+    
+#ifdef __linux
+    std::sort(sortedModules.begin(), sortedModules.end(), [](const Module &a, const Module &b) -> bool {
+        return a.baseVA < b.baseVA;
+    });
+    for (Module &mod: sortedModules) {
+        printf("module %s, path %s\n"
+                "\tbaseVA: 0x%lx, endVA: 0x%lx, memSz: 0x%lx\n", 
+                mod.name.c_str(), mod.path.c_str(), mod.baseVA, mod.baseVA + mod.memSz, mod.memSz
+        );
+    }
+#endif
+
+
     void (*entry)(void) = (void (*)(void)) elfHdr.e_entry; 
 
-    //return 0;
+#ifdef __linux
+    return 0;
+#endif
 
     pthread_t ps4Thread;
     EntryPointWrapperArg arg;

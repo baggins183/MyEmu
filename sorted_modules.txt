@@ -1,0 +1,94 @@
+module eboot.bin, path .//eboot.bin
+	baseVA: 0x0, endVA: 0x33f000, memSz: 0x33f000
+module libSceSystemService.prx, path ../dynlibs/lib//libSceSystemService.sprx
+	baseVA: 0x33f000, endVA: 0x384000, memSz: 0x45000
+module libSceIpmi.prx, path ../dynlibs/lib//libSceIpmi.sprx
+	baseVA: 0x384000, endVA: 0x395000, memSz: 0x11000
+module libkernel.prx, path ../dynlibs/lib//libkernel.sprx
+	baseVA: 0x395000, endVA: 0x3e6000, memSz: 0x51000
+module libSceLibcInternal.prx, path ../dynlibs/lib//libSceLibcInternal.sprx
+	baseVA: 0x3e6000, endVA: 0x4f6000, memSz: 0x110000
+module libSceGnmDriver.prx, path ../dynlibs/lib//libSceGnmDriver.sprx
+	baseVA: 0x4f6000, endVA: 0x507000, memSz: 0x11000
+module libSceVideoOut.prx, path ../dynlibs/lib//libSceVideoOut.sprx
+	baseVA: 0x507000, endVA: 0x524000, memSz: 0x1d000
+module libSceAvSetting.prx, path ../dynlibs/lib//libSceAvSetting.sprx
+	baseVA: 0x524000, endVA: 0x535000, memSz: 0x11000
+module libSceMbus.prx, path ../dynlibs/lib//libSceMbus.sprx
+	baseVA: 0x535000, endVA: 0x546000, memSz: 0x11000
+module libSceRegMgr.prx, path ../dynlibs/lib//libSceRegMgr.sprx
+	baseVA: 0x546000, endVA: 0x54f000, memSz: 0x9000
+module libSceSysmodule.prx, path ../dynlibs/lib//libSceSysmodule.sprx
+	baseVA: 0x54f000, endVA: 0x568000, memSz: 0x19000
+module libSceRtc.prx, path ../dynlibs/lib//libSceRtc.sprx
+	baseVA: 0x568000, endVA: 0x575000, memSz: 0xd000
+module libSceSysCore.prx, path ../dynlibs/lib//libSceSysCore.sprx
+	baseVA: 0x575000, endVA: 0x582000, memSz: 0xd000
+module libSceHmd.prx, path ../dynlibs/lib//libSceHmd.sprx
+	baseVA: 0x582000, endVA: 0x61b000, memSz: 0x99000
+module libSceUsbd.prx, path ../dynlibs/lib//libSceUsbd.sprx
+	baseVA: 0x61b000, endVA: 0x634000, memSz: 0x19000
+module libSceSysUtil.prx, path ../dynlibs/lib//libSceSysUtil.sprx
+	baseVA: 0x634000, endVA: 0x63d000, memSz: 0x9000
+module libScePad.prx, path ../dynlibs/lib//libScePad.sprx
+	baseVA: 0x63d000, endVA: 0x654000, memSz: 0x17000
+module libSceUserService.prx, path ../dynlibs/lib//libSceUserService.sprx
+	baseVA: 0x654000, endVA: 0x669000, memSz: 0x15000
+module libSceAudioOut.prx, path ../dynlibs/lib//libSceAudioOut.sprx
+	baseVA: 0x669000, endVA: 0x686000, memSz: 0x1d000
+module libSceSaveData.prx, path ../dynlibs/lib//libSceSaveData.sprx
+	baseVA: 0x686000, endVA: 0x6cf000, memSz: 0x49000
+module libSceNpManager.prx, path ../dynlibs/lib//libSceNpManager.sprx
+	baseVA: 0x6cf000, endVA: 0x710000, memSz: 0x41000
+module libSceNet.prx, path ../dynlibs/lib//libSceNet.sprx
+	baseVA: 0x710000, endVA: 0x749000, memSz: 0x39000
+module libSceNetCtl.prx, path ../dynlibs/lib//libSceNetCtl.sprx
+	baseVA: 0x749000, endVA: 0x756000, memSz: 0xd000
+module libSceHttp.prx, path ../dynlibs/lib//libSceHttp.sprx
+	baseVA: 0x756000, endVA: 0x78f000, memSz: 0x39000
+module libSceSsl.prx, path ../dynlibs/lib//libSceSsl.sprx
+	baseVA: 0x78f000, endVA: 0x7e4000, memSz: 0x55000
+module libSceNpCommon.prx, path ../dynlibs/lib//libSceNpCommon.sprx
+	baseVA: 0x7e4000, endVA: 0x821000, memSz: 0x3d000
+module libSceNpTrophy.prx, path ../dynlibs/lib//libSceNpTrophy.sprx
+	baseVA: 0x821000, endVA: 0x84e000, memSz: 0x2d000
+module libSceNpToolkit2.prx, path ../dumps/Sonic_Mania/CUSA07010-app/sce_module//libSceNpToolkit2.prx
+	baseVA: 0x84e000, endVA: 0x8db000, memSz: 0x8d000
+module libSceNpWebApi.prx, path ../dynlibs/lib//libSceNpWebApi.sprx
+	baseVA: 0x8db000, endVA: 0x8f8000, memSz: 0x1d000
+module libSceNpMatching2.prx, path ../dynlibs/lib//libSceNpMatching2.sprx
+	baseVA: 0x8f8000, endVA: 0x985000, memSz: 0x8d000
+module libSceNpTus.prx, path ../dynlibs/lib//libSceNpTus.sprx
+	baseVA: 0x985000, endVA: 0x996000, memSz: 0x11000
+module libSceNpUtility.prx, path ../dynlibs/lib//libSceNpUtility.sprx
+	baseVA: 0x996000, endVA: 0x9c3000, memSz: 0x2d000
+module libSceSigninDialog.prx, path ../dynlibs/lib//libSceSigninDialog.sprx
+	baseVA: 0x9c3000, endVA: 0x9cc000, memSz: 0x9000
+module libSceNpCommerce.prx, path ../dynlibs/lib//libSceNpCommerce.sprx
+	baseVA: 0x9cc000, endVA: 0x9d5000, memSz: 0x9000
+module libSceCommonDialog.prx, path ../dynlibs/lib//libSceCommonDialog.sprx
+	baseVA: 0x9d5000, endVA: 0x9de000, memSz: 0x9000
+module libSceNpScoreRanking.prx, path ../dynlibs/lib//libSceNpScoreRanking.sprx
+	baseVA: 0x9de000, endVA: 0x9eb000, memSz: 0xd000
+module libSceNpProfileDialog.prx, path ../dynlibs/lib//libSceNpProfileDialog.sprx
+	baseVA: 0x9eb000, endVA: 0x9f4000, memSz: 0x9000
+module libSceInvitationDialog.prx, path ../dynlibs/lib//libSceInvitationDialog.sprx
+	baseVA: 0x9f4000, endVA: 0x9fd000, memSz: 0x9000
+module libSceNpAuth.prx, path ../dynlibs/lib//libSceNpAuth.sprx
+	baseVA: 0x9fd000, endVA: 0xa06000, memSz: 0x9000
+module libSceGameCustomDataDialog.prx, path ../dynlibs/lib//libSceGameCustomDataDialog.sprx
+	baseVA: 0xa06000, endVA: 0xa0f000, memSz: 0x9000
+module libSceNpSns.prx, path ../dynlibs/lib//libSceNpSns.sprx
+	baseVA: 0xa0f000, endVA: 0xa1c000, memSz: 0xd000
+module libSceNpSnsFacebookDialog.prx, path ../dynlibs/lib//libSceNpSnsFacebookDialog.sprx
+	baseVA: 0xa1c000, endVA: 0xa25000, memSz: 0x9000
+module libSceSaveDataDialog.prx, path ../dynlibs/lib//libSceSaveDataDialog.sprx
+	baseVA: 0xa25000, endVA: 0xa42000, memSz: 0x1d000
+module libSceScreenShot.prx, path ../dynlibs/lib//libSceScreenShot.sprx
+	baseVA: 0xa42000, endVA: 0xa4b000, memSz: 0x9000
+module libc.prx, path ../dumps/Sonic_Mania/CUSA07010-app/sce_module//libc.prx
+	baseVA: 0xa4b000, endVA: 0xb2c000, memSz: 0xe1000
+module libSceFios2.prx, path ../dumps/Sonic_Mania/CUSA07010-app/sce_module//libSceFios2.prx
+	baseVA: 0xb2c000, endVA: 0xb9a000, memSz: 0x6e000
+module libSceDiscMap.prx, path ../dynlibs/lib//libSceDiscMap.sprx
+	baseVA: 0xb9a000, endVA: 0xba3000, memSz: 0x9000
