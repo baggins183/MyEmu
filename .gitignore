@@ -3,4 +3,4 @@ a.out
 *.o
 NidCrypto/nid_hash
 .gdb_history
-
+.brestore.gdb

@@ -331,7 +331,7 @@ bool handleRelocations(Module &mod, std::map<std::string, Module> &modules) {
                 fprintf(stderr, "couldn't find definition for relocation sym %s in module %s, path %s\n",
                         symName, mod.name.c_str(), mod.path.c_str()
                 );
-                printReloc(reloc, mod, stderr);
+                //printReloc(reloc, mod, stderr);
                 continue;
             }
 

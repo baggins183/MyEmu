@@ -127,6 +127,10 @@ bool readKnownHashes(const char *dict_path, std::unordered_set<std::string> &kno
         known_hashes.insert(std::string((const char *) hash, len));
         hash += len;
     }
+
+    munmap(fdict_mapping, fdict_len);
+    fclose(fdict);
+
     return true;
 }
 
@@ -168,6 +172,10 @@ bool processSymbolFile(const char *symbols_path, std::unordered_set<std::string>
         checkHash((char *) sym, len, known_hashes);
         sym += len;
     }
+
+    munmap(fsym_mapping, fsym_len);
+    fclose(fsym);
+
     return true;
 }
 
