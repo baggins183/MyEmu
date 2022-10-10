@@ -405,6 +405,7 @@ FILE *openWithSearchPaths(std::string name, std::string pkgDumpPath, std::string
         /* ret */ std::string *path) {
 
     std::vector<std::string> paths;
+
     paths.push_back("./");
     paths.push_back(pkgDumpPath);
     paths.push_back(pkgDumpPath + "/sce_sys/");
