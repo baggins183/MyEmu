@@ -257,7 +257,7 @@ bool findSymbolDef(Elf64_Sym sym, Module &referenceLocation, std::map<std::strin
             uint8_t bind_type = ELF64_ST_BIND(sym.st_info);
             switch(bind_type) {
                 case STB_LOCAL:
-                    fprintf(stderr, "found local symbol matching name: %s\n", origName.c_str());
+                    //fprintf(stderr, "found local symbol matching name: %s\n", origName.c_str());
                     continue;
                 case STB_GLOBAL:
                     assert(ELF64_ST_TYPE(modSym.st_info) == ELF64_ST_TYPE(sym.st_info));
@@ -277,7 +277,8 @@ bool findSymbolDef(Elf64_Sym sym, Module &referenceLocation, std::map<std::strin
                 case STB_LOPROC:
                 case STB_HIPROC:
                 default:
-                    fprintf(stderr, "unhandled binding type: %d\n", bind_type);
+                    //fprintf(stderr, "unhandled binding type: %d\n", bind_type);
+                    break;
             }
 
             return true;
@@ -293,16 +294,19 @@ bool findSymbolDef(Elf64_Sym sym, Module &referenceLocation, std::map<std::strin
 
 void printReloc(Elf64_Rela reloc, Module &mod, FILE *stream = stdout) {
     Elf64_Sym sym = mod.symbols[ELF64_R_SYM(reloc.r_info)];
-    fprintf(stream, "reloc:\n"
-                "\tr_type: %lu\n"
-                "\tsym idx: %lu\n"
+    fprintf(stream, "RELOC DUMP: %s -> 0x%lx\n"
                 "\tsym: %s\n"
+                "\tmodule: %s\n"
+                "\tsym idx: %lu\n"                
+                "\tr_type: %lu\n"
                 "\tr_offset: 0x%lx\n"
-                "\taddend: 0x%lx\n"
+                "\tr_addend: 0x%lx\n"
                 "\tMapped Addr (mod.baseVA + r_offset): 0x%lx\n",
-        ELF64_R_TYPE(reloc.r_info),
-        ELF64_R_SYM(reloc.r_info),
+        &mod.strtab[sym.st_name], mod.baseVA + reloc.r_offset,
         &mod.strtab[sym.st_name],
+        mod.name.c_str(),
+        ELF64_R_SYM(reloc.r_info),
+        ELF64_R_TYPE(reloc.r_info),
         reloc.r_offset,
         reloc.r_addend,
         mod.baseVA + reloc.r_offset
@@ -328,9 +332,7 @@ bool handleRelocations(Module &mod, std::map<std::string, Module> &modules) {
             Elf64_Sym symDef;
             bool res = findSymbolDef(sym, mod, modules, defLocation, symDef);
             if (!res) {
-                fprintf(stderr, "couldn't find definition for relocation sym %s in module %s, path %s\n",
-                        symName, mod.name.c_str(), mod.path.c_str()
-                );
+                //fprintf(stderr, "couldn't find definition for relocation sym %s in module %s, path %s\n", symName, mod.name.c_str(), mod.path.c_str());
                 //printReloc(reloc, mod, stderr);
                 continue;
             }
@@ -361,7 +363,7 @@ bool handleRelocations(Module &mod, std::map<std::string, Module> &modules) {
                 {
                     // "https://chao-tic.github.io/blog/2018/12/25/tls"
                     uint64_t addr = mod.baseVA + reloc.r_offset;
-                    fprintf(stderr, "mod %s, symbol: %s, type: R_AMD64_JUMP_SLOT, addr: 0x%lx\n", mod.name.c_str(), symName, addr);    
+                    //fprintf(stderr, "mod %s, symbol: %s, type: R_AMD64_JUMP_SLOT, addr: 0x%lx\n", mod.name.c_str(), symName, addr);    
                 }                
                 case R_AMD64_PC32:
                 case R_AMD64_GOT32:
@@ -389,7 +391,7 @@ bool handleRelocations(Module &mod, std::map<std::string, Module> &modules) {
                 default:
                 {
                     // See the R_X86_64* types if the type is > R_AMD64_GOTPC32
-                    fprintf(stderr, "unhandled relocation type: %lu\n", r_type);
+                    //fprintf(stderr, "unhandled relocation type: %lu\n", r_type);
                     //assert(false && "unhandled relocation type");        
                 }
             }            
@@ -409,6 +411,7 @@ FILE *openWithSearchPaths(std::string name, std::string pkgDumpPath, std::string
     paths.push_back(pkgDumpPath + "/sce_module/");
     paths.push_back("libs/"),
     paths.push_back("../dynlibs/lib/");
+    paths.push_back("../../dynlibs/lib/");
 
     std::vector<std::string> basenamePermutations;
     basenamePermutations.push_back(name);
@@ -455,7 +458,7 @@ bool getModuleInfo(std::string &basename, std::string pkgDumpPath, std::map<std:
     std::string fullModulePath;
     elf = openWithSearchPaths(basename, pkgDumpPath, "r", &fullModulePath);
     if (!elf) {
-        fprintf(stderr, "couldn't open %s\n", basename.c_str());
+        //fprintf(stderr, "couldn't open %s\n", basename.c_str());
         return false;
     }
 
@@ -615,7 +618,7 @@ bool getModuleInfo(std::string &basename, std::string pkgDumpPath, std::map<std:
 bool mapModule(Module &mod, std::map<std::string, Module> &modules) {
     FILE *elf = fopen(mod.path.c_str(), "r");
     if (!elf) {
-        fprintf(stderr, "couldn't open %s to map module\n", mod.name.c_str());
+        //fprintf(stderr, "couldn't open %s to map module\n", mod.name.c_str());
         return 1;
     }
 
@@ -731,8 +734,12 @@ int main(int argc, char **argv) {
         );
 
         for (Elf64_Sym &sym: mod.symbols) {
-            printf("Module: %s\n", mod.name.c_str());
-            printf("SYMBOL DUMP: %s\n", &mod.strtab[sym.st_name]);
+            fprintf(stderr, "Module: %s\n", mod.name.c_str());
+            fprintf(stderr, "SYMBOL DUMP: %s\n", &mod.strtab[sym.st_name]);
+        }
+
+        for (Elf64_Rela &rela: mod.relocs) {
+            //printReloc(rela, mod, stderr);
         }
     }
 #endif
@@ -741,8 +748,6 @@ int main(int argc, char **argv) {
     void (*entry)(void) = (void (*)(void)) elfHdr.e_entry; 
 
 #ifdef __linux
-
-
     return 0;
 #endif
 

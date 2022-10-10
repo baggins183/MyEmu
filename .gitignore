@@ -1,6 +1,7 @@
 *.bin
 a.out
 *.o
-NidCrypto/nid_hash
+main/main
+nid_hash/nid_hash
 .gdb_history
 .brestore.gdb

@@ -20,3 +20,5 @@ end
 document brestore
   restore breakpoints saved by bsave
 end
+
+brestore
