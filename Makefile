@@ -4,13 +4,10 @@ export INC := $(realpath Common/include)
 
 #all: main nid_hash
 
-all: main nid_hash
+all: main
 
 main:
 	$(MAKE) -C main/
-
-nid_hash:
-	$(MAKE) -C nid_hash/ nid_hash
 
 clean:
 	$(MAKE) -C main/ clean

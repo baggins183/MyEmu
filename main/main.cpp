@@ -1,3 +1,4 @@
+#include "Common.h"
 #include "elf-sce.h"
 #include "elf_amd64.h"
 #ifdef __linux
@@ -19,14 +20,14 @@
 #include <utility>
 
 #include <algorithm>
+#include "../nid_hash/nid_hash.h"
 
 #define ROUND_DOWN(x, SZ) ((x) - (x) % (SZ))
 #define ROUND_UP(x, SZ) ( (x) % (SZ) ? (x) - ((x) % (SZ)) + (SZ) : (x))
 
-#define ARRLEN(arr) ( sizeof(arr) / sizeof(arr[0]) )
-
-static void dumpElfHdr(Elf64_Ehdr *elfHdr) {
+static void dumpElfHdr(const char *name, Elf64_Ehdr *elfHdr) {
     printf("ELF HEADER DUMP:\n"
+        "name: %s\n"
         "\te_ident: %s\n"
         "\te_type: %d\n"
         "\te_machine: %d\n"
@@ -40,6 +41,7 @@ static void dumpElfHdr(Elf64_Ehdr *elfHdr) {
         "\te_shentsize: %d\n"
         "\te_shnum: %d\n"
         "\te_shstrndx: %d\n",
+        name,
         elfHdr->e_ident,
         elfHdr->e_type,
         elfHdr->e_machine,
@@ -58,18 +60,35 @@ static void dumpElfHdr(Elf64_Ehdr *elfHdr) {
 
 const long pgsz = sysconf(_SC_PAGE_SIZE);
 
+struct CmdConfig {
+    bool dumpElfHeader;
+    bool dumpRelocs;
+    bool dumpModuleInfo;
+    bool dumpSymbols;
+    std::string pkgDumpPath;
+
+};
+
+CmdConfig CmdArgs;
 
 struct EntryPointWrapperArg {
     Elf64_Addr entryPointAddr;
+    Ps4EntryArg entryArg;
 };
 
+static void ps4ThreadExitFn(void) {
+    printf("ps4 thread exited\n");
+}
+
 static void *ps4EntryWrapper(void *arg) {
-    Elf64_Addr entryPoint = ((EntryPointWrapperArg *) arg)->entryPointAddr;
-    void (*entryFn)(void) = (void (*)(void)) entryPoint;
+    EntryPointWrapperArg *wrapperArg = (EntryPointWrapperArg *) arg;
+    Elf64_Addr entryPoint = wrapperArg->entryPointAddr;
+    //void (*entryFn)(void) = (void (*)(void)) entryPoint;
+    PFUNC_GameTheadEntry entryFn = (PFUNC_GameTheadEntry) entryPoint;
 
     printf("in ps4EntryWrapper()\n");
 
-    entryFn();
+    entryFn((void *) &wrapperArg->entryArg, ps4ThreadExitFn);
     return NULL;
 }
 
@@ -117,6 +136,7 @@ struct Module {
     std::vector<char> strtab;
     std::vector<Elf64_Rela> relocs;
     std::vector<Elf64_Sym> symbols;
+    bool isNative;
 };
 
 static bool processDynamicSegment(Elf64_Phdr *phdr, FILE *elf, DynamicTableInfo &info) {
@@ -213,31 +233,44 @@ static bool processDynamicSegment(Elf64_Phdr *phdr, FILE *elf, DynamicTableInfo 
     return true;
 }
 
+static bool isHashedSymbol(const std::string &sym) {
+    if (sym.length() == 15) {
+        std::string suffix = sym.substr(11);
+        return suffix[0] == '#' && suffix[2] == '#' 
+            /* && suffix[1] >= 'A' && suffix[1] <= 'Z' && suffix[3] >= 'A' && suffix[3] <= 'Z' */;
+    }
+    return false;
+}
+
+// if ref is hash:
+//      if def is hash:
+//          compare
+//      else:
+//          hash def
+//          compare
+// else:
+//      look for exact match (not hash)
 bool findSymbolDef(Elf64_Sym sym, Module &referenceLocation, std::map<std::string, Module> &modules,  
                 /* ret */Module &defLocation, Elf64_Sym &symDef) {
-    bool isHashed = false;
-    std::string symName(&referenceLocation.strtab[sym.st_name]);
-    std::string origName = symName;
+    std::string refName(&referenceLocation.strtab[sym.st_name]);
+    std::string origName = refName;
 
-    if (symName.length() == 15) {
-        std::string suffix = symName.substr(11);
-        if (suffix[0] == '#' && suffix[2] == '#') {
-            isHashed = true;
-            symName = symName.substr(0, 11);
-        }
-    }
+    std::vector<std::string> moduleOverrides;
+    moduleOverrides.push_back("all.sprx");
+    std::vector<std::string> searchPaths;
+
+    searchPaths.insert(searchPaths.end(), moduleOverrides.begin(), moduleOverrides.end());
+    searchPaths.insert(searchPaths.end(), referenceLocation.neededLibsStrings.begin(), referenceLocation.neededLibsStrings.end());
 
     bool found = false;
-
-    for (int i = 0; i < referenceLocation.neededLibsStrings.size(); i++) {
-        std::string modName = referenceLocation.neededLibsStrings[i];
+    for (uint i = 0; i < searchPaths.size(); i++) {
+        std::string modName = searchPaths[i];
         if (modules.find(modName) == modules.end()) {
             continue;
         }
         Module &mod = modules[modName];
-        bool found = false;
 
-        for (int i = 0; i < mod.symbols.size(); i++) {
+        for (uint i = 0; i < mod.symbols.size(); i++) {
             Elf64_Sym modSym = mod.symbols[i];
 
             if (modSym.st_value == STN_UNDEF) {
@@ -246,11 +279,20 @@ bool findSymbolDef(Elf64_Sym sym, Module &referenceLocation, std::map<std::strin
 
             std::string defName(&mod.strtab[modSym.st_name]);
 
-            if (isHashed) {
-                defName = defName.substr(0, 11);
-            }
+            if (isHashedSymbol(refName)) {
+                std::string hashedDef;
+                if (isHashedSymbol(defName)) {
+                    hashedDef = defName;
+                } else {
+                    char hash[12];
+                    calculateNid(defName.c_str(), defName.size(), hash);           
+                    hashedDef = std::string(hash);
+                } 
 
-            if (symName != defName) {
+                if (refName.substr(0, 11) != hashedDef.substr(0, 11)) {
+                    continue;
+                }
+            } else if (refName != defName) {
                 continue;
             }
 
@@ -263,13 +305,14 @@ bool findSymbolDef(Elf64_Sym sym, Module &referenceLocation, std::map<std::strin
                     assert(ELF64_ST_TYPE(modSym.st_info) == ELF64_ST_TYPE(sym.st_info));
                     symDef = modSym;
                     defLocation = mod;
-                    //printf("resolved GLOBAL symbol: %s, needed in module %s, found in %s\n", origName.c_str(), referenceLocation.name.c_str(), mod.name.c_str());                    
+                    printf("resolved GLOBAL symbol: %s, needed in module %s, found in %s\n", origName.c_str(), referenceLocation.name.c_str(), mod.name.c_str());                    
                     return true;                
                 case STB_WEAK:
                     // TODO just skip if mismatch, this is legal
                     assert(ELF64_ST_TYPE(modSym.st_info) == ELF64_ST_TYPE(sym.st_info));
                     symDef = modSym;
                     defLocation = mod;
+                    found = true;
                     break;                
                 //case STB_NUM: // not defined in FreeBSD 9.0
                 case STB_LOOS:
@@ -313,9 +356,14 @@ void printReloc(Elf64_Rela reloc, Module &mod, FILE *stream = stdout) {
     );
 }
 
+void printModuleInfo(Module &mod, FILE *stream = stdout) {
+    printf("MODULE %s, path: %s ***************************\n", mod.name.c_str(), mod.path.c_str());
+    printf("baseVA: 0x%lx, endVA: 0x%lx, memSz: 0x%lx\n", mod.baseVA, mod.baseVA + mod.memSz, mod.memSz);
+}
+
 bool handleRelocations(Module &mod, std::map<std::string, Module> &modules) {
     //std::map<std::basic_string<char>, Module>::iterator it = modules.begin();
-    for (int j = 0; j < mod.relocs.size(); j++) {
+    for (uint j = 0; j < mod.relocs.size(); j++) {
         Elf64_Rela reloc = mod.relocs[j];
         uint64_t r_type = ELF64_R_TYPE(reloc.r_info);
         uint64_t symIdx = ELF64_R_SYM(reloc.r_info);
@@ -332,7 +380,7 @@ bool handleRelocations(Module &mod, std::map<std::string, Module> &modules) {
             Elf64_Sym symDef;
             bool res = findSymbolDef(sym, mod, modules, defLocation, symDef);
             if (!res) {
-                //fprintf(stderr, "couldn't find definition for relocation sym %s in module %s, path %s\n", symName, mod.name.c_str(), mod.path.c_str());
+                fprintf(stderr, "couldn't find definition for relocation sym %s in module %s, path %s\n", symName, mod.name.c_str(), mod.path.c_str());
                 //printReloc(reloc, mod, stderr);
                 continue;
             }
@@ -347,7 +395,7 @@ bool handleRelocations(Module &mod, std::map<std::string, Module> &modules) {
                     //uint64_t value = symDef.st_value + reloc.r_addend;
                     *((uint64_t *) addr) = value;
 
-                    //printf("symbol: %s, type: R_AMD64_64, addr: 0x%lx, value: 0x%lx, addend %lx, \n", symName, addr, value, reloc.r_addend);
+                    printf("symbol: %s, type: R_AMD64_64, addr: 0x%lx, value: 0x%lx, addend %lx, \n", symName, addr, value, reloc.r_addend);
                     break;
                 }
                 case R_AMD64_JUMP_SLOT:
@@ -356,13 +404,13 @@ bool handleRelocations(Module &mod, std::map<std::string, Module> &modules) {
                     uint64_t value = defLocation.baseVA + symDef.st_value;
                     //uint64_t value = symDef.st_value;
                     *((uint64_t *) addr) = value;
-                    //printf("symbol: %s, type: R_AMD64_JUMP_SLOT, addr: 0x%lx, value: 0x%lx, \n", symName, addr, value);
+                    printf("symbol: %s, type: R_AMD64_JUMP_SLOT, addr: 0x%lx, value: 0x%lx, \n", symName, addr, value);
                     break;
                 }
                 case R_AMD64_DTPMOD64:
                 {
                     // "https://chao-tic.github.io/blog/2018/12/25/tls"
-                    uint64_t addr = mod.baseVA + reloc.r_offset;
+                    //uint64_t addr = mod.baseVA + reloc.r_offset;
                     //fprintf(stderr, "mod %s, symbol: %s, type: R_AMD64_JUMP_SLOT, addr: 0x%lx\n", mod.name.c_str(), symName, addr);    
                 }                
                 case R_AMD64_PC32:
@@ -401,32 +449,31 @@ bool handleRelocations(Module &mod, std::map<std::string, Module> &modules) {
     return true;
 }
 
-FILE *openWithSearchPaths(std::string name, std::string pkgDumpPath, std::string mode, 
+FILE *openWithSearchPaths(std::string name, std::string mode, 
         /* ret */ std::string *path) {
 
     std::vector<std::string> paths;
 
     paths.push_back("./");
-    paths.push_back(pkgDumpPath);
-    paths.push_back(pkgDumpPath + "/sce_sys/");
-    paths.push_back(pkgDumpPath + "/sce_module/");
-    paths.push_back("libs/"),
-    paths.push_back("../dynlibs/lib/");
+    paths.push_back(CmdArgs.pkgDumpPath);
+    paths.push_back(CmdArgs.pkgDumpPath + "/sce_sys/");
+    paths.push_back(CmdArgs.pkgDumpPath + "/sce_module/");
     paths.push_back("../../dynlibs/lib/");
+    paths.push_back("../library_overloads/");
 
     std::vector<std::string> basenamePermutations;
     basenamePermutations.push_back(name);
 
     // TODO replace .prx extension with .sprx
-    int extPos = name.find_last_of('.');
+    size_t extPos = name.find_last_of('.');
     if (extPos != std::string::npos && name.substr(extPos) == ".prx") {
         std::string sprx = name.substr(0, extPos) + ".sprx";
         basenamePermutations.push_back(sprx);
     }
 
     FILE *file;
-    for (int i = 0; i < paths.size(); i++) {
-        for (int j = 0; j < basenamePermutations.size(); j++) {
+    for (uint i = 0; i < paths.size(); i++) {
+        for (uint j = 0; j < basenamePermutations.size(); j++) {
             std::string basename = basenamePermutations[j];
             std::string fpath = std::string(paths[i]) + std::string("/") + basename;
             file = fopen(fpath.c_str(), mode.c_str());
@@ -441,10 +488,59 @@ FILE *openWithSearchPaths(std::string name, std::string pkgDumpPath, std::string
     return NULL;
 }
 
+bool parseNativeDynamicInfo(DynamicTableInfo dynTableInfo, FILE *elf, /* ret */
+                    std::vector<char> &strtab, 
+                    std::vector<std::string> &dynLibStrings,
+                    std::vector<Elf64_Rela> &relocs,
+                    std::vector<Elf64_Sym> &symbols) {
+    
+    
+    std::vector<unsigned char> dynLibDataContents(dynTableInfo.dynlibdataPHdr.p_filesz);
+    fseek(elf, dynTableInfo.dynlibdataPHdr.p_offset, SEEK_SET);
+    if (1 != fread(dynLibDataContents.data(), dynTableInfo.dynlibdataPHdr.p_filesz, 1, elf)) {
+        return false;
+    }
+
+    for (uint i = 0; i < dynTableInfo.neededLibs.size(); i++) {
+        uint64_t strOff = dynTableInfo.strtabOff + dynTableInfo.neededLibs[i];
+        std::string path((char *) &dynLibDataContents[strOff]);
+        dynLibStrings.push_back(path);
+    }
+
+    for (uint i = 0; i < (dynTableInfo.jmprelSz + dynTableInfo.relaSz) / dynTableInfo.relaEntSz; i++) {
+        // handle endianess TODO
+        uint64_t relaOff = dynTableInfo.jmprelOff + i * dynTableInfo.relaEntSz;
+        Elf64_Rela *ent = (Elf64_Rela *) &dynLibDataContents[relaOff];
+        relocs.push_back(*ent);
+    }
+
+    for (uint i = 0; i < dynTableInfo.symtabSz / dynTableInfo.symtabEntSz; i++) {
+        // handle endianess TODO
+        uint64_t symOff = dynTableInfo.symtabOff + i * dynTableInfo.symtabEntSz;
+        Elf64_Sym *ent = (Elf64_Sym *) &dynLibDataContents[symOff];
+        symbols.push_back(*ent);
+    }
+
+    strtab.resize(dynTableInfo.strtabSz);
+    memcpy(strtab.data(), &dynLibDataContents[dynTableInfo.strtabOff], dynTableInfo.strtabSz);
+
+    return true;
+}
+
+bool parseHostDynamicInfo(FILE *elf, Elf64_Ehdr elfHdr, /* ret */
+                    std::vector<char> &strtab, 
+                    std::vector<std::string> &dynLibStrings,
+                    std::vector<Elf64_Rela> &relocs,
+                    std::vector<Elf64_Sym> &symbols) {
+    return true;
+}
+
 // fill out Module struct with metadata for module at given path and put in Module table
 // don't decide on baseVA yet
 // recurse to other necessary modules
-bool getModuleInfo(std::string &basename, std::string pkgDumpPath, std::map<std::string, Module> &modules, Elf64_Addr &lastModuleEndAddr) {
+
+// TODO change or make different function for custom compiled modules that reads traditional section hdrs and symtab
+bool getModuleInfo(std::string basename, bool isNative, std::map<std::string, Module> &modules, Elf64_Addr &lastModuleEndAddr) {
     FILE *elf;
     Module mod;
     DynamicTableInfo dynTableInfo;
@@ -457,7 +553,7 @@ bool getModuleInfo(std::string &basename, std::string pkgDumpPath, std::map<std:
     //printf("getModuleInfo: %s\n", path.c_str());
 
     std::string fullModulePath;
-    elf = openWithSearchPaths(basename, pkgDumpPath, "r", &fullModulePath);
+    elf = openWithSearchPaths(basename, "r", &fullModulePath);
     if (!elf) {
         //fprintf(stderr, "couldn't open %s\n", basename.c_str());
         return false;
@@ -469,7 +565,9 @@ bool getModuleInfo(std::string &basename, std::string pkgDumpPath, std::map<std:
         return false;
     }
 
-    //dumpElfHdr(&elfHdr);
+    if (CmdArgs.dumpElfHeader) {
+        dumpElfHdr(basename.c_str(), &elfHdr);
+    }
 
     progHdrs.resize(elfHdr.e_phnum);
     fseek(elf, elfHdr.e_phoff, SEEK_SET);
@@ -479,7 +577,7 @@ bool getModuleInfo(std::string &basename, std::string pkgDumpPath, std::map<std:
 
     std::vector<MappedSegment> mappedSegments;
 
-    for (int i = 0; i < progHdrs.size(); i++) {
+    for (uint i = 0; i < progHdrs.size(); i++) {
         Elf64_Phdr *phdr = &progHdrs[i];
         // guarantees that we can put dynamic libraries in memory at the start of the next page after the last module ended
 //        assert(pgsz % phdr->p_align == 0);
@@ -498,6 +596,8 @@ bool getModuleInfo(std::string &basename, std::string pkgDumpPath, std::map<std:
             //case PT_SCE_MODULEPARAM:
             //case PT_SCE_PROCPARAM:
             {
+                // TODO make it so all PIC shared libs start at 0
+
                 uint64_t mappingStart = ROUND_DOWN(phdr->p_vaddr, pgsz);
                 // should be last byte on a page
                 uint64_t mappingEnd = ROUND_UP(phdr->p_vaddr + phdr->p_filesz - 1, pgsz) - 1;
@@ -507,7 +607,7 @@ bool getModuleInfo(std::string &basename, std::string pkgDumpPath, std::map<std:
                 segA.mSize = mappingSize;
 
                 bool shouldCreateSeg = true;
-                for (int j = 0; j < mappedSegments.size(); j++) {
+                for (uint j = 0; j < mappedSegments.size(); j++) {
                     MappedSegment segB = mappedSegments[j];
                     // see if  intervals overlap in some way
                     if (segA.mStart > segB.mStart) {
@@ -543,7 +643,7 @@ bool getModuleInfo(std::string &basename, std::string pkgDumpPath, std::map<std:
     }
 
     Elf64_Off highestAddr = 0;
-    for (int i = 0; i < mappedSegments.size(); i++) {
+    for (uint i = 0; i < mappedSegments.size(); i++) {
         MappedSegment *seg = &mappedSegments[i];
         assert(seg->mSize % pgsz == 0);
         highestAddr = std::max(highestAddr, seg->mStart + seg->mSize);
@@ -553,34 +653,16 @@ bool getModuleInfo(std::string &basename, std::string pkgDumpPath, std::map<std:
     // parse dynlibdata for relocations, symbols, strings
 
     std::vector<unsigned char> dynLibDataContents;
+    std::vector<char> strtab;
     std::vector<std::string> dynLibStrings;
     std::vector<Elf64_Rela> relocs;
     std::vector<Elf64_Sym> symbols;
 
-    dynLibDataContents.resize(dynTableInfo.dynlibdataPHdr.p_filesz);
-    fseek(elf, dynTableInfo.dynlibdataPHdr.p_offset, SEEK_SET);
-    if (1 != fread(dynLibDataContents.data(), dynTableInfo.dynlibdataPHdr.p_filesz, 1, elf)) {
-        return false;
-    }
-
-    for (int i = 0; i < dynTableInfo.neededLibs.size(); i++) {
-        uint64_t strOff = dynTableInfo.strtabOff + dynTableInfo.neededLibs[i];
-        std::string path((char *) &dynLibDataContents[strOff]);
-        dynLibStrings.push_back(path);
-    }
-
-    for (int i = 0; i < (dynTableInfo.jmprelSz + dynTableInfo.relaSz) / dynTableInfo.relaEntSz; i++) {
-        // handle endianess TODO
-        uint64_t relaOff = dynTableInfo.jmprelOff + i * dynTableInfo.relaEntSz;
-        Elf64_Rela *ent = (Elf64_Rela *) &dynLibDataContents[relaOff];
-        relocs.push_back(*ent);
-    }
-
-    for (int i = 0; i < dynTableInfo.symtabSz / dynTableInfo.symtabEntSz; i++) {
-        // handle endianess TODO
-        uint64_t symOff = dynTableInfo.symtabOff + i * dynTableInfo.symtabEntSz;
-        Elf64_Sym *ent = (Elf64_Sym *) &dynLibDataContents[symOff];
-        symbols.push_back(*ent);
+    if (isNative) {
+        if (!parseNativeDynamicInfo(dynTableInfo, elf, strtab, dynLibStrings, relocs, symbols))
+            return false;
+    } else {
+        
     }
 
     //////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -595,19 +677,18 @@ bool getModuleInfo(std::string &basename, std::string pkgDumpPath, std::map<std:
     mod.dynTableInfo = dynTableInfo;
     mod.neededLibsStrings = dynLibStrings;
 
-    mod.strtab.resize(dynTableInfo.strtabSz);
-    memcpy(mod.strtab.data(), &dynLibDataContents[dynTableInfo.strtabOff], dynTableInfo.strtabSz);
+    mod.strtab = strtab;
 
     mod.relocs = relocs;
     mod.symbols = symbols;
-    // TODO
+    mod.isNative = isNative;
 
     modules[basename] = mod;
 
     lastModuleEndAddr += mod.memSz;
-    for (int i = 0; i < dynLibStrings.size(); i++) {
+    for (uint i = 0; i < dynLibStrings.size(); i++) {
         std::string lib = dynLibStrings[i];
-        if (!getModuleInfo(lib, pkgDumpPath, modules, lastModuleEndAddr))
+        if (!getModuleInfo(lib, true, modules, lastModuleEndAddr))
             ;//return false;
     }
     fclose(elf);
@@ -619,13 +700,11 @@ bool getModuleInfo(std::string &basename, std::string pkgDumpPath, std::map<std:
 bool mapModule(Module &mod, std::map<std::string, Module> &modules) {
     FILE *elf = fopen(mod.path.c_str(), "r");
     if (!elf) {
-        //fprintf(stderr, "couldn't open %s to map module\n", mod.name.c_str());
+        fprintf(stderr, "couldn't open %s to map module\n", mod.name.c_str());
         return 1;
     }
 
-    //printf("mapping %s\n", mod.name.c_str());
-
-    for (int i = 0; i < mod.mappedSegments.size(); i++) {
+    for (uint i = 0; i < mod.mappedSegments.size(); i++) {
         MappedSegment seg = mod.mappedSegments[i];
         void *addr = mmap((void *) (mod.baseVA + seg.mStart), seg.mSize, 
                 PROT_EXEC | PROT_READ | PROT_WRITE,
@@ -635,7 +714,7 @@ bool mapModule(Module &mod, std::map<std::string, Module> &modules) {
     }
 
     std::vector<unsigned char> buf;
-    for (int i = 0; i < mod.pHeaders.size(); i++) {
+    for (uint i = 0; i < mod.pHeaders.size(); i++) {
         Elf64_Phdr *phdr = &mod.pHeaders[i];
         switch (phdr->p_type) {
             case PT_LOAD:
@@ -660,33 +739,74 @@ bool mapModule(Module &mod, std::map<std::string, Module> &modules) {
     return true;
 }
 
+bool loadCustomModules(std::map<std::string, Module> &modules, Elf64_Addr &lastModuleEndAddr) {
+    const char *overrides[] = {
+        "all.so"
+    };
+
+    for (uint i = 0; i < ARRLEN(overrides); i++) {
+        if (!getModuleInfo(std::string(overrides[i]), false, modules, lastModuleEndAddr)) {
+            fprintf(stderr, "couldn't load custom module %s\n", overrides[i]);
+            return false;
+        }
+    }
+
+    return true;
+}
+
 // get info about all necessary dynamic libraries, map process memory, and do relocations
-bool loadFirstModule(std::string name, std::string pkgDumpPath, std::map<std::string, Module> &modules) {
+bool loadFirstModule(std::string name, std::map<std::string, Module> &modules) {
     Elf64_Addr lastModuleEndAddr = 0;
-    if (!getModuleInfo(name, pkgDumpPath, modules, lastModuleEndAddr))
+    if (!getModuleInfo(name, true, modules, lastModuleEndAddr))
         return false;
 
-    //mapModule(modules["eboot.bin"], modules);
+    // load our own modules that we want to take precedence during relocations
+    // names of these modules should be different from any requested in ps4 ELF's
+    if (!loadCustomModules(modules, lastModuleEndAddr))  {
+        return false;
+    }
 
     std::map<std::basic_string<char>, Module>::iterator it = modules.begin();
     for (; it != modules.end(); it++) {
-        Module &mod = it->second;
-        //printf("MODULE %s, path: %s ***************************\n", mod.name.c_str(), mod.path.c_str());
-        //printf("baseVA: 0x%lx, endVA: 0x%lx, memSz: 0x%lx\n", mod.baseVA, mod.baseVA + mod.memSz, mod.memSz);        
-
 #ifndef __linux
+        Module &mod = it->second;
         if (!mapModule(mod, modules)) {
             fprintf(stderr, "Error while mapping %s\n", it->second.name.c_str());
             return false;
         }
 #endif
     }
-
-    // TODO put in mapModule()
-    //if (!handleRelocations(modules[name], modules))
-        //return false;
     
     return true;
+}
+
+bool parseCmdArgs(int argc, char **argv) {
+    if (argc < 2) {
+        fprintf(stderr, "usage: %s [options] <PATH TO PKG DUMP>\n", argv[0]);
+        exit(1);
+    }
+
+    for (int i = 1; i < argc - 1; i++) {
+        if (!strcmp(argv[i], "--dump_elf_header")) {
+            CmdArgs.dumpElfHeader = true;
+        } else if (!strcmp(argv[i], "--dump_relocs")) {
+            CmdArgs.dumpRelocs = true;
+        } else if (!strcmp(argv[i], "--dump_module_info")) {
+            CmdArgs.dumpModuleInfo = true;
+        }else if (!strcmp(argv[i], "--dump_symbols")) {
+            CmdArgs.dumpSymbols = true;
+        } else {
+            fprintf(stderr, "Unrecognized cmd arg: %s\n", argv[i]);
+            return false;
+        }
+    }
+
+    CmdArgs.pkgDumpPath = argv[argc - 1];
+    return true;
+}
+
+bool modulelambda(Module &a, Module &b) {
+    return a.baseVA < b.baseVA;    
 }
 
 int main(int argc, char **argv) {
@@ -694,13 +814,11 @@ int main(int argc, char **argv) {
     FILE *eboot;
     std::map<std::string, Module> modules;
 
-    if (argc < 2) {
-        fprintf(stderr, "usage: %s <PATH TO PKG DUMP>\n", argv[0]);
-        exit(1);
+    if (!parseCmdArgs(argc, argv)) {
+        return 1;
     }
-    std::string pkgDumpPath(argv[1]);
     
-    eboot = openWithSearchPaths(ebootPath, pkgDumpPath, "r", NULL);
+    eboot = openWithSearchPaths(ebootPath, "r", NULL);
     if (!eboot) {
         fprintf(stderr, "couldn't open eboot.bin\n");
         return 1;
@@ -714,7 +832,7 @@ int main(int argc, char **argv) {
 
     // loadEntryModule will open file again
     fclose(eboot);
-    if ( !loadFirstModule(ebootPath, pkgDumpPath, modules)) {
+    if ( !loadFirstModule(ebootPath, modules)) {
         return 1;
     }
 
@@ -723,38 +841,42 @@ int main(int argc, char **argv) {
     for (; it != modules.end(); it++) {
         sortedModules.push_back(it->second);
     }
-    
+
 #ifdef __linux
     std::sort(sortedModules.begin(), sortedModules.end(), [](const Module &a, const Module &b) -> bool {
         return a.baseVA < b.baseVA;
     });
     for (Module &mod: sortedModules) {
-        printf("module %s, path %s\n"
-                "\tbaseVA: 0x%lx, endVA: 0x%lx, memSz: 0x%lx\n",
-                mod.name.c_str(), mod.path.c_str(), mod.baseVA, mod.baseVA + mod.memSz, mod.memSz
-        );
-
-        for (Elf64_Sym &sym: mod.symbols) {
-            fprintf(stderr, "Module: %s\n", mod.name.c_str());
-            fprintf(stderr, "SYMBOL DUMP: %s\n", &mod.strtab[sym.st_name]);
+        if (CmdArgs.dumpModuleInfo) {
+            printModuleInfo(mod);
         }
 
-        for (Elf64_Rela &rela: mod.relocs) {
-            //printReloc(rela, mod, stderr);
+        if (CmdArgs.dumpSymbols) {
+            for (Elf64_Sym &sym: mod.symbols) {
+                fprintf(stderr, "Module: %s\n", mod.name.c_str());
+                fprintf(stderr, "SYMBOL DUMP: %s\n", &mod.strtab[sym.st_name]);
+            }
+        }
+
+        if (CmdArgs.dumpRelocs) {
+            for (Elf64_Rela &rela: mod.relocs) {
+                printReloc(rela, mod, stderr);
+            }
         }
     }
-#endif
 
-
-    void (*entry)(void) = (void (*)(void)) elfHdr.e_entry; 
-
-#ifdef __linux
     return 0;
 #endif
 
     pthread_t ps4Thread;
     EntryPointWrapperArg arg;
     arg.entryPointAddr = elfHdr.e_entry;
+
+    Ps4EntryArg entryArg;
+    entryArg.argc = 1;
+    entryArg.argv[0] = "eboot.bin";
+    arg.entryArg = entryArg;
+
     pthread_create(&ps4Thread, NULL, &ps4EntryWrapper, (void *) &arg);
     pthread_join(ps4Thread, NULL);
 

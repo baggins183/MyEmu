@@ -1,4 +1,5 @@
 CC := g++
+CARGS := -Wall
 UNAME := $(shell uname)
 INC := $(INC) include/ ./
 
@@ -10,8 +11,8 @@ endif
 
 HEADERS := $(foreach dir, $(INC), $(wildcard $(dir)/*.h))
 
-main: main.cpp $(HEADERS)
-	$(CC) $(addprefix -I, $(INC)) -g -fpie $(LD_ARGS) main.cpp -o $@ -lpthread
+main: main.cpp $(HEADERS) ../nid_hash/nid_hash.h ../nid_hash/nid_hash.cpp
+	$(CC) $(CARGS) $(addprefix -I, $(INC)) -g -fpie $(LD_ARGS) -o $@ main.cpp ../nid_hash/nid_hash.cpp -lpthread -lcrypto
 
 clean:
 	rm -f main *.bin *.o
