@@ -160,70 +160,133 @@ static bool processDynamicSegment(Elf64_Phdr *phdr, FILE *elf, DynamicTableInfo 
             break;
         }
 
-        uint64_t val = entry.d_un.d_val;
         switch(entry.d_tag) {
-            case DT_SCE_HASH:
-                info.hashOff = val;
-                break;
-            case DT_SCE_HASHSZ:
-                info.hashSz = val;
-                break;
-            case DT_SCE_STRTAB:
-                info.strtabOff = val;
-                break;
-            case DT_SCE_STRSZ:
-                info.strtabSz = val;
-                break;
-            case DT_SCE_SYMTAB:
-                info.symtabOff = val;
-                break;
-            case DT_SCE_SYMTABSZ:
-                info.symtabSz = val;
-                break;
-            case DT_SCE_SYMENT:
-                info.symtabEntSz = val;
-                break;
-            case DT_SCE_RELA:
-                info.relaOff = val;
-                break;
-            case DT_SCE_RELASZ:
-                info.relaSz = val;
-                break;
-            case DT_SCE_RELAENT:
-                info.relaEntSz = val;
-                break;
-            case DT_SCE_PLTGOT:
-                info.pltgotOff = val;
-                break;
-            case DT_SCE_PLTRELSZ:
-                info.jmprelSz = val;
-                break;
-            case DT_SCE_PLTREL:
-                assert(val == DT_RELA);
-                info.pltrel = val;
-                break;
-            case DT_SCE_JMPREL:
-                info.jmprelOff = val;
-                break;
-            case DT_DEBUG:
-            case DT_TEXTREL:
-                assert(val == 0);
-                break;
-            case DT_FLAGS:
-                //assert(val == DF_TEXTREL);
+            case DT_NULL:
                 break;
             case DT_NEEDED:
-                info.neededLibs.push_back(val);
+                info.neededLibs.push_back(entry.d_un.d_val);
+                break;
+            case DT_PLTRELSZ:
+                info.jmprelSz = entry.d_un.d_val; // TODO check this
+                break;
+            case DT_PLTGOT:
+                info.pltgotOff = entry.d_un.d_ptr;
+                break;
+            case DT_HASH:
+                info.hashOff = entry.d_un.d_ptr;
+                break;
+            case DT_STRTAB:
+                info.strtabOff = entry.d_un.d_ptr;
+                break;
+            case DT_SYMTAB:
+                info.symtabOff = entry.d_un.d_ptr;
+                break;
+            case DT_RELA:
+                info.relaOff = entry.d_un.d_ptr;            
+                break;
+            case DT_RELASZ:
+                info.relaSz = entry.d_un.d_val;
+                break;
+            case DT_RELAENT:
+                info.relaEntSz = entry.d_un.d_val;
+                break;
+            case DT_STRSZ:
+                info.strtabSz = entry.d_un.d_val;
+                break;
+            case DT_SYMENT:
+                info.symtabEntSz = entry.d_un.d_val;
+                break;
+            case DT_PLTREL:
+                assert(entry.d_un.d_val == DT_RELA);
+                info.pltrel = entry.d_un.d_val;            
+                break;
+            case DT_JMPREL:
+                info.jmprelOff = entry.d_un.d_ptr;
+                break;                
+            case DT_INIT:
+            case DT_FINI:
+            case DT_SONAME:
+            case DT_RPATH:
+            case DT_SYMBOLIC:
+            case DT_REL:
+            case DT_RELSZ:
+            case DT_RELENT:
+            case DT_DEBUG:
+            case DT_TEXTREL:
+            case DT_BIND_NOW:
+            case DT_INIT_ARRAY:
+            case DT_FINI_ARRAY:
+            case DT_INIT_ARRAYSZ:
+            case DT_FINI_ARRAYSZ:
+            case DT_RUNPATH:
+            case DT_FLAGS:
+            case DT_ENCODING:
+            case DT_PREINIT_ARRAYSZ:
+            case DT_SYMTAB_SHNDX:
+            case DT_RELRSZ:
+            case DT_RELR:
+            case DT_RELRENT:
+            case DT_NUM:
+            case DT_LOOS:
+            case DT_HIOS:
+            default:
+                break;
+        }
+
+        //uint64_t val = entry.d_un.d_val;
+        switch(entry.d_tag) {
+            case DT_SCE_NEEDED_MODULE:
+                info.neededModules.push_back(entry.d_un.d_val);
+                //printf("dyn case DT_SCE_NEEDED_MODULE: %lx\n", val);
                 break;
             case DT_SCE_IMPORT_LIB:
                 //printf("dyn case DT_SCE_IMPORT_LIB: %lx\n", val);
                 break;
             case DT_SCE_IMPORT_LIB_ATTR:
                 //printf("dyn case DT_SCE_IMPORT_LIB_ATTR: %lx\n", val);
+                break;                       
+            case DT_SCE_HASH:
+                info.hashOff = entry.d_un.d_ptr;
                 break;
-            case DT_SCE_NEEDED_MODULE:
-                info.neededModules.push_back(val);
-                //printf("dyn case DT_SCE_NEEDED_MODULE: %lx\n", val);
+            case DT_SCE_PLTGOT:
+                info.pltgotOff = entry.d_un.d_ptr;
+                break;
+            case DT_SCE_JMPREL:
+                info.jmprelOff = entry.d_un.d_ptr;
+                break;                 
+            case DT_SCE_PLTREL:
+                assert(entry.d_un.d_val == DT_RELA);
+                info.pltrel = entry.d_un.d_val;
+                break;
+            case DT_SCE_PLTRELSZ:
+                info.jmprelSz = entry.d_un.d_val;
+                break;                  
+            case DT_SCE_RELA:
+                info.relaOff = entry.d_un.d_ptr;
+                break;
+            case DT_SCE_RELASZ:
+                info.relaSz = entry.d_un.d_val;
+                break;
+            case DT_SCE_RELAENT:
+                info.relaEntSz = entry.d_un.d_val;
+                break;
+            case DT_SCE_STRTAB:
+                info.strtabOff = entry.d_un.d_ptr;
+                break;
+            case DT_SCE_STRSZ:
+                info.strtabSz = entry.d_un.d_val;
+                break;
+            case DT_SCE_SYMTAB:
+                info.symtabOff = entry.d_un.d_ptr;
+                break;
+            case DT_SCE_SYMENT:
+                info.symtabEntSz = entry.d_un.d_val;
+                break;                                                
+            case DT_SCE_HASHSZ:
+                info.hashSz = entry.d_un.d_val;
+                break;
+            case DT_SCE_SYMTABSZ:
+                info.symtabSz = entry.d_un.d_val;
                 break;
             default:
                 break;
@@ -488,7 +551,7 @@ FILE *openWithSearchPaths(std::string name, std::string mode,
     return NULL;
 }
 
-bool parseNativeDynamicInfo(DynamicTableInfo dynTableInfo, FILE *elf, /* ret */
+bool parseNativeDynamicContents(DynamicTableInfo dynTableInfo, FILE *elf, /* ret */
                     std::vector<char> &strtab, 
                     std::vector<std::string> &dynLibStrings,
                     std::vector<Elf64_Rela> &relocs,
@@ -527,11 +590,17 @@ bool parseNativeDynamicInfo(DynamicTableInfo dynTableInfo, FILE *elf, /* ret */
     return true;
 }
 
-bool parseHostDynamicInfo(FILE *elf, Elf64_Ehdr elfHdr, /* ret */
+bool parseHostDynamicContents(FILE *elf, Elf64_Ehdr elfHdr, /* ret */
                     std::vector<char> &strtab, 
                     std::vector<std::string> &dynLibStrings,
                     std::vector<Elf64_Rela> &relocs,
                     std::vector<Elf64_Sym> &symbols) {
+
+
+    // anything in dynTableInfo should look in .dyn* section of elf
+    // e.g. neededLibStrings should use .dynstr.base + offset
+
+    // otherwise look in symtab section, need to figure this out 
     return true;
 }
 
@@ -580,12 +649,15 @@ bool getModuleInfo(std::string basename, bool isNative, std::map<std::string, Mo
     for (uint i = 0; i < progHdrs.size(); i++) {
         Elf64_Phdr *phdr = &progHdrs[i];
         // guarantees that we can put dynamic libraries in memory at the start of the next page after the last module ended
-//        assert(pgsz % phdr->p_align == 0);
+        //assert(pgsz % phdr->p_align == 0);
         switch (progHdrs[i].p_type) {
             //case PT_PHDR:
             //case PT_INTERP:
             case PT_DYNAMIC:
                 processDynamicSegment(phdr, elf, dynTableInfo);
+                if (!isNative) {
+                    dynTableInfo.dynlibdataPHdr = *phdr;
+                }
                 break;
             case PT_SCE_DYNLIBDATA:
                 dynTableInfo.dynlibdataPHdr = *phdr;
@@ -658,12 +730,10 @@ bool getModuleInfo(std::string basename, bool isNative, std::map<std::string, Mo
     std::vector<Elf64_Rela> relocs;
     std::vector<Elf64_Sym> symbols;
 
-    if (isNative) {
-        if (!parseNativeDynamicInfo(dynTableInfo, elf, strtab, dynLibStrings, relocs, symbols))
+    //if (isNative) {
+        if (!parseNativeDynamicContents(dynTableInfo, elf, strtab, dynLibStrings, relocs, symbols))
             return false;
-    } else {
-        
-    }
+    //} else {}
 
     //////////////////////////////////////////////////////////////////////////////////////////////////////
     assert(lastModuleEndAddr % pgsz == 0);
