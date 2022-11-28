@@ -2,6 +2,7 @@
 a.out
 *.o
 main/main
+main/alt
 nid_hash/nid_hash
 .gdb_history
 .brestore.gdb

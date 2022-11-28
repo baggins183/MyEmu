@@ -223,9 +223,6 @@ static bool processDynamicSegment(Elf64_Phdr *phdr, FILE *elf, DynamicTableInfo 
             case DT_ENCODING:
             case DT_PREINIT_ARRAYSZ:
             case DT_SYMTAB_SHNDX:
-            case DT_RELRSZ:
-            case DT_RELR:
-            case DT_RELRENT:
             case DT_NUM:
             case DT_LOOS:
             case DT_HIOS:

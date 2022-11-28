@@ -15,7 +15,7 @@ main: main.cpp $(HEADERS) ../nid_hash/nid_hash.h ../nid_hash/nid_hash.cpp
 	$(CC) $(CARGS) $(addprefix -I, $(INC)) -g -fpie $(LD_ARGS) -o $@ main.cpp ../nid_hash/nid_hash.cpp -lpthread -lcrypto
 
 alt: alt.cpp $(HEADERS) ../nid_hash/nid_hash.h ../nid_hash/nid_hash.cpp
-	$(CC) $(CARGS) $(addprefix -I, $(INC)) -g -fpie $(LD_ARGS) -o $@ alt.cpp ../nid_hash/nid_hash.cpp -lpthread -lcrypto
+	$(CC) $(CARGS) $(addprefix -I, $(INC)) -g -fpie $(LD_ARGS) -o $@ alt.cpp ../nid_hash/nid_hash.cpp -lpthread -lcrypto -ldl
 
 clean:
 	rm -f main alt *.bin *.o
