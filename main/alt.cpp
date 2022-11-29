@@ -269,7 +269,7 @@ bool patchPs4Lib(Ps4Module &lib, /* ret */ std::string &newPath) {
     });
 
     newSectionHdrs.push_back({
-        appendToStrtab(newStrtab, "strtab"),
+        appendToStrtab(newStrtab, ".strtab"),
         SHT_STRTAB,
         SHF_STRINGS,
         0,
@@ -284,7 +284,7 @@ bool patchPs4Lib(Ps4Module &lib, /* ret */ std::string &newPath) {
 
     // TODO this assumes we are reusing the old phdr/dynamic section and overwriting that
     newSectionHdrs.push_back({
-        appendToStrtab(newStrtab, "dynamic"),
+        appendToStrtab(newStrtab, ".dynamic"),
         SHT_DYNAMIC,
         0,
         0,
@@ -321,6 +321,10 @@ bool patchPs4Lib(Ps4Module &lib, /* ret */ std::string &newPath) {
     assert(1 == fwrite(&elfHdr, sizeof(elfHdr), 1, f));    
 
     lib.strtab = newStrtab;
+
+    fsync(fileno(f));
+    fclose(f);
+
     for (auto sHdr: newSectionHdrs) {
         dumpShdr(lib, &sHdr);
     }
@@ -369,7 +373,10 @@ int main(int argc, char **argv) {
 
     dl = dlopen(newPath.c_str(), RTLD_LAZY);
     if (!dl) {
-        printf("%s\n", dlerror());
+        char *err;
+        while ((err = dlerror())) {
+            printf("%s\n", err);
+        }
         return -1;
     }
 
