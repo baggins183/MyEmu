@@ -23,17 +23,13 @@
 #include "../nid_hash/nid_hash.h"
 #include <dlfcn.h>
 #include <libgen.h>
+#include <map>
 
-const long pgsz = sysconf(_SC_PAGE_SIZE);
+const long PGSZ = sysconf(_SC_PAGE_SIZE);
 const std::string ebootPath = "eboot.bin";
 
 #define ROUND_DOWN(x, SZ) ((x) - (x) % (SZ))
 #define ROUND_UP(x, SZ) ( (x) % (SZ) ? (x) - ((x) % (SZ)) + (SZ) : (x))
-
-struct MappedSegment {
-    uint64_t firstPage;
-    uint64_t nPages;
-};
 
 class Module {
 public:
@@ -48,7 +44,6 @@ public:
 
 class Ps4Module : public Module {
 public:
-    std::vector<MappedSegment> mappedSegments;
     std::vector<Elf64_Rela> relocs;
     std::vector<Elf64_Sym> symbols;
 };
@@ -56,6 +51,97 @@ public:
 class HostModule : public Module {
 
 };
+
+#define SECTION_TABLE(OP) \
+    OP(DYNSTR, ".dynstr") \
+    OP(DYNSYM, ".dynsym")
+
+#define SECTION_ENUM_LIST(e, name) e,
+#define SECTION_NAME_LIST(e, name) name,
+
+enum section_type {
+    SECTION_TABLE(SECTION_ENUM_LIST)
+    NUM_SECTIONS,
+};
+
+const char *section_names[NUM_SECTIONS] {
+    SECTION_TABLE(SECTION_NAME_LIST)
+};
+
+class SectionMap {
+private:
+    std::map<section_type, int> sectionToIndex;
+    int numSections;
+public:
+    int getOrSetSectionIdx(section_type type) {
+        if (sectionToIndex.find(type) != sectionToIndex.end()) {
+            return sectionToIndex[type];
+        }
+        sectionToIndex[type] = ++numSections;
+        return numSections;
+    }
+};
+
+SectionMap section_map;
+
+struct Section {
+    std::vector<unsigned char> contents;
+    Elf64_Shdr hdr;
+    section_type type;
+    bool finalized; // false if contents need to be written into segment contents
+
+    // copy section contents into dst buffer if the section isn't already finalized
+    // also complete the section header with vaddr, size, and offset info
+    void finalize(Elf64_Phdr *parent, std::vector<unsigned char> &dst) {
+        if ( !finalized) {
+            // assume dst contents are already aligned (rounded up w/ padding)
+            
+            size_t sectionSizePadded = ROUND_UP(contents.size(), PGSZ);
+            size_t segOff = dst.size();
+
+            hdr.sh_addr = parent->p_vaddr + segOff;
+            hdr.sh_offset = parent->p_offset + segOff;
+            hdr.sh_size = contents.size();
+            hdr.sh_addralign = PGSZ;
+
+            dst.resize(dst.size() + sectionSizePadded);
+            memcpy(&dst[segOff], contents.data(), contents.size());
+
+            finalized = true;
+        }
+    }
+};
+
+struct Segment {
+    std::vector<unsigned char> contents;
+    std::vector<Section> sections;
+    Elf64_Phdr hdr;
+    bool finalized;
+
+    Segment(Elf64_Phdr hdr, bool finalized): hdr(hdr), finalized(finalized) {}
+
+    void finalize(Elf64_Off fileOffset, Elf64_Addr vAddr, Elf64_Addr pAddr) {
+        if (!finalized) {
+            hdr.p_offset = fileOffset;
+            hdr.p_vaddr = vAddr;
+            hdr.p_paddr = pAddr;
+
+            for (auto &section: sections) {
+                section.finalize(&hdr, contents);
+            }
+
+            // finalize phdr here TODO
+            hdr.p_filesz = contents.size();
+            // should probably give this up front
+            hdr.p_memsz = std::max(hdr.p_memsz, hdr.p_filesz);
+            hdr.p_align = PGSZ;
+
+            finalized = true;
+        }
+    }
+};
+
+
 
 struct CmdConfig {
     bool dumpElfHeader;
@@ -94,7 +180,14 @@ bool parseCmdArgs(int argc, char **argv) {
     return true;
 }
 
-static void dumpElfHdr(const char *name, Elf64_Ehdr *elfHdr) {
+static void dumpElfHdr(const char *name) {
+    FILE *f = fopen(name, "r+");
+    assert(f);
+
+    Elf64_Ehdr elfHdr;
+    fseek(f, 0, SEEK_SET);
+    assert (1 == fread(&elfHdr, sizeof(elfHdr), 1, f));    
+
     printf("ELF HEADER DUMP:\n"
         "name: %s\n"
         "\te_ident: %s\n"
@@ -112,21 +205,23 @@ static void dumpElfHdr(const char *name, Elf64_Ehdr *elfHdr) {
         "\te_shstrndx: %d\n"
         "\tABI: %hhu\n",
         name,
-        elfHdr->e_ident,
-        elfHdr->e_type,
-        elfHdr->e_machine,
-        elfHdr->e_version,
-        elfHdr->e_entry,
-        elfHdr->e_phoff,
-        elfHdr->e_shoff,
-        elfHdr->e_flags,
-        elfHdr->e_phentsize,
-        elfHdr->e_phnum,
-        elfHdr->e_shentsize,
-        elfHdr->e_shnum,
-        elfHdr->e_shstrndx,
-        elfHdr->e_ident[EI_OSABI]
+        elfHdr.e_ident,
+        elfHdr.e_type,
+        elfHdr.e_machine,
+        elfHdr.e_version,
+        elfHdr.e_entry,
+        elfHdr.e_phoff,
+        elfHdr.e_shoff,
+        elfHdr.e_flags,
+        elfHdr.e_phentsize,
+        elfHdr.e_phnum,
+        elfHdr.e_shentsize,
+        elfHdr.e_shnum,
+        elfHdr.e_shstrndx,
+        elfHdr.e_ident[EI_OSABI]
     );
+
+    fclose(f);
 }
 
 static void dumpShdr(Module &mod, Elf64_Shdr *sHdr) {
@@ -144,6 +239,24 @@ int findPhdr(std::vector<Elf64_Phdr> &pHdrs, Elf64_Word type) {
         }
     }
     return -1;
+}
+
+Section *findSection(Segment &seg, section_type type) {
+    for (auto &sec: seg.sections) {
+        if (sec.type == type) {
+            return &sec;
+        }
+    }
+    return nullptr;
+}
+
+Section *findSection(std::vector<Segment> segments, section_type type) {
+    for (auto &seg: segments) {
+        if (Section *section = findSection(seg, type)) {
+            return section;
+        }
+    }
+    return nullptr;
 }
 
 bool writePadding(FILE *f, size_t alignment) {
@@ -167,12 +280,155 @@ uint appendToStrtab(std::vector<char> &strtab, const char *str) {
     return off;
 }
 
+static bool patchDynamicSegment(std::vector<Elf64_Phdr> &progHdrs, FILE *elf) {
+    int idx = findPhdr(progHdrs, PT_DYNAMIC);
+    assert(idx >= 0);
+    Elf64_Phdr *dynPhdr = &progHdrs[idx];
+
+    std::vector<unsigned char> buf(dynPhdr->p_filesz);
+
+    fseek(elf, dynPhdr->p_offset, SEEK_SET);
+    assert(1 == fread(buf.data(), dynPhdr->p_filesz, 1, elf));
+
+    std::vector<Elf64_Dyn> newEntries;
+
+    Elf64_Dyn *dynEnt;
+    for(int i = 0; ; i++) {
+        assert((i + 1) * sizeof(Elf64_Dyn) <= dynPhdr->p_filesz);
+        unsigned char *off = &buf[i * sizeof(Elf64_Dyn)];
+        dynEnt = (Elf64_Dyn *) off;
+
+        if (dynEnt->d_tag == DT_NULL) {
+            newEntries.push_back(*dynEnt);
+            break;
+        }
+
+        switch(dynEnt->d_tag) {
+            // DT_ tags
+            case DT_NULL:
+            case DT_NEEDED:
+            case DT_PLTRELSZ:
+            case DT_PLTGOT:
+            case DT_HASH:
+            case DT_STRTAB:
+            case DT_SYMTAB:
+            case DT_RELA:
+            case DT_RELASZ:
+            case DT_RELAENT:
+            case DT_STRSZ:
+            case DT_SYMENT:
+            case DT_INIT:
+            case DT_FINI:
+            case DT_SONAME:
+            case DT_RPATH:
+            case DT_SYMBOLIC:
+            case DT_REL:
+            case DT_RELSZ:
+            case DT_RELENT:
+            case DT_PLTREL:
+            case DT_DEBUG:
+            case DT_TEXTREL:
+            case DT_JMPREL:
+            case DT_BIND_NOW:
+            case DT_INIT_ARRAY:
+            case DT_FINI_ARRAY:
+            case DT_INIT_ARRAYSZ:
+            case DT_FINI_ARRAYSZ:
+            case DT_RUNPATH:
+            case DT_FLAGS:
+            case DT_PREINIT_ARRAY:
+            case DT_PREINIT_ARRAYSZ:
+            case DT_SYMTAB_SHNDX:
+            case DT_RELRSZ:
+            case DT_RELR:
+            case DT_RELRENT:
+            case DT_NUM:
+            case DT_LOOS:
+            case DT_HIOS:
+            case DT_LOPROC:
+            case DT_HIPROC:
+            case DT_PROCNUM:
+                newEntries.push_back(*dynEnt);
+                break;
+        }
+
+        //uint64_t val = entry.d_un.d_val;
+        switch(dynEnt->d_tag) {
+            // DT_SCE tags
+            case DT_SCE_NEEDED_MODULE:
+                break;
+            case DT_SCE_IMPORT_LIB:
+                break;
+            case DT_SCE_IMPORT_LIB_ATTR:
+                break;                       
+            case DT_SCE_HASH:
+                break;
+            case DT_SCE_PLTGOT:
+                break;
+            case DT_SCE_JMPREL:
+                break;                 
+            case DT_SCE_PLTREL:
+                break;
+            case DT_SCE_PLTRELSZ:
+                break;                  
+            case DT_SCE_RELA:
+                break;
+            case DT_SCE_RELASZ:
+                break;
+            case DT_SCE_RELAENT:
+                break;
+            case DT_SCE_STRTAB:
+
+                break;
+            case DT_SCE_STRSZ:
+                break;
+            case DT_SCE_SYMTAB:
+                break;
+            case DT_SCE_SYMENT:
+                break;                                                
+            case DT_SCE_HASHSZ:
+                break;
+            case DT_SCE_SYMTABSZ:
+                break;
+            default:
+                break;
+        }
+    }
+
+    // TODO
+    // There are DT_NEEDED's in the ents. Should put them in our new strtab
+    // Should also replace DT_STRTAB address w/ new strtab address
+    // ps4 libs have DT_SCE_STRTAB, convert this to DT_STRTAB
+    //
+    // We need to put the strtab in a new loadable segment
+    // Should standardize the way we build and append new segments/sections
+    // sections can have a parent segment for simplicity
+    // each segment can be a list of sections, each section can be a list of
+    // buffers 
+
+    fseek(elf, dynPhdr->p_offset, SEEK_SET);
+    assert(1 == fwrite(newEntries.data(), newEntries.size() * sizeof(Elf64_Dyn), 1, elf));
+
+    uint64_t highestVAddr = 0;
+    uint64_t highestPAddr = 0;
+    for (auto phdr: progHdrs) {
+        highestVAddr = std::max(highestVAddr, phdr.p_vaddr + phdr.p_memsz);
+        highestPAddr = std::max(highestPAddr, phdr.p_paddr + phdr.p_memsz);
+    }
+    dynPhdr->p_vaddr = ROUND_UP(highestVAddr, PGSZ);
+    dynPhdr->p_paddr = ROUND_UP(highestPAddr, PGSZ);
+    //dynPhdr->p_align = PGSZ;
+    dynPhdr->p_flags = PF_X | PF_W | PF_R;
+
+    return true;
+}
+
 bool patchPs4Lib(Ps4Module &lib, /* ret */ std::string &newPath) {
     // alignment for new sections (data) we add
     const size_t section_alignment = 16;
 
     std::vector<Elf64_Phdr> progHdrs;
-    std::vector<Elf64_Phdr> newProgHdrs;
+    //std::vector<Elf64_Phdr> newProgHdrs;
     std::vector<std::vector<unsigned char>> newSegments;
     std::vector<char> newStrtab;
     // in a Ps4 module, these Dyn Ents are in the DYNAMIC segment/.dynamic section,
@@ -216,33 +472,8 @@ bool patchPs4Lib(Ps4Module &lib, /* ret */ std::string &newPath) {
 
     int idx = findPhdr(progHdrs, PT_DYNAMIC);
     assert(idx >= 0);
-    Elf64_Phdr dynamicPHdr = progHdrs[idx];
-    size_t numDynEntries = 0;
-
-    std::vector<unsigned char> buf;
-    buf.resize(dynamicPHdr.p_filesz);
-
-    Elf64_Dyn *dynEnt = (Elf64_Dyn *) buf.data();
-    while (numDynEntries * sizeof(Elf64_Dyn) < buf.size()) {
-        numDynEntries++;
-        if (dynEnt->d_tag == DT_NULL) {
-            break;
-        }
-        dynEnt++;
-    }
-
-    oldPs4DynEnts.resize(numDynEntries);
-    memcpy(oldPs4DynEnts.data(), buf.data(), numDynEntries * sizeof(Elf64_Dyn));
-
-    for (auto dynEnt: oldPs4DynEnts) {
-        switch (dynEnt.d_tag) {
-            case DT_NULL:
-                newElfDynEnts.push_back(dynEnt);
-                break;
-            default:
-                break;
-        }
-    }
+    Elf64_Phdr *dynamicPHdr = &progHdrs[idx];
+    patchDynamicSegment(progHdrs, f);
 
     // Append new sections (data) to the EOF
     // then append the section headers array
@@ -288,28 +519,34 @@ bool patchPs4Lib(Ps4Module &lib, /* ret */ std::string &newPath) {
         SHT_DYNAMIC,
         0,
         0,
-        dynamicPHdr.p_offset,
-        dynamicPHdr.p_memsz,
+        dynamicPHdr->p_offset,
+        dynamicPHdr->p_memsz,
         static_cast<Elf64_Word>(strtabIdx),
         0,// sh_info
-        dynamicPHdr.p_align, // alignment
+        dynamicPHdr->p_align, // alignment
         sizeof(Elf64_Dyn)
     });
 
     // TODO look into SHT_DYNSYM, SHT_SYMTAB
 
     // append strtab to file
+    fseek(f, 0, SEEK_END);    
     writePadding(f, section_alignment);
     size_t strtabOff = ftell(f);
     assert(1 == fwrite(newStrtab.data(), newStrtab.size(), 1, f));
 
     // append sections to file
     // correct strtab offset in strtab entry
+    fseek(f, 0, SEEK_END);    
     writePadding(f, section_alignment);
     size_t shOff = ftell(f);
     newSectionHdrs[strtabIdx].sh_offset = strtabOff;
     newSectionHdrs[strtabIdx].sh_size = newStrtab.size();
     assert(newSectionHdrs.size() == fwrite(newSectionHdrs.data(), sizeof(Elf64_Shdr), newSectionHdrs.size(), f));
+
+    // update program headers to file
+    fseek(f, elfHdr.e_phoff, SEEK_SET);
+    assert(elfHdr.e_phnum == fwrite(progHdrs.data(), sizeof(Elf64_Phdr), elfHdr.e_phnum, f));
 
     // update ELF header to file
     elfHdr.e_shoff = shOff;
@@ -370,6 +607,11 @@ int main(int argc, char **argv) {
 
     if (!ret)
         return -1;
+
+    if (CmdArgs.dumpElfHeader) {
+        dumpElfHdr(module.path.c_str());
+        dumpElfHdr(newPath.c_str());
+    }
 
     dl = dlopen(newPath.c_str(), RTLD_LAZY);
     if (!dl) {

@@ -15,6 +15,7 @@ document bsave
 end
 
 define brestore
+  set breakpoint pending on
   source .brestore.gdb
 end
 document brestore
