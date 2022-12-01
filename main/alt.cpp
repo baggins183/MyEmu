@@ -52,9 +52,18 @@ class HostModule : public Module {
 
 };
 
+// RELA might not work, .rela + dstname might be necessary
+
 #define SECTION_TABLE(OP) \
     OP(DYNSTR, ".dynstr") \
-    OP(DYNSYM, ".dynsym")
+    OP(DYNSYM, ".dynsym") \
+    OP(PLT, ".plt") \
+    OP(GOT, ".got") \
+    OP(PLTGOT, ".plt.got") \
+    OP(RELA, ".rela" ) \
+    OP(SCE_DYNSTR, ".dynstr") \
+    OP(SCE_DYNSYM, ".dynsym") \
+    OP(SCE_PLTGOT, ".plt.got") \
 
 #define SECTION_ENUM_LIST(e, name) e,
 #define SECTION_NAME_LIST(e, name) name,
