@@ -1,6 +1,7 @@
 #include "Common.h"
 #include "elf-sce.h"
 #include "elf_amd64.h"
+#include <sys/types.h>
 #ifdef __linux
 #include <cstdint>
 #endif
@@ -55,17 +56,22 @@ class HostModule : public Module {
 // RELA might not work, .rela + dstname might be necessary
 
 #define SECTION_TABLE(OP) \
+    OP(NULL, "") \
+    OP(STRTAB, ".strtab") \
+    OP(DYNAMIC, ".dynamic") \
     OP(DYNSTR, ".dynstr") \
     OP(DYNSYM, ".dynsym") \
+    OP(INIT, ".init") \
+    OP(FINI, ".fini") \
     OP(PLT, ".plt") \
     OP(GOT, ".got") \
     OP(PLTGOT, ".plt.got") \
     OP(RELA, ".rela" ) \
     OP(SCE_DYNSTR, ".dynstr") \
     OP(SCE_DYNSYM, ".dynsym") \
-    OP(SCE_PLTGOT, ".plt.got") \
+    OP(DT_SCE_PLTGOT, ".plt.got") \
 
-#define SECTION_ENUM_LIST(e, name) e,
+#define SECTION_ENUM_LIST(e, name) STYPE_##e,
 #define SECTION_NAME_LIST(e, name) name,
 
 enum section_type {
@@ -73,84 +79,83 @@ enum section_type {
     NUM_SECTIONS,
 };
 
-const char *section_names[NUM_SECTIONS] {
+const char *section_names[] {
     SECTION_TABLE(SECTION_NAME_LIST)
 };
-
-class SectionMap {
-private:
-    std::map<section_type, int> sectionToIndex;
-    int numSections;
-public:
-    int getOrSetSectionIdx(section_type type) {
-        if (sectionToIndex.find(type) != sectionToIndex.end()) {
-            return sectionToIndex[type];
-        }
-        sectionToIndex[type] = ++numSections;
-        return numSections;
-    }
-};
-
-SectionMap section_map;
 
 struct Section {
     std::vector<unsigned char> contents;
     Elf64_Shdr hdr;
     section_type type;
-    bool finalized; // false if contents need to be written into segment contents
 
-    // copy section contents into dst buffer if the section isn't already finalized
-    // also complete the section header with vaddr, size, and offset info
-    void finalize(Elf64_Phdr *parent, std::vector<unsigned char> &dst) {
-        if ( !finalized) {
-            // assume dst contents are already aligned (rounded up w/ padding)
-            
-            size_t sectionSizePadded = ROUND_UP(contents.size(), PGSZ);
-            size_t segOff = dst.size();
+    Section() {}
+    Section(Elf64_Shdr hdr): hdr(hdr) {}
+    Section(Elf64_Shdr hdr, section_type type): hdr(hdr), type(type) {}
+};
 
-            hdr.sh_addr = parent->p_vaddr + segOff;
-            hdr.sh_offset = parent->p_offset + segOff;
-            hdr.sh_size = contents.size();
-            hdr.sh_addralign = PGSZ;
+class SectionMap {
+private:
+    std::map<section_type, int> typeToIndex;
+    std::map<section_type, Section> typeToSection;
 
-            dst.resize(dst.size() + sectionSizePadded);
-            memcpy(&dst[segOff], contents.data(), contents.size());
+    int numSections;
+public:
+    SectionMap(): numSections(0) {}
 
-            finalized = true;
+    int getSectionIndex(section_type type) {
+        if (typeToIndex.find(type) != typeToIndex.end()) {
+            return typeToIndex[type];
         }
+        assert("section doesn't exist" && false);
+        return -1;
+    }
+
+    Section &getSection(section_type type) {
+        assert(typeToSection.find(type) != typeToSection.end());
+        return typeToSection[type];
+    }    
+
+    Section &addSection(section_type type, Elf64_Shdr hdr) {
+        if (typeToSection.find(type) != typeToSection.end()) {
+            return typeToSection[type];
+        }
+
+        typeToIndex[type] = numSections++;
+        typeToSection[type] = Section(hdr, type);
+        return typeToSection[type];
+    }
+
+    // collect headers in order
+    std::vector<Elf64_Shdr> getHeaders() {
+        size_t nSections = typeToSection.size();
+        std::vector<Elf64_Shdr> ret(nSections);
+
+        section_type type;
+        int idx;
+        for (auto kv : typeToIndex) {
+            std::tie(type, idx) = kv;
+            ret[idx] = typeToSection[type].hdr;
+        }
+        return ret;
     }
 };
 
 struct Segment {
+    Elf64_Phdr pHdr;
     std::vector<unsigned char> contents;
-    std::vector<Section> sections;
-    Elf64_Phdr hdr;
-    bool finalized;
 
-    Segment(Elf64_Phdr hdr, bool finalized): hdr(hdr), finalized(finalized) {}
+    Segment() {}
 
-    void finalize(Elf64_Off fileOffset, Elf64_Addr vAddr, Elf64_Addr pAddr) {
-        if (!finalized) {
-            hdr.p_offset = fileOffset;
-            hdr.p_vaddr = vAddr;
-            hdr.p_paddr = pAddr;
-
-            for (auto &section: sections) {
-                section.finalize(&hdr, contents);
-            }
-
-            // finalize phdr here TODO
-            hdr.p_filesz = contents.size();
-            // should probably give this up front
-            hdr.p_memsz = std::max(hdr.p_memsz, hdr.p_filesz);
-            hdr.p_align = PGSZ;
-
-            finalized = true;
-        }
+    Segment & operator=( Segment && rhs) {
+        this->contents = std::move(rhs.contents);
+        this->pHdr = rhs.pHdr;
+        return *this;
     }
+
+    Segment (Segment && other) {
+        *this = std::move(other);
+    }    
 };
-
-
 
 struct CmdConfig {
     bool dumpElfHeader;
@@ -250,24 +255,6 @@ int findPhdr(std::vector<Elf64_Phdr> &pHdrs, Elf64_Word type) {
     return -1;
 }
 
-Section *findSection(Segment &seg, section_type type) {
-    for (auto &sec: seg.sections) {
-        if (sec.type == type) {
-            return &sec;
-        }
-    }
-    return nullptr;
-}
-
-Section *findSection(std::vector<Segment> segments, section_type type) {
-    for (auto &seg: segments) {
-        if (Section *section = findSection(seg, type)) {
-            return section;
-        }
-    }
-    return nullptr;
-}
-
 bool writePadding(FILE *f, size_t alignment) {
     fseek(f, 0, SEEK_END);
     size_t flen = ftell(f);
@@ -280,16 +267,56 @@ bool writePadding(FILE *f, size_t alignment) {
 }
 
 // return index into strtab
-uint appendToStrtab(std::vector<char> &strtab, const char *str) {
-    int off = strtab.size();
+uint appendToStrtab(Section &strtab, const char *str) {
+    int off = strtab.contents.size();
     int addedSz = strlen(str) + 1;
-    strtab.resize(off + addedSz);
-    memcpy(&strtab[off], str, addedSz);
+    strtab.contents.resize(off + addedSz);
+    memcpy(&strtab.contents[off], str, addedSz);
 
     return off;
 }
 
-static bool patchDynamicSegment(std::vector<Elf64_Phdr> &progHdrs, FILE *elf) {
+Segment CreateSegment(Elf64_Phdr pHdr, std::vector<section_type> &sections, SectionMap &sectionMap) {
+    Segment seg;
+    seg.pHdr = pHdr;
+
+    uint64_t segBeginVa = pHdr.p_vaddr;
+    uint64_t segBeginFileOff = pHdr.p_offset;
+    for (section_type stype: sections) {
+        Section &section = sectionMap.getSection(stype);
+        uint64_t segOff = seg.contents.size();
+        if (section.contents.size() > 0) {
+            seg.contents.resize(segOff + ROUND_UP(section.contents.size(), PGSZ));
+            memcpy(&seg.contents[segOff], &section.contents[0], section.contents.size());
+        }
+        section.hdr.sh_addr = segBeginVa + segOff;
+        section.hdr.sh_offset = segBeginFileOff + segOff;
+    }
+
+    seg.pHdr.p_filesz = seg.contents.size();
+    seg.pHdr.p_memsz = seg.contents.size(); // ???
+
+    return seg;
+}
+
+// find a new virtual and physical address for pHdr
+// use the maximum offsets of other progHdrs so no overlapping happens
+void rebaseSegment(Elf64_Phdr *pHdr, std::vector<Elf64_Phdr> &progHdrs) {
+    uint64_t highestVAddr = 0;
+    uint64_t highestPAddr = 0;    
+    for (auto phdr: progHdrs) {
+        highestVAddr = std::max(highestVAddr, phdr.p_vaddr + phdr.p_memsz);
+        highestPAddr = std::max(highestPAddr, phdr.p_paddr + phdr.p_memsz);
+    }
+    pHdr->p_vaddr = ROUND_UP(highestVAddr, PGSZ);
+    pHdr->p_paddr = ROUND_UP(highestPAddr, PGSZ);    
+}
+
+// write new Segment for PT_DYNAMIC based on SCE dynamic entries
+// append to end of file
+// modify the progHdrs array
+// also add existing SCE sections to oldSectionMap
+static bool patchDynamicSegment(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, SectionMap &newSectionMap, SectionMap &oldSectionMap) {
     int idx = findPhdr(progHdrs, PT_DYNAMIC);
     assert(idx >= 0);
     Elf64_Phdr *dynPhdr = &progHdrs[idx];
@@ -415,39 +442,30 @@ static bool patchDynamicSegment(std::vector<Elf64_Phdr> &progHdrs, FILE *elf) {
     // each segment can be a list of sections, each section can be a list of
     // buffers 
 
-    fseek(elf, dynPhdr->p_offset, SEEK_SET);
+    writePadding(elf, PGSZ);
+    uint64_t segmentFileOff = ftell(elf);
     assert(1 == fwrite(newEntries.data(), newEntries.size() * sizeof(Elf64_Dyn), 1, elf));
 
-    uint64_t highestVAddr = 0;
-    uint64_t highestPAddr = 0;
-    for (auto phdr: progHdrs) {
-        highestVAddr = std::max(highestVAddr, phdr.p_vaddr + phdr.p_memsz);
-        highestPAddr = std::max(highestPAddr, phdr.p_paddr + phdr.p_memsz);
-    }
-    dynPhdr->p_vaddr = ROUND_UP(highestVAddr, PGSZ);
-    dynPhdr->p_paddr = ROUND_UP(highestPAddr, PGSZ);
+    // calculate p_vaddr, p_paddr
+    rebaseSegment(dynPhdr, progHdrs);
     //dynPhdr->p_align = PGSZ;
     dynPhdr->p_flags = PF_X | PF_W | PF_R;
+    dynPhdr->p_offset = segmentFileOff;
+    dynPhdr->p_filesz = newEntries.size() * sizeof(Elf64_Dyn);
 
     return true;
 }
 
 bool patchPs4Lib(Ps4Module &lib, /* ret */ std::string &newPath) {
-    // alignment for new sections (data) we add
-    const size_t section_alignment = 16;
-
     std::vector<Elf64_Phdr> progHdrs;
-    //std::vector<Elf64_Phdr> newProgHdrs;
-    std::vector<std::vector<unsigned char>> newSegments;
-    std::vector<char> newStrtab;
     // in a Ps4 module, these Dyn Ents are in the DYNAMIC segment/.dynamic section,
     // and describe the DYNLIBDATA segment
     std::vector<Elf64_Dyn> oldPs4DynEnts;    
     std::vector<Elf64_Dyn> newElfDynEnts;
-    // new section headers, to be appended to the new module file
-    std::vector<Elf64_Shdr> newSectionHdrs;
     // index of the strtab in the shEntries
-    size_t strtabIdx;
+
+    SectionMap newSectionMap;
+    SectionMap oldSections;
 
     newPath = lib.path + ".new";
 
@@ -482,7 +500,7 @@ bool patchPs4Lib(Ps4Module &lib, /* ret */ std::string &newPath) {
     int idx = findPhdr(progHdrs, PT_DYNAMIC);
     assert(idx >= 0);
     Elf64_Phdr *dynamicPHdr = &progHdrs[idx];
-    patchDynamicSegment(progHdrs, f);
+    patchDynamicSegment(f, progHdrs, newSectionMap, oldSections);
 
     // Append new sections (data) to the EOF
     // then append the section headers array
@@ -502,78 +520,84 @@ bool patchPs4Lib(Ps4Module &lib, /* ret */ std::string &newPath) {
     //    Elf64_Xword	sh_entsize;		/* Entry size if section holds table */
     //} Elf64_Shdr;
 
-    newSectionHdrs.push_back({
-        0,
-        SHT_NULL, // type
-        0, 0, 0, 0, 0, 0, 0, 0
-    });
+    Elf64_Shdr firstHdr = {
+        .sh_type = SHT_NULL
+    };
+    newSectionMap.addSection(STYPE_NULL, firstHdr);
 
-    newSectionHdrs.push_back({
-        appendToStrtab(newStrtab, ".strtab"),
-        SHT_STRTAB,
-        SHF_STRINGS,
-        0,
-        0, // file offset to be updated before writing strtab data
-        0, // size, same as above ^
-        0,
-        0,
-        section_alignment,
-        0
-    });
-    strtabIdx = newSectionHdrs.size() - 1;
+    Elf64_Shdr strtabSHdr = {
+        .sh_name = 0,
+        .sh_type = SHT_STRTAB,
+    };
+    Section &strtab = newSectionMap.addSection(STYPE_STRTAB, strtabSHdr);
+    appendToStrtab(strtab, section_names[STYPE_STRTAB]);
 
-    // TODO this assumes we are reusing the old phdr/dynamic section and overwriting that
-    newSectionHdrs.push_back({
-        appendToStrtab(newStrtab, ".dynamic"),
-        SHT_DYNAMIC,
-        0,
-        0,
-        dynamicPHdr->p_offset,
-        dynamicPHdr->p_memsz,
-        static_cast<Elf64_Word>(strtabIdx),
-        0,// sh_info
-        dynamicPHdr->p_align, // alignment
-        sizeof(Elf64_Dyn)
-    });
+    Elf64_Shdr dynstrSHdr = {
+        .sh_name = appendToStrtab(strtab, section_names[STYPE_DYNSTR]),
+        .sh_type = SHT_STRTAB,
+    };
+    Section &dynstr = newSectionMap.addSection(STYPE_DYNSTR, dynstrSHdr);
 
-    // TODO look into SHT_DYNSYM, SHT_SYMTAB
+    Elf64_Shdr dynamicSHdr = {
+        .sh_name = appendToStrtab(strtab, section_names[STYPE_DYNAMIC]),
+        .sh_type = SHT_DYNAMIC,
+        .sh_offset = dynamicPHdr->p_offset,
+        .sh_size = dynamicPHdr->p_memsz,
+        .sh_link = static_cast<Elf64_Word>(newSectionMap.getSectionIndex(STYPE_DYNSTR)),
+        .sh_addralign = dynamicPHdr->p_align,
+        .sh_entsize = sizeof(Elf64_Dyn)        
+    };
+    newSectionMap.addSection(STYPE_DYNAMIC, dynamicSHdr);
 
-    // append strtab to file
-    fseek(f, 0, SEEK_END);    
-    writePadding(f, section_alignment);
-    size_t strtabOff = ftell(f);
-    assert(1 == fwrite(newStrtab.data(), newStrtab.size(), 1, f));
+    Elf64_Shdr dynsymSHdr = {
+        .sh_name = appendToStrtab(strtab, section_names[STYPE_DYNSYM]),
+        .sh_type = SHT_SYMTAB,
+        .sh_entsize = sizeof(Elf64_Sym)
+    };
+    Section &dynsym = newSectionMap.addSection(STYPE_DYNSYM, dynstrSHdr);
 
-    // append sections to file
-    // correct strtab offset in strtab entry
-    fseek(f, 0, SEEK_END);    
-    writePadding(f, section_alignment);
-    size_t shOff = ftell(f);
-    newSectionHdrs[strtabIdx].sh_offset = strtabOff;
-    newSectionHdrs[strtabIdx].sh_size = newStrtab.size();
-    assert(newSectionHdrs.size() == fwrite(newSectionHdrs.data(), sizeof(Elf64_Shdr), newSectionHdrs.size(), f));
+    std::vector<section_type> miscSections = {
+        STYPE_STRTAB,
+        STYPE_DYNSTR,
+        STYPE_DYNSYM,
+    };
+    Elf64_Phdr miscLoadSegmentHdr {
+        .p_type = PT_LOAD,
+        .p_flags = PF_R
+    };
+    rebaseSegment(&miscLoadSegmentHdr, progHdrs);
+    writePadding(f, PGSZ);
+    miscLoadSegmentHdr.p_offset = ftell(f);
+    Segment miscLoadSegment = CreateSegment(miscLoadSegmentHdr, miscSections, newSectionMap);
+    fseek(f, 0, SEEK_END);
+    assert(1 == fwrite(miscLoadSegment.contents.data(), miscLoadSegment.contents.size(), 1, f));
 
     // update program headers to file
-    fseek(f, elfHdr.e_phoff, SEEK_SET);
+    fseek(f, 0, SEEK_END);
+    elfHdr.e_phoff = ftell(f);
+    elfHdr.e_phnum = progHdrs.size();
     assert(elfHdr.e_phnum == fwrite(progHdrs.data(), sizeof(Elf64_Phdr), elfHdr.e_phnum, f));
 
-    // update ELF header to file
-    elfHdr.e_shoff = shOff;
-    elfHdr.e_shnum = newSectionHdrs.size();
-    elfHdr.e_shstrndx = strtabIdx;
-    //elfHdr.e_ident[0] = 'X';
-    // elfHdr.e_shentsize TODO
+    fseek(f, 0, SEEK_END);
+    elfHdr.e_shoff = ftell(f);
+    elfHdr.e_shstrndx = newSectionMap.getSectionIndex(STYPE_STRTAB);
+    //elfHdr.e_shnum = 
+    std::vector<Elf64_Shdr> sectionHeaders = newSectionMap.getHeaders();
+    elfHdr.e_shnum = sectionHeaders.size();
+    assert(elfHdr.e_shnum == fwrite(progHdrs.data(), sizeof(Elf64_Shdr), elfHdr.e_shnum, f));
+    
     fseek(f, 0, SEEK_SET);
-    assert(1 == fwrite(&elfHdr, sizeof(elfHdr), 1, f));    
+    assert(1 == fwrite(&elfHdr, sizeof(Elf64_Ehdr), 1, f));
 
-    lib.strtab = newStrtab;
+
+    // update ELF header to file
+    // e_shoff, e_shnum, e_shstrndx
+    //   
+
+    //lib.strtab = newStrtab;
 
     fsync(fileno(f));
     fclose(f);
-
-    for (auto sHdr: newSectionHdrs) {
-        dumpShdr(lib, &sHdr);
-    }
 
     return true;
 }
