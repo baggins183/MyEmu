@@ -58,6 +58,7 @@ class HostModule : public Module {
 #define SECTION_TABLE(OP) \
     OP(NULL, "") \
     OP(STRTAB, ".strtab") \
+    OP(SHSTRTAB, ".shstrtab") \
     OP(DYNAMIC, ".dynamic") \
     OP(DYNSTR, ".dynstr") \
     OP(DYNSYM, ".dynsym") \
@@ -240,9 +241,21 @@ static void dumpElfHdr(const char *name) {
 
 static void dumpShdr(Module &mod, Elf64_Shdr *sHdr) {
     printf("name: %s\n"
-        "\tsh_type: %u\n",
+        "\tsh_type: %u\n"
+        "\tsh_addr: %lu\n"
+        "\tsh_offset: %lu\n"
+        "\tsh_size: %lu\n"
+        "\tsh_link: %i\n"
+        "\tsh_info: %i\n"
+        "\tsh_entsize: %lu\n",
         (char *) &mod.strtab[sHdr->sh_name],
-        sHdr->sh_type
+        sHdr->sh_type,
+        sHdr->sh_addr,
+        sHdr->sh_offset,
+        sHdr->sh_size,
+        sHdr->sh_link,
+        sHdr->sh_info,
+        sHdr->sh_entsize
     );
 }
 
@@ -291,6 +304,7 @@ Segment CreateSegment(Elf64_Phdr pHdr, std::vector<section_type> &sections, Sect
         }
         section.hdr.sh_addr = segBeginVa + segOff;
         section.hdr.sh_offset = segBeginFileOff + segOff;
+        section.hdr.sh_flags |= PROT_EXEC | PROT_WRITE | PROT_READ; // TODO remove
     }
 
     seg.pHdr.p_filesz = seg.contents.size();
@@ -520,27 +534,40 @@ bool patchPs4Lib(Ps4Module &lib, /* ret */ std::string &newPath) {
     //    Elf64_Xword	sh_entsize;		/* Entry size if section holds table */
     //} Elf64_Shdr;
 
-    Elf64_Shdr firstHdr = {
+    /*Elf64_Shdr firstHdr = {
         .sh_type = SHT_NULL
     };
-    newSectionMap.addSection(STYPE_NULL, firstHdr);
+    newSectionMap.addSection(STYPE_NULL, firstHdr);*/
 
-    Elf64_Shdr strtabSHdr = {
+    Elf64_Shdr shstrtabSHdr = {
         .sh_name = 0,
         .sh_type = SHT_STRTAB,
+        .sh_flags = SHF_STRINGS
     };
-    Section &strtab = newSectionMap.addSection(STYPE_STRTAB, strtabSHdr);
-    appendToStrtab(strtab, section_names[STYPE_STRTAB]);
+    Section &shstrtab = newSectionMap.addSection(STYPE_SHSTRTAB, shstrtabSHdr);
+    appendToStrtab(shstrtab, section_names[STYPE_SHSTRTAB]);
 
     Elf64_Shdr dynstrSHdr = {
-        .sh_name = appendToStrtab(strtab, section_names[STYPE_DYNSTR]),
+        .sh_name = appendToStrtab(shstrtab, section_names[STYPE_DYNSTR]),
         .sh_type = SHT_STRTAB,
+        .sh_flags = SHF_STRINGS | SHF_ALLOC
     };
     Section &dynstr = newSectionMap.addSection(STYPE_DYNSTR, dynstrSHdr);
 
+    Elf64_Shdr dynsymSHdr = {
+        .sh_name = appendToStrtab(shstrtab, section_names[STYPE_DYNSYM]),
+        .sh_type = SHT_SYMTAB,
+        .sh_flags = SHF_WRITE | SHF_ALLOC,
+        .sh_link = static_cast<Elf64_Word>(newSectionMap.getSectionIndex(STYPE_DYNSTR)),
+        .sh_entsize = sizeof(Elf64_Sym)
+    };
+    Section &dynsym = newSectionMap.addSection(STYPE_DYNSYM, dynsymSHdr);
+
     Elf64_Shdr dynamicSHdr = {
-        .sh_name = appendToStrtab(strtab, section_names[STYPE_DYNAMIC]),
+        .sh_name = appendToStrtab(shstrtab, section_names[STYPE_DYNAMIC]),
         .sh_type = SHT_DYNAMIC,
+        .sh_flags = SHF_WRITE | SHF_ALLOC,
+        .sh_addr = dynamicPHdr->p_vaddr,
         .sh_offset = dynamicPHdr->p_offset,
         .sh_size = dynamicPHdr->p_memsz,
         .sh_link = static_cast<Elf64_Word>(newSectionMap.getSectionIndex(STYPE_DYNSTR)),
@@ -549,26 +576,18 @@ bool patchPs4Lib(Ps4Module &lib, /* ret */ std::string &newPath) {
     };
     newSectionMap.addSection(STYPE_DYNAMIC, dynamicSHdr);
 
-    Elf64_Shdr dynsymSHdr = {
-        .sh_name = appendToStrtab(strtab, section_names[STYPE_DYNSYM]),
-        .sh_type = SHT_SYMTAB,
-        .sh_entsize = sizeof(Elf64_Sym)
-    };
-    Section &dynsym = newSectionMap.addSection(STYPE_DYNSYM, dynstrSHdr);
-
-    std::vector<section_type> miscSections = {
-        STYPE_STRTAB,
+    std::vector<section_type> extraDynSections = {
         STYPE_DYNSTR,
         STYPE_DYNSYM,
     };
-    Elf64_Phdr miscLoadSegmentHdr {
+    Elf64_Phdr extraDynSegmentHdr {
         .p_type = PT_LOAD,
         .p_flags = PF_R
     };
-    rebaseSegment(&miscLoadSegmentHdr, progHdrs);
+    rebaseSegment(&extraDynSegmentHdr, progHdrs);
     writePadding(f, PGSZ);
-    miscLoadSegmentHdr.p_offset = ftell(f);
-    Segment miscLoadSegment = CreateSegment(miscLoadSegmentHdr, miscSections, newSectionMap);
+    extraDynSegmentHdr.p_offset = ftell(f);
+    Segment miscLoadSegment = CreateSegment(extraDynSegmentHdr, extraDynSections, newSectionMap);
     fseek(f, 0, SEEK_END);
     assert(1 == fwrite(miscLoadSegment.contents.data(), miscLoadSegment.contents.size(), 1, f));
 
@@ -580,7 +599,7 @@ bool patchPs4Lib(Ps4Module &lib, /* ret */ std::string &newPath) {
 
     fseek(f, 0, SEEK_END);
     elfHdr.e_shoff = ftell(f);
-    elfHdr.e_shstrndx = newSectionMap.getSectionIndex(STYPE_STRTAB);
+    elfHdr.e_shstrndx = newSectionMap.getSectionIndex(STYPE_SHSTRTAB);
     //elfHdr.e_shnum = 
     std::vector<Elf64_Shdr> sectionHeaders = newSectionMap.getHeaders();
     elfHdr.e_shnum = sectionHeaders.size();
@@ -589,12 +608,16 @@ bool patchPs4Lib(Ps4Module &lib, /* ret */ std::string &newPath) {
     fseek(f, 0, SEEK_SET);
     assert(1 == fwrite(&elfHdr, sizeof(Elf64_Ehdr), 1, f));
 
+    // TODO add misc static sections (shstrtab, etc)
+    assert(false);
 
-    // update ELF header to file
-    // e_shoff, e_shnum, e_shstrndx
-    //   
-
-    //lib.strtab = newStrtab;
+    /*lib.strtab.resize(shstrtab.contents.size());
+    memcpy(lib.strtab.data(), shstrtab.contents.data(), shstrtab.contents.size());
+    for (int i = 0; i < sectionHeaders.size(); i++) {
+        Elf64_Shdr sHdr = sectionHeaders[i];
+        printf("index: %i\n", i);
+        dumpShdr(lib, &sHdr);
+    }*/
 
     fsync(fileno(f));
     fclose(f);
