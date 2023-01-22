@@ -7,3 +7,5 @@ nid_hash/nid_hash
 .gdb_history
 .brestore.gdb
 *.so
+.*
+build/

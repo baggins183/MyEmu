@@ -1,6 +1,6 @@
 #include "Common.h"
-#include "elf-sce.h"
-#include "elf_amd64.h"
+#include "Elf/elf-sce.h"
+#include "Elf/elf_amd64.h"
 #ifdef __linux
 #include <cstdint>
 #endif
@@ -20,7 +20,7 @@
 #include <utility>
 
 #include <algorithm>
-#include "../nid_hash/nid_hash.h"
+#include "nid_hash/nid_hash.h"
 
 #define ROUND_DOWN(x, SZ) ((x) - (x) % (SZ))
 #define ROUND_UP(x, SZ) ( (x) % (SZ) ? (x) - ((x) % (SZ)) + (SZ) : (x))
