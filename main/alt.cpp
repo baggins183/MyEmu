@@ -91,14 +91,14 @@ public:
     Section(section_type type, Elf64_Shdr sHdr): type(type), hdr(sHdr) {}
     Section(section_type type): type(type) {
         hdr.sh_name = 0;
-        hdr.sh_type = SHN_UNDEF;
-        hdr.sh_flags = SHF_WRITE | SHF_ALLOC | SHF_EXECINSTR;
-        hdr.sh_addr = -1;
-        hdr.sh_offset = -1;
-        hdr.sh_size = -1;
+        hdr.sh_type = SHT_NULL;
+        hdr.sh_flags = 0;
+        hdr.sh_addr = 0;
+        hdr.sh_offset = 0;
+        hdr.sh_size = 0;
         hdr.sh_link = 0;
         hdr.sh_info = 0;
-        hdr.sh_addralign = PGSZ;
+        hdr.sh_addralign = 0;
         hdr.sh_entsize = 0;
     }
     Section(): Section(STYPE_NULL) {}
@@ -578,8 +578,12 @@ bool patchPs4Lib(Ps4Module &lib, /* ret */ std::string &newPath) {
     };
     newSectionMap.addSection(STYPE_NULL, firstHdr);*/
 
+    Section &firstSection = newSectionMap.addSection(STYPE_NULL);
+    firstSection.setName(0);
+    firstSection.setType(SHT_NULL);
+
     Section &shstrtab = newSectionMap.addSection(STYPE_SHSTRTAB);
-    appendToStrtab(shstrtab, "dummy;;;");
+    appendToStrtab(shstrtab, "\0");
     shstrtab.setName(appendToStrtab(shstrtab, section_names[STYPE_SHSTRTAB]));
     shstrtab.setType(SHT_STRTAB);
     //shstrtab.setFlags(SHF_STRINGS);
@@ -590,6 +594,7 @@ bool patchPs4Lib(Ps4Module &lib, /* ret */ std::string &newPath) {
     dynstr.setName(appendToStrtab(shstrtab, section_names[STYPE_DYNSTR]));
     dynstr.setType(SHT_STRTAB);
     dynstr.setFlags(SHF_STRINGS | SHF_ALLOC);
+    dynstr.setAddrAlign(PGSZ);
 
     Section &dynsym = newSectionMap.addSection(STYPE_DYNSYM);
     dynsym.setName(appendToStrtab(shstrtab, section_names[STYPE_DYNSYM]));
@@ -597,6 +602,7 @@ bool patchPs4Lib(Ps4Module &lib, /* ret */ std::string &newPath) {
     dynsym.setFlags(SHF_WRITE | SHF_ALLOC);
     dynsym.setLink(static_cast<Elf32_Word>(newSectionMap.getSectionIndex(STYPE_DYNSTR)));
     dynsym.setEntSize(sizeof(Elf64_Sym));
+    dynsym.setAddrAlign(PGSZ);
 
     Section &dynamic = newSectionMap.addSection(STYPE_DYNAMIC);
     dynamic.setName(appendToStrtab(shstrtab, section_names[STYPE_DYNAMIC]));
