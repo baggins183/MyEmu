@@ -1,6 +1,12 @@
 #ifndef _COMMON_H_
 #define _COMMON_H_
 
+#include <elf.h>
+#include "Elf/elf_amd64.h"
+
+// make sure this gets included after elf.h to undef some stuff (mostly for debugging)
+#include "Elf/elf-sce.h"
+
 #ifdef __linux
 #include <cstdint>
 #endif

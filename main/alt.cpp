@@ -1,6 +1,7 @@
 #include "Common.h"
-#include "Elf/elf-sce.h"
-#include "Elf/elf_amd64.h"
+#include "nid_hash/nid_hash.h"
+
+#include <elf.h>
 #include <sys/types.h>
 #ifdef __linux
 #include <cstdint>
@@ -10,7 +11,6 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <errno.h>
-#include <elf.h>
 #include <stdlib.h>
 #include <cassert>
 #include <vector>
@@ -21,10 +21,8 @@
 #include <utility>
 
 #include <algorithm>
-#include "nid_hash/nid_hash.h"
 #include <dlfcn.h>
 #include <libgen.h>
-#include <map>
 
 const long PGSZ = sysconf(_SC_PAGE_SIZE);
 const std::string ebootPath = "eboot.bin";
@@ -77,7 +75,7 @@ class HostModule : public Module {
 
 enum section_type {
     SECTION_TABLE(SECTION_ENUM_LIST)
-    NUM_SECTIONS,
+    STYPE_NUM_SECTIONS,
 };
 
 const char *section_names[] {
@@ -381,20 +379,21 @@ static bool patchDynamicSegment(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, Se
 
     std::vector<Elf64_Dyn> newEntries;
 
-    Elf64_Dyn *dynEnt;
-    for(int i = 0; ; i++) {
-        assert((i + 1) * sizeof(Elf64_Dyn) <= dynPhdr->p_filesz);
-        unsigned char *off = &buf[i * sizeof(Elf64_Dyn)];
-        dynEnt = (Elf64_Dyn *) off;
-
-        if (dynEnt->d_tag == DT_NULL) {
+    Elf64_Dyn *dynEnt = (Elf64_Dyn*) buf.data();
+    
+    int maxDynHeaders = dynPhdr->p_filesz / sizeof(Elf64_Dyn);
+    for(int i = 0; i < maxDynHeaders; i++, dynEnt++) {
+        DynamicTag tag = (DynamicTag) dynEnt->d_tag;
+        if (tag == DT_NULL) {
             newEntries.push_back(*dynEnt);
             break;
         }
 
-        switch(dynEnt->d_tag) {
+        switch(tag) {
             // DT_ tags
             case DT_NULL:
+                assert(false && "shouldn't be here");
+                break;
             case DT_NEEDED:
             case DT_PLTRELSZ:
             case DT_PLTGOT:
@@ -439,10 +438,12 @@ static bool patchDynamicSegment(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, Se
             case DT_PROCNUM:
                 newEntries.push_back(*dynEnt);
                 break;
+            default:
+                break;
         }
 
         //uint64_t val = entry.d_un.d_val;
-        switch(dynEnt->d_tag) {
+        switch(tag) {
             // DT_SCE tags
             case DT_SCE_NEEDED_MODULE:
                 break;
@@ -467,7 +468,6 @@ static bool patchDynamicSegment(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, Se
             case DT_SCE_RELAENT:
                 break;
             case DT_SCE_STRTAB:
-
                 break;
             case DT_SCE_STRSZ:
                 break;
@@ -488,12 +488,6 @@ static bool patchDynamicSegment(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, Se
     // There are DT_NEEDED's in the ents. Should put them in our new strtab
     // Should also replace DT_STRTAB address w/ new strtab address
     // ps4 libs have DT_SCE_STRTAB, convert this to DT_STRTAB
-    //
-    // We need to put the strtab in a new loadable segment
-    // Should standardize the way we build and append new segments/sections
-    // sections can have a parent segment for simplicity
-    // each segment can be a list of sections, each section can be a list of
-    // buffers 
 
     writePadding(elf, PGSZ);
     uint64_t segmentFileOff = ftell(elf);
@@ -615,6 +609,9 @@ bool patchPs4Lib(Ps4Module &lib, /* ret */ std::string &newPath) {
     dynamic.setAddrAlign(dynamicPHdr->p_align);
     dynamic.setEntSize(sizeof(Elf64_Dyn));
     
+    // Create dynstr, dynsym sections
+
+
     // Add sections used in relocs, loading dynamic dependencies, etc
     // Use a new segment
     std::vector<section_type> dynlibDataSections = {
@@ -676,8 +673,6 @@ bool patchPs4Lib(Ps4Module &lib, /* ret */ std::string &newPath) {
     // write elf headers, now referring to new program and section headers
     fseek(f, 0, SEEK_SET);
     assert(1 == fwrite(&elfHdr, sizeof(Elf64_Ehdr), 1, f));
-
-    // TODO add misc static sections (shstrtab, etc)
 
     /*lib.strtab.resize(shstrtab.contents.size());
     memcpy(lib.strtab.data(), shstrtab.contents.data(), shstrtab.contents.size());
