@@ -2,6 +2,8 @@
 
 // Sony SCE ELF specified types
 
+// define some enums for debugging convenience
+
 
 // ELF Types
 #define ET_SCE_EXEC	0xFE00
@@ -72,6 +74,91 @@
 enum ProgramSegmentType {
     PT_TABLE(PT_ENUM_OP)
     PT_SCE_TABLE(PT_ENUM_OP)
+};
+
+#undef SHT_NULL
+#undef SHT_PROGBITS
+#undef SHT_SYMTAB
+#undef SHT_STRTAB
+#undef SHT_RELA
+#undef SHT_HASH
+#undef SHT_DYNAMIC
+#undef SHT_NOTE
+#undef SHT_NOBITS
+#undef SHT_REL
+#undef SHT_SHLIB
+#undef SHT_DYNSYM
+#undef SHT_INIT_ARRAY
+#undef SHT_FINI_ARRAY
+#undef SHT_PREINIT_ARRAY
+#undef SHT_GROUP
+#undef SHT_SYMTAB_SHNDX
+#undef SHT_RELR
+#undef SHT_NUM
+#undef SHT_LOOS
+#undef SHT_GNU_ATTRIBUTES
+#undef SHT_GNU_HASH
+#undef SHT_GNU_LIBLIST
+#undef SHT_CHECKSUM
+#undef SHT_LOSUNW
+#undef SHT_SUNW_move
+#undef SHT_SUNW_COMDAT
+#undef SHT_SUNW_syminfo
+#undef SHT_GNU_verdef
+#undef SHT_GNU_verneed
+#undef SHT_GNU_versym
+#undef SHT_HISUNW
+#undef SHT_HIOS
+#undef SHT_LOPROC
+#undef SHT_HIPROC
+#undef SHT_LOUSER
+#undef SHT_HIUSER
+
+/* Legal values for sh_type (section type).  */
+#define SHT_TABLE(OP) \
+    OP(SHT_NULL,	  0) \
+    OP(SHT_PROGBITS,	  1) \
+    OP(SHT_SYMTAB,	  2) \
+    OP(SHT_STRTAB,	  3) \
+    OP(SHT_RELA,	  4) \
+    OP(SHT_HASH,	  5) \
+    OP(SHT_DYNAMIC,	  6) \
+    OP(SHT_NOTE,	  7) \
+    OP(SHT_NOBITS,	  8) \
+    OP(SHT_REL,		  9) \
+    OP(SHT_SHLIB,	  10) \
+    OP(SHT_DYNSYM,	  11) \
+    OP(SHT_INIT_ARRAY,	  14) \
+    OP(SHT_FINI_ARRAY,	  15) \
+    OP(SHT_PREINIT_ARRAY, 16) \
+    OP(SHT_GROUP,	  17) \
+    OP(SHT_SYMTAB_SHNDX,  18) \
+    OP(SHT_RELR,	  19) \
+    OP(SHT_NUM,		  20) \
+    OP(SHT_LOOS,	  0x60000000) \
+    OP(SHT_GNU_ATTRIBUTES, 0x6ffffff5) \
+    OP(SHT_GNU_HASH,	  0x6ffffff6) \
+    OP(SHT_GNU_LIBLIST,	  0x6ffffff7) \
+    OP(SHT_CHECKSUM,	  0x6ffffff8) \
+    OP(SHT_LOSUNW,	  0x6ffffffa) \
+    OP(SHT_SUNW_move,	  0x6ffffffa) \
+    OP(SHT_SUNW_COMDAT,   0x6ffffffb) \
+    OP(SHT_SUNW_syminfo,  0x6ffffffc) \
+    OP(SHT_GNU_verdef,	  0x6ffffffd) \
+    OP(SHT_GNU_verneed,	  0x6ffffffe) \
+    OP(SHT_GNU_versym,	  0x6fffffff) \
+    OP(SHT_HISUNW,	  0x6fffffff) \
+    OP(SHT_HIOS,	  0x6fffffff) \
+    OP(SHT_LOPROC,	  0x70000000) \
+    OP(SHT_HIPROC,	  0x7fffffff) \
+    OP(SHT_LOUSER,	  0x80000000) \
+    OP(SHT_HIUSER,	  0x8fffffff)
+
+#define SHT_ENUM_OP(name, value) \
+    name = value,
+
+enum ShtType {
+    SHT_TABLE(SHT_ENUM_OP)
 };
 
 
