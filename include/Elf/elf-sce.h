@@ -193,7 +193,6 @@ enum ShtType {
 #undef DT_FINI_ARRAYSZ
 #undef DT_RUNPATH
 #undef DT_FLAGS
-#undef DT_ENCODING
 #undef DT_PREINIT_ARRAY
 #undef DT_PREINIT_ARRAYSZ
 #undef DT_SYMTAB_SHNDX
@@ -239,7 +238,6 @@ enum ShtType {
     OP(DT_FINI_ARRAYSZ,	28) \
     OP(DT_RUNPATH,	29) \
     OP(DT_FLAGS,	30) \
-    OP(DT_ENCODING,	32) \
     OP(DT_PREINIT_ARRAY, 32) \
     OP(DT_PREINIT_ARRAYSZ, 33) \
     OP(DT_SYMTAB_SHNDX,	34) \

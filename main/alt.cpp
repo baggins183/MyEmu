@@ -93,6 +93,14 @@ public:
     std::vector<unsigned char> contents;
 };
 
+struct SectionMap {
+    // Assume first section is null, so 0 index is taken and invalid
+    uint shstrtabIdx;
+    uint dynstrIdx;
+    uint dynsymIdx;
+    uint dynamicIdx;
+};
+
 struct Segment {
     Elf64_Phdr pHdr;
     std::vector<unsigned char> contents;
@@ -291,17 +299,16 @@ void rebaseSegment(Elf64_Phdr *pHdr, std::vector<Elf64_Phdr> &progHdrs) {
 // write new Segment for PT_DYNAMIC based on SCE dynamic entries
 // append to end of file
 // modify the progHdrs array
-static bool patchDynamicSegment(FILE *elf, std::vector<Elf64_Phdr> &progHdrs) {
-    int idx = findPhdr(progHdrs, PT_DYNAMIC);
-    assert(idx >= 0);
-    Elf64_Phdr *dynPhdr = &progHdrs[idx];
+// add new dynlibdata sections and update section map
+static bool patchDynamicSegment(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, std::vector<Section> &sections, SectionMap &sMap) {
+    Elf64_Phdr *dynPhdr = &progHdrs[findPhdr(progHdrs, PT_DYNAMIC)];
 
     std::vector<unsigned char> buf(dynPhdr->p_filesz);
 
     fseek(elf, dynPhdr->p_offset, SEEK_SET);
     assert(1 == fread(buf.data(), dynPhdr->p_filesz, 1, elf));
 
-    std::vector<Elf64_Dyn> newEntries;
+    std::vector<Elf64_Dyn> newDynEnts;
 
     Elf64_Dyn *dynEnt = (Elf64_Dyn*) buf.data();
     
@@ -309,7 +316,7 @@ static bool patchDynamicSegment(FILE *elf, std::vector<Elf64_Phdr> &progHdrs) {
     for(int i = 0; i < maxDynHeaders; i++, dynEnt++) {
         DynamicTag tag = (DynamicTag) dynEnt->d_tag;
         if (tag == DT_NULL) {
-            newEntries.push_back(*dynEnt);
+            newDynEnts.push_back(*dynEnt);
             break;
         }
 
@@ -319,6 +326,11 @@ static bool patchDynamicSegment(FILE *elf, std::vector<Elf64_Phdr> &progHdrs) {
                 assert(false && "shouldn't be here");
                 break;
             case DT_NEEDED:
+                // "Additionally, DT_NEEDED tags are created for each dynamic library used by the application.
+                // The value is set to the offset of the library's name in the string table. Each DT_NEEDED tag 
+                // should also have a corresponding DT_SCE_IMPORT_LIB and DT_SCE_IMPORT_LIB_ATTR tag."
+                // Need to change strings to their legal ELF counterparts.
+                // Find out which strtab this should use
             case DT_PLTRELSZ:
             case DT_PLTGOT:
             case DT_HASH:
@@ -330,7 +342,11 @@ static bool patchDynamicSegment(FILE *elf, std::vector<Elf64_Phdr> &progHdrs) {
             case DT_STRSZ:
             case DT_SYMENT:
             case DT_INIT:
+                // startup routine
+                // can probably leave as is
+                // https://docs.oracle.com/cd/E23824_01/html/819-0690/chapter2-55859.html#chapter2-48195
             case DT_FINI:
+                // ^
             case DT_SONAME:
             case DT_RPATH:
             case DT_SYMBOLIC:
@@ -348,6 +364,8 @@ static bool patchDynamicSegment(FILE *elf, std::vector<Elf64_Phdr> &progHdrs) {
             case DT_FINI_ARRAYSZ:
             case DT_RUNPATH:
             case DT_FLAGS:
+                //https://docs.oracle.com/cd/E23824_01/html/819-0690/chapter6-42444.html#chapter7-tbl-5            
+                // should be DF_TEXTREL
             case DT_PREINIT_ARRAY:
             case DT_PREINIT_ARRAYSZ:
             case DT_SYMTAB_SHNDX:
@@ -360,7 +378,7 @@ static bool patchDynamicSegment(FILE *elf, std::vector<Elf64_Phdr> &progHdrs) {
             case DT_LOPROC:
             case DT_HIPROC:
             case DT_PROCNUM:
-                newEntries.push_back(*dynEnt);
+                newDynEnts.push_back(*dynEnt);
                 break;
             default:
                 break;
@@ -370,59 +388,123 @@ static bool patchDynamicSegment(FILE *elf, std::vector<Elf64_Phdr> &progHdrs) {
         switch(tag) {
             // DT_SCE tags
             case DT_SCE_NEEDED_MODULE:
+                // dunno the difference between libs and modules here
+                // "The indexes into the library list start at index 0, and the indexes into the module
+                // list start at index 1. Most of the time, the library list and module list are in 
+                // the same order, so the module ID is usually the library ID + 1. 
+                // This is not always the case however because some modules contain more than one library."
                 break;
             case DT_SCE_IMPORT_LIB:
                 break;
             case DT_SCE_IMPORT_LIB_ATTR:
                 break;                       
             case DT_SCE_HASH:
+                // sym hashtable, ignore for now
                 break;
             case DT_SCE_PLTGOT:
+                // Contains .data.rel.ro and .got.plt
+                // Can possibly just convert to DT_PLTGOT
+                // (didn't need this in old attempt, relocs just affect this area)
+                // Should add section headers
                 break;
             case DT_SCE_JMPREL:
+                // Offset of the table containing jump slots
+                // Relative to dynlibdata segment start
+                // At this point, next DT_SCE_PLTRELSZ:d_val jmp slot relocations (rela),
+                // then DT_SCE_RELASZ:d_val relas seem to follow
                 break;                 
             case DT_SCE_PLTREL:
+                // Types of relocations (DT_RELA)
                 break;
             case DT_SCE_PLTRELSZ:
+                // Seems to be the # of jmp slot relocations.
+                // See DT_SCE_JMPREL
                 break;                  
             case DT_SCE_RELA:
+                // seems to be unused
+                // maybe because redundancy with DT_SCE_JMPREL, DT_SCE_PLTRELSZ, DT_SCE_RELASZ
                 break;
             case DT_SCE_RELASZ:
+                // number of relas that follow PLT relas
                 break;
             case DT_SCE_RELAENT:
+                // size of rela entries (0x18)
                 break;
             case DT_SCE_STRTAB:
+                // Contains hashed sym names
+                // Convert to DT_STRTAB
+                // Unhash all known strings, put in .dynstr, map dynent to this
                 break;
             case DT_SCE_STRSZ:
+                // Convert to DT_STRSZ based on DT_SCE_STRTAB conversion
                 break;
             case DT_SCE_SYMTAB:
+                // Convert to DT_SYMTAB
+                // find new string offsets based on DT_SCE_STRTAB
+                // Make new SHT_DYNSYM section, link to .dynsym/whatever DT_SCE_STRTAB maps to
+                // TODO, look at sh_info requirement for that section
+                // Special Sections at https://docs.oracle.com/cd/E19683-01/817-3677/6mj8mbtc9/index.html#chapter6-79797
                 break;
             case DT_SCE_SYMENT:
+                // size of syments (0x18)
                 break;                                                
             case DT_SCE_HASHSZ:
+                // size of sym hashtable, ignore for now
                 break;
             case DT_SCE_SYMTABSZ:
+                // write size of converted symtab (might be same sz)
                 break;
             default:
                 break;
         }
     }
 
-    // TODO
-    // There are DT_NEEDED's in the ents. Should put them in our new strtab
-    // Should also replace DT_STRTAB address w/ new strtab address
-    // ps4 libs have DT_SCE_STRTAB, convert this to DT_STRTAB
-
     writePadding(elf, PGSZ);
     uint64_t segmentFileOff = ftell(elf);
-    assert(1 == fwrite(newEntries.data(), newEntries.size() * sizeof(Elf64_Dyn), 1, elf));
+    assert(1 == fwrite(newDynEnts.data(), newDynEnts.size() * sizeof(Elf64_Dyn), 1, elf));
+
+    Elf64_Shdr sHdr;
 
     // calculate p_vaddr, p_paddr
     rebaseSegment(dynPhdr, progHdrs);
     //dynPhdr->p_align = PGSZ;
     dynPhdr->p_flags = PF_X | PF_W | PF_R;
     dynPhdr->p_offset = segmentFileOff;
-    dynPhdr->p_filesz = newEntries.size() * sizeof(Elf64_Dyn);
+    dynPhdr->p_filesz = newDynEnts.size() * sizeof(Elf64_Dyn);
+
+    sMap.dynstrIdx = sections.size();
+    sHdr = {
+        .sh_name = appendToStrtab(sections[sMap.shstrtabIdx], ".dynstr"),
+        .sh_type = SHT_STRTAB,
+        .sh_flags = SHF_STRINGS | SHF_ALLOC,
+        .sh_addralign = static_cast<Elf64_Xword>(PGSZ),
+    };
+    sections.emplace_back(sHdr);
+
+    sMap.dynsymIdx = sections.size();
+    sHdr = {
+        .sh_name = appendToStrtab(sections[sMap.shstrtabIdx], ".dynsym"),
+        .sh_type = SHT_SYMTAB,
+        .sh_flags = SHF_WRITE | SHF_ALLOC,
+        .sh_link = sMap.dynstrIdx,
+        .sh_addralign = static_cast<Elf64_Xword>(PGSZ),
+        .sh_entsize = sizeof(Elf64_Sym),
+    };
+    sections.emplace_back(sHdr);
+
+    sMap.dynamicIdx = sections.size();
+    sHdr = {
+        .sh_name = appendToStrtab(sections[sMap.shstrtabIdx], ".dynamic"),
+        .sh_type = SHT_DYNAMIC,
+        .sh_flags = SHF_WRITE | SHF_ALLOC,
+        .sh_addr = dynPhdr->p_vaddr,
+        .sh_offset = dynPhdr->p_offset,
+        .sh_size = dynPhdr->p_memsz,
+        .sh_link = sMap.dynstrIdx,
+        .sh_addralign = dynPhdr->p_align,
+        .sh_entsize = sizeof(Elf64_Dyn),
+    };
+    sections.emplace_back(sHdr);    
 
     return true;
 }
@@ -467,12 +549,9 @@ bool patchPs4Lib(Ps4Module &lib, /* ret */ std::string &newPath) {
     fseek(f, elfHdr.e_phoff, SEEK_SET);
     assert(elfHdr.e_phnum == fread(progHdrs.data(), sizeof(Elf64_Phdr), elfHdr.e_phnum, f));
 
-    int idx = findPhdr(progHdrs, PT_DYNAMIC);
-    assert(idx >= 0);
-    Elf64_Phdr *dynamicPHdr = &progHdrs[idx];
-    patchDynamicSegment(f, progHdrs);
-
+    // Section headers accumulate here
     std::vector<Section> sections;
+    SectionMap sMap;
 
     sHdr = {
         .sh_name = 0,
@@ -480,48 +559,17 @@ bool patchPs4Lib(Ps4Module &lib, /* ret */ std::string &newPath) {
     };
     sections.emplace_back(sHdr);
 
-    uint shstrtabIdx = sections.size();
+    sMap.shstrtabIdx = sections.size();
     sHdr = {
         .sh_type = SHT_STRTAB,
         .sh_flags = 0,
         .sh_addralign = 1,
     };
     sections.emplace_back(sHdr);
-    appendToStrtab(sections[shstrtabIdx], "\0");
-    sections[shstrtabIdx].setName(appendToStrtab(sections[shstrtabIdx], ".shstrtab"));
+    appendToStrtab(sections[sMap.shstrtabIdx], "\0");
+    sections[sMap.shstrtabIdx].setName(appendToStrtab(sections[sMap.shstrtabIdx], ".shstrtab"));
 
-    uint dynstrIdx = sections.size();
-    sHdr = {
-        .sh_name = appendToStrtab(sections[shstrtabIdx], ".dynstr"),
-        .sh_type = SHT_STRTAB,
-        .sh_flags = SHF_STRINGS | SHF_ALLOC,
-        .sh_addralign = static_cast<Elf64_Xword>(PGSZ),
-    };
-    sections.emplace_back(sHdr);
-
-    uint dynsymIdx = sections.size();
-    sHdr = {
-        .sh_name = appendToStrtab(sections[shstrtabIdx], ".dynsym"),
-        .sh_type = SHT_SYMTAB,
-        .sh_flags = SHF_WRITE | SHF_ALLOC,
-        .sh_link = dynstrIdx,
-        .sh_addralign = static_cast<Elf64_Xword>(PGSZ),
-        .sh_entsize = sizeof(Elf64_Sym),
-    };
-    sections.emplace_back(sHdr);
-
-    sHdr = {
-        .sh_name = appendToStrtab(sections[shstrtabIdx], ".dynamic"),
-        .sh_type = SHT_DYNAMIC,
-        .sh_flags = SHF_WRITE | SHF_ALLOC,
-        .sh_addr = dynamicPHdr->p_vaddr,
-        .sh_offset = dynamicPHdr->p_offset,
-        .sh_size = dynamicPHdr->p_memsz,
-        .sh_link = dynstrIdx,
-        .sh_addralign = dynamicPHdr->p_align,
-        .sh_entsize = sizeof(Elf64_Dyn),
-    };
-    sections.emplace_back(sHdr);
+    patchDynamicSegment(f, progHdrs, sections, sMap);
     
     // Create dynstr, dynsym sections
 
@@ -529,8 +577,8 @@ bool patchPs4Lib(Ps4Module &lib, /* ret */ std::string &newPath) {
     // Add sections used in relocs, loading dynamic dependencies, etc
     // Use a new segment
     std::vector<uint> dynlibDataSections = {
-        dynstrIdx,
-        dynsymIdx,
+        sMap.dynstrIdx,
+        sMap.dynsymIdx,
     };
     Elf64_Phdr dynlibDataSegmentHdr {
         .p_type = PT_LOAD,
@@ -552,7 +600,7 @@ bool patchPs4Lib(Ps4Module &lib, /* ret */ std::string &newPath) {
     // Want to make sure they own their own parts of the ELF and
     // future segments see that their region is owned when using rebaseSegment
     std::vector<uint> extraSections {
-        shstrtabIdx
+        sMap.shstrtabIdx
     };
     Elf64_Phdr extraSegmentHdr {
         .p_type = PT_NULL,
@@ -577,7 +625,7 @@ bool patchPs4Lib(Ps4Module &lib, /* ret */ std::string &newPath) {
     fseek(f, 0, SEEK_END);
     writePadding(f, PGSZ, true);
     elfHdr.e_shoff = ftell(f);
-    elfHdr.e_shstrndx = shstrtabIdx;
+    elfHdr.e_shstrndx = sMap.shstrtabIdx;
     std::vector<Elf64_Shdr> sectionHeaders;
     for (Section &section: sections) {
         sectionHeaders.push_back(section.hdr);
