@@ -1,18 +1,60 @@
 #pragma once
+#include <map>
+#include <string>
 
-// Sony SCE ELF specified types
+// Sony SCE ELF types
 
 // define some enums for debugging convenience
 
+// Common macros
+#define STRING_OP(name, value) \
+    { name, #name },
 
-// ELF Types
-#include <map>
-#define ET_SCE_EXEC	0xFE00
-#define ET_SCE_REPLAY_EXEC	0xFE01
-#define ET_SCE_RELEXEC	0XFE04
-#define ET_SCE_STUBLIB	0xFE0C
-#define ET_SCE_DYNEXEC	0xFE10
-#define ET_SCE_DYNAMIC	0xFE18
+#define ENUM_OP(name, value) \
+    name = value,    
+
+#undef ET_NONE
+#undef ET_REL
+#undef ET_EXEC
+#undef ET_DYN
+#undef ET_CORE
+#undef ET_NUM
+#undef ET_LOOS
+#undef ET_HIOS
+#undef ET_LOPROC
+#undef ET_HIPROC
+
+#define ET_TABLE(OP) \
+    OP(ET_NONE,		0) \
+    OP(ET_REL,		1) \
+    OP(ET_EXEC,		2) \
+    OP(ET_DYN,		3) \
+    OP(ET_CORE,		4) \
+    OP(ET_NUM,		5) \
+    OP(ET_LOOS,		0xfe00) \
+    OP(ET_HIOS,		0xfeff) \
+    OP(ET_LOPROC,	0xff00) \
+    OP(ET_HIPROC,	0xffff)
+
+#define ET_SCE_TABLE(OP) \
+    OP(ET_SCE_EXEC,	0xFE00) \
+    OP(ET_SCE_REPLAY_EXEC,	0xFE01) \
+    OP(ET_SCE_RELEXEC,	0XFE04) \
+    OP(ET_SCE_STUBLIB,	0xFE0C) \
+    OP(ET_SCE_DYNEXEC,	0xFE10) \
+    OP(ET_SCE_DYNAMIC,	0xFE18)
+
+enum EtType {
+    ET_TABLE(ENUM_OP)
+    ET_SCE_TABLE(ENUM_OP)
+};
+
+static std::map<EtType, const char *> et_strings_map = {
+    ET_TABLE(STRING_OP)
+    ET_SCE_TABLE(STRING_OP)
+};
+
+
 
 #undef PT_NULL
 #undef PT_LOAD
@@ -69,16 +111,10 @@
     OP(PT_SCE_COMMENT,	0X6FFFFF00) \
     OP(PT_SCE_LIBVERSION,	0X6FFFFF01)
 
-#define PT_ENUM_OP(name, value) \
-    name = value,
-
 enum ProgramSegmentType {
-    PT_TABLE(PT_ENUM_OP)
-    PT_SCE_TABLE(PT_ENUM_OP)
+    PT_TABLE(ENUM_OP)
+    PT_SCE_TABLE(ENUM_OP)
 };
-
-#define STRING_OP(name, value) \
-    { name, #name },
 
 static std::map<ProgramSegmentType, const char *> pt_strings_map = {
     PT_TABLE(STRING_OP)
@@ -163,11 +199,8 @@ static std::map<ProgramSegmentType, const char *> pt_strings_map = {
     OP(SHT_LOUSER,	  0x80000000) \
     OP(SHT_HIUSER,	  0x8fffffff)
 
-#define SHT_ENUM_OP(name, value) \
-    name = value,
-
 enum ShtType {
-    SHT_TABLE(SHT_ENUM_OP)
+    SHT_TABLE(ENUM_OP)
 };
 
 static std::map<ShtType, const char *> sht_strings_map = {
@@ -295,15 +328,20 @@ static std::map<ShtType, const char *> sht_strings_map = {
     OP(DT_SCE_SYMTABSZ,		0x6100003F) \
     OP(DT_SCE_HIOS,		0X6FFFF000)
 
-#define DT_ENUM_OP(name, value) \
-    name = value,
-
 enum DynamicTag {
-    DT_TABLE(DT_ENUM_OP)
-    DT_SCE_TABLE(DT_ENUM_OP)
+    DT_TABLE(ENUM_OP)
+    DT_SCE_TABLE(ENUM_OP)
 };
 
 static std::map<DynamicTag, const char *> dt_strings_map = {
     DT_TABLE(STRING_OP)
     DT_SCE_TABLE(STRING_OP)
 };
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+static std::string to_string(EtType tag) { return et_strings_map[tag]; }
+static std::string to_string(ProgramSegmentType tag) { return pt_strings_map[tag]; }
+static std::string to_string(ShtType tag) { return sht_strings_map[tag]; }
+static std::string to_string(DynamicTag tag) { return dt_strings_map[tag]; }
+#pragma GCC diagnostic pop // -Wunused-function

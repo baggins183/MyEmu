@@ -102,7 +102,7 @@ public:
         if (name) {
             buf << "name: "  << name << std::endl;
         }
-        buf << "sh_type: "     << sht_strings_map[(ShtType) hdr.sh_type] << std::endl;
+        buf << "sh_type: "     << to_string((ShtType) hdr.sh_type) << std::endl;
         buf << "sh_addr: "     << hdr.sh_addr << std::endl;
         buf << "sh_offset: "   << hdr.sh_offset << std::endl;
         buf << "sh_size: "     << hdr.sh_size << std::endl;
@@ -237,7 +237,7 @@ static void dumpElfHdr(const char *name) {
     printf("ELF HEADER DUMP:\n"
         "name: %s\n"
         "\te_ident: %s\n"
-        "\te_type: %d\n"
+        "\te_type: %s\n"
         "\te_machine: %d\n"
         "\te_version: %d\n"
         "\te_entry: 0x%lx\n"
@@ -252,7 +252,7 @@ static void dumpElfHdr(const char *name) {
         "\tABI: %hhu\n",
         name,
         elfHdr.e_ident,
-        elfHdr.e_type,
+        to_string((EtType) elfHdr.e_type).c_str(),
         elfHdr.e_machine,
         elfHdr.e_version,
         elfHdr.e_entry,
@@ -351,6 +351,7 @@ void rebaseSegment(Elf64_Phdr *pHdr, std::vector<Elf64_Phdr> &progHdrs) {
     pHdr->p_paddr = ROUND_UP(highestPAddr, pHdr->p_align);    
 }
 
+// Build new dynamic sections from the PT_SCE_DYNLIBDATA segment
 static bool fixDynlibData(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, struct DynamicTableInfo info, std::vector<Section> &sections, SectionMap &sMap, std::vector<Elf64_Dyn> &dynEnts) {
     uint phIdx = findPhdr(progHdrs, PT_SCE_DYNLIBDATA);
     std::vector<unsigned char> dynlibContents(progHdrs[phIdx].p_filesz);
@@ -359,6 +360,7 @@ static bool fixDynlibData(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, struct D
     assert(sMap.shstrtabIdx);
     assert(sMap.dynsymIdx);
     assert(sMap.relaIdx);
+    assert(sMap.gotpltIdx);
 
     fseek(elf, progHdrs[phIdx].p_offset, SEEK_SET);
     if (1 != fread(dynlibContents.data(), progHdrs[phIdx].p_filesz, 1, elf)) {
@@ -373,6 +375,8 @@ static bool fixDynlibData(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, struct D
         dynEnts.push_back(needed);
     }
 
+    // Ps4 ELF's always seem to have plt rela entries (.rela.plt) followed immediately by normal rela entries (.rela)
+    // Keep this until I find a counterexample
     assert(info.relaOff == info.jmprelOff + info.pltrelsz);
 
     uint numJmpRelas = info.pltrelsz / info.relaEntSz;
@@ -439,7 +443,7 @@ static bool fixDynamicInfoForLinker(FILE *elf, std::vector<Elf64_Phdr> &progHdrs
             break;
         }
 
-        //printf("%s\n", dt_strings_map[tag]);
+        //printf("%s\n", to_string(tag).c_str());
         switch(tag) {
             // DT_ tags
             case DT_NULL:
@@ -507,7 +511,7 @@ static bool fixDynamicInfoForLinker(FILE *elf, std::vector<Elf64_Phdr> &progHdrs
             case DT_HIPROC:
             case DT_PROCNUM:
                 newDynEnts.push_back(*dyn);
-                //printf("unhandled tag: %s\n", dt_strings_map[tag]);
+                //printf("unhandled tag: %s\n", to_string(tag).c_str());
                 break;
             default:
                 break;
@@ -608,13 +612,12 @@ static bool fixDynamicInfoForLinker(FILE *elf, std::vector<Elf64_Phdr> &progHdrs
         }
     }
     
-    sMap.gotpltIdx = sections.size();
-    // TODO find baseVA of segment containing pltgot
     Elf64_Phdr *relroHeader = &progHdrs[1];
     uint64_t relroVA = relroHeader->p_vaddr;
     uint64_t relroFileOff = relroHeader->p_offset;
     assert(relroVA <= dynInfo.pltgotAddr && dynInfo.pltgotAddr <= relroVA + relroHeader->p_filesz);
 
+    sMap.gotpltIdx = sections.size();
     sHdr = {
         .sh_name = appendToStrtab(sections[sMap.shstrtabIdx], ".got.plt"),
         .sh_type = SHT_PROGBITS,
