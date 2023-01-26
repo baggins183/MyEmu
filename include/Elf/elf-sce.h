@@ -6,6 +6,7 @@
 
 
 // ELF Types
+#include <map>
 #define ET_SCE_EXEC	0xFE00
 #define ET_SCE_REPLAY_EXEC	0xFE01
 #define ET_SCE_RELEXEC	0XFE04
@@ -74,6 +75,14 @@
 enum ProgramSegmentType {
     PT_TABLE(PT_ENUM_OP)
     PT_SCE_TABLE(PT_ENUM_OP)
+};
+
+#define STRING_OP(name, value) \
+    { name, #name },
+
+static std::map<ProgramSegmentType, const char *> pt_strings_map = {
+    PT_TABLE(STRING_OP)
+    PT_SCE_TABLE(STRING_OP)
 };
 
 #undef SHT_NULL
@@ -161,6 +170,10 @@ enum ShtType {
     SHT_TABLE(SHT_ENUM_OP)
 };
 
+static std::map<ShtType, const char *> sht_strings_map = {
+    SHT_TABLE(STRING_OP)
+    SHT_TABLE(STRING_OP)
+};
 
 #undef DT_NULL
 #undef DT_NEEDED
@@ -288,4 +301,9 @@ enum ShtType {
 enum DynamicTag {
     DT_TABLE(DT_ENUM_OP)
     DT_SCE_TABLE(DT_ENUM_OP)
+};
+
+static std::map<DynamicTag, const char *> dt_strings_map = {
+    DT_TABLE(STRING_OP)
+    DT_SCE_TABLE(STRING_OP)
 };
