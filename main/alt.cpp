@@ -69,27 +69,27 @@ public:
         hdr.sh_entsize = 0;
     }
 
-    Elf32_Word getName() { return hdr.sh_name; }
-    Elf32_Word getType() { return hdr.sh_type; }
-    Elf32_Word getFlags() { return hdr.sh_flags; }
-    Elf32_Addr getAddr() { return hdr.sh_addr; }
-    Elf32_Off getOffset() { return hdr.sh_offset; }
-    Elf32_Word getSize() { return hdr.sh_size; }
-    Elf32_Word getLink() { return hdr.sh_link; }
-    Elf32_Word getInfo() { return hdr.sh_info; }
-    Elf32_Word getAddrAlign() { return hdr.sh_addralign; }
-    Elf32_Word getEntSize() { return hdr.sh_entsize; }
+    Elf64_Word getName() { return hdr.sh_name; }
+    Elf64_Word getType() { return hdr.sh_type; }
+    Elf64_Xword getFlags() { return hdr.sh_flags; }
+    Elf64_Addr getAddr() { return hdr.sh_addr; }
+    Elf64_Off getOffset() { return hdr.sh_offset; }
+    Elf64_Xword getSize() { return hdr.sh_size; }
+    Elf64_Word getLink() { return hdr.sh_link; }
+    Elf64_Word getInfo() { return hdr.sh_info; }
+    Elf64_Xword getAddrAlign() { return hdr.sh_addralign; }
+    Elf64_Xword getEntSize() { return hdr.sh_entsize; }
 
-    void setName(Elf32_Word name) { hdr.sh_name = name; }
-    void setType(Elf32_Word type) { hdr.sh_type = type; }
-    void setFlags(Elf32_Word flags) { hdr.sh_flags = flags; }
-    void setAddr(Elf32_Addr addr) { hdr.sh_addr = addr; }
-    void setOffset(Elf32_Off offset) { hdr.sh_offset = offset; }
-    void setSize(Elf32_Word size) { hdr.sh_size = size; }
-    void setLink(Elf32_Word link) { hdr.sh_link = link; }
-    void setInfo(Elf32_Word info) { hdr.sh_info = info; }
-    void setAddrAlign(Elf32_Word addralign) { hdr.sh_addralign = addralign; }
-    void setEntSize(Elf32_Word entsize) { hdr.sh_entsize = entsize; }
+    void setName(Elf64_Word name) { hdr.sh_name = name; }
+    void setType(Elf64_Word type) { hdr.sh_type = type; }
+    void setFlags(Elf64_Xword flags) { hdr.sh_flags = flags; }
+    void setAddr(Elf64_Addr addr) { hdr.sh_addr = addr; }
+    void setOffset(Elf64_Off offset) { hdr.sh_offset = offset; }
+    void setSize(Elf64_Xword size) { hdr.sh_size = size; }
+    void setLink(Elf64_Word link) { hdr.sh_link = link; }
+    void setInfo(Elf64_Word info) { hdr.sh_info = info; }
+    void setAddrAlign(Elf64_Xword addralign) { hdr.sh_addralign = addralign; }
+    void setEntSize(Elf64_Xword entsize) { hdr.sh_entsize = entsize; }
 
     void appendContents(unsigned char *data, size_t len) {
         size_t off = contents.size();
@@ -141,6 +141,7 @@ struct SectionMap {
     uint relroIdx;
     uint gotpltIdx;
     uint relaIdx;
+    uint jmprelIdx;
 };
 
 struct DynamicTableInfo {
@@ -154,12 +155,16 @@ struct DynamicTableInfo {
     uint64_t relaOff;
     uint64_t relaSz;
     uint64_t relaEntSz;
-    uint64_t pltgotOff;
+    uint64_t pltgotAddr;
     //uint64_t pltgotSz;  // should figure this one out
     uint64_t pltrel;  /* Type of reloc in PLT */
     uint64_t jmprelOff;
-    // jmprelSz aka pltrelsz
-    uint64_t jmprelSz;
+    // pltrelsz aka jmprelSz
+    // holds total size of all jmprel relocations
+    // Is this also the size of the .got.plt section?
+    // Wouldn't make much sense as all entries would be 24B, when 8B for an address in
+    // the slot would make more sense
+    uint64_t pltrelsz;
     std::vector<uint64_t> neededLibs;
     std::vector<uint64_t> neededMods;
 };
@@ -265,6 +270,12 @@ static void dumpElfHdr(const char *name) {
     fclose(f);
 }
 
+void printSegmentRanges(std::vector<Elf64_Phdr>& progHdrs) {
+    for (auto p: progHdrs) {
+        printf("[%lx, %lx), size=%lx\n", p.p_offset, p.p_offset + p.p_filesz, p.p_filesz);
+    }
+}
+
 int findPhdr(std::vector<Elf64_Phdr> &pHdrs, Elf64_Word type) {
     for (size_t i = 0; i < pHdrs.size(); i++) {
         if (pHdrs[i].p_type == type) {
@@ -340,11 +351,17 @@ void rebaseSegment(Elf64_Phdr *pHdr, std::vector<Elf64_Phdr> &progHdrs) {
     pHdr->p_paddr = ROUND_UP(highestPAddr, pHdr->p_align);    
 }
 
-static bool transformDynLibData(FILE *elf, Elf64_Phdr *dynlibdataPHdr, struct DynamicTableInfo info, std::vector<Section> &sections, SectionMap &sMap, std::vector<Elf64_Dyn> &dynEnts) {
-    std::vector<unsigned char> dynlibContents(dynlibdataPHdr->p_filesz);
+static bool fixDynlibData(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, struct DynamicTableInfo info, std::vector<Section> &sections, SectionMap &sMap, std::vector<Elf64_Dyn> &dynEnts) {
+    uint phIdx = findPhdr(progHdrs, PT_SCE_DYNLIBDATA);
+    std::vector<unsigned char> dynlibContents(progHdrs[phIdx].p_filesz);
 
-    fseek(elf, dynlibdataPHdr->p_offset, SEEK_SET);
-    if (1 != fread(dynlibContents.data(), dynlibdataPHdr->p_filesz, 1, elf)) {
+    assert(sMap.dynstrIdx);
+    assert(sMap.shstrtabIdx);
+    assert(sMap.dynsymIdx);
+    assert(sMap.relaIdx);
+
+    fseek(elf, progHdrs[phIdx].p_offset, SEEK_SET);
+    if (1 != fread(dynlibContents.data(), progHdrs[phIdx].p_filesz, 1, elf)) {
         return false;
     }
 
@@ -356,8 +373,18 @@ static bool transformDynLibData(FILE *elf, Elf64_Phdr *dynlibdataPHdr, struct Dy
         dynEnts.push_back(needed);
     }
 
-    uint numRelas = (info.jmprelSz + info.relaSz) / info.relaEntSz;
-    Elf64_Rela *relas = reinterpret_cast<Elf64_Rela *>(&dynlibContents[info.jmprelOff]);
+    assert(info.relaOff == info.jmprelOff + info.pltrelsz);
+
+    uint numJmpRelas = info.pltrelsz / info.relaEntSz;
+    Elf64_Rela *jmprelas = reinterpret_cast<Elf64_Rela *>(&dynlibContents[info.jmprelOff]);
+    Section &jmprela = sections[sMap.jmprelIdx];
+    for (uint i = 0; i < numJmpRelas; i++) {
+        Elf64_Rela ent = jmprelas[i];
+        jmprela.appendContents((unsigned char *) &ent, sizeof(ent));
+    }
+
+    uint numRelas = (info.relaSz) / info.relaEntSz;
+    Elf64_Rela *relas = reinterpret_cast<Elf64_Rela *>(&dynlibContents[info.relaOff]);
     Section &rela = sections[sMap.relaIdx];
     for (uint i = 0; i < numRelas; i++) {
         Elf64_Rela ent = relas[i];
@@ -371,8 +398,9 @@ static bool transformDynLibData(FILE *elf, Elf64_Phdr *dynlibdataPHdr, struct Dy
 // append to end of file
 // modify the progHdrs array
 // add new dynlibdata sections and update section map
-static bool patchDynamicSegment(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, std::vector<Section> &sections, SectionMap &sMap) {
-    Elf64_Phdr *dynPhdr = &progHdrs[findPhdr(progHdrs, PT_DYNAMIC)];
+static bool fixDynamicInfoForLinker(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, std::vector<Section> &sections, SectionMap &sMap) {
+    uint oldDynamicPIdx = findPhdr(progHdrs, PT_DYNAMIC);
+    Elf64_Phdr newDynPhdr = progHdrs[oldDynamicPIdx];
     Elf64_Shdr sHdr;
     std::vector<Elf64_Dyn> newDynEnts;
     DynamicTableInfo dynInfo;
@@ -397,20 +425,21 @@ static bool patchDynamicSegment(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, st
     };
     sections.emplace_back(sHdr);
 
-    std::vector<unsigned char> buf(dynPhdr->p_filesz);
-    fseek(elf, dynPhdr->p_offset, SEEK_SET);
-    assert(1 == fread(buf.data(), dynPhdr->p_filesz, 1, elf));
+    std::vector<unsigned char> buf(newDynPhdr.p_filesz);
+    fseek(elf, newDynPhdr.p_offset, SEEK_SET);
+    assert(1 == fread(buf.data(), newDynPhdr.p_filesz, 1, elf));
 
-    Elf64_Dyn *dynEnt = (Elf64_Dyn*) buf.data();
+    Elf64_Dyn *dyn = (Elf64_Dyn*) buf.data();
     
-    int maxDynHeaders = dynPhdr->p_filesz / sizeof(Elf64_Dyn);
-    for(int i = 0; i < maxDynHeaders; i++, dynEnt++) {
-        DynamicTag tag = (DynamicTag) dynEnt->d_tag;
+    int maxDynHeaders = newDynPhdr.p_filesz / sizeof(Elf64_Dyn);
+    for(int i = 0; i < maxDynHeaders; i++, dyn++) {
+        DynamicTag tag = (DynamicTag) dyn->d_tag;
         if (tag == DT_NULL) {
-            newDynEnts.push_back(*dynEnt);
+            newDynEnts.push_back(*dyn);
             break;
         }
 
+        //printf("%s\n", dt_strings_map[tag]);
         switch(tag) {
             // DT_ tags
             case DT_NULL:
@@ -422,17 +451,19 @@ static bool patchDynamicSegment(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, st
                 // should also have a corresponding DT_SCE_IMPORT_LIB and DT_SCE_IMPORT_LIB_ATTR tag."
                 // Need to change strings to their legal ELF counterparts.
                 // Find out which strtab this should use
-                dynInfo.neededLibs.push_back(dynEnt->d_un.d_val);
+                dynInfo.neededLibs.push_back(dyn->d_un.d_val);
                 break;
             case DT_PLTRELSZ:
-                dynInfo.jmprelSz = dynEnt->d_un.d_val;
+                dynInfo.pltrelsz = dyn->d_un.d_val;
                 break;
             case DT_PLTGOT:
+                printf("Warning: unhandled DT_PLTGOT\n");
+                break;
             case DT_HASH:
             case DT_STRTAB:
             case DT_SYMTAB:
             case DT_RELA:
-                dynInfo.relaOff = dynEnt->d_un.d_ptr;            
+                dynInfo.relaOff = dyn->d_un.d_ptr;            
                 break;            
             case DT_RELASZ:
             case DT_RELAENT:
@@ -475,7 +506,8 @@ static bool patchDynamicSegment(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, st
             case DT_LOPROC:
             case DT_HIPROC:
             case DT_PROCNUM:
-                newDynEnts.push_back(*dynEnt);
+                newDynEnts.push_back(*dyn);
+                //printf("unhandled tag: %s\n", dt_strings_map[tag]);
                 break;
             default:
                 break;
@@ -498,55 +530,57 @@ static bool patchDynamicSegment(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, st
                 break;                       
             case DT_SCE_HASH:
                 // sym hashtable, ignore for now
-                dynInfo.hashOff = dynEnt->d_un.d_val;
+                dynInfo.hashOff = dyn->d_un.d_val;
                 break;
             case DT_SCE_PLTGOT:
-                // Contains .data.rel.ro and .got.plt
+                // Addr of table that contains .data.rel.ro and .got.plt
                 // Can possibly just convert to DT_PLTGOT
                 // (didn't need this in old attempt, relocs just affect this area)
                 // Should add section headers
-                dynInfo.pltgotOff = dynEnt->d_un.d_val;
+                dynInfo.pltgotAddr = dyn->d_un.d_val;
+
                 break;
             case DT_SCE_JMPREL:
-                // Offset of the table containing jump slots
-                // Relative to dynlibdata segment start
-                // At this point, next DT_SCE_PLTRELSZ:d_val jmp slot relocations (rela),
+                // Offset of the table containing jump slot relocations
+                // relative to dynlibdata segment start
+                // At this offset, there are DT_SCE_PLTRELSZ:d_val jmp slot relocations,
                 // then DT_SCE_RELASZ:d_val relas seem to follow
-                dynInfo.jmprelOff = dynEnt->d_un.d_val;
+                dynInfo.jmprelOff = dyn->d_un.d_val;
                 break;                 
             case DT_SCE_PLTREL:
                 // Types of relocations (DT_RELA)
-                assert(dynEnt->d_un.d_val == DT_RELA);
+                assert(dyn->d_un.d_val == DT_RELA);
                 break;
             case DT_SCE_PLTRELSZ:
                 // Seems to be the # of jmp slot relocations (* relaentsz).
                 // See DT_SCE_JMPREL
                 // point of confusion
-                dynInfo.jmprelSz = dynEnt->d_un.d_val;
+                dynInfo.pltrelsz = dyn->d_un.d_val;
                 break;                  
             case DT_SCE_RELA:
                 // seems unecessary
                 // maybe because redundancy with DT_SCE_JMPREL, DT_SCE_PLTRELSZ, DT_SCE_RELASZ
                 // Most likely this is DT_SCE_JMPREL (jmprelOff) + DT_SCE_PLTRELSZ (jmprelSz), haven't verified
-                dynInfo.relaOff = dynEnt->d_un.d_ptr;            
+                dynInfo.relaOff = dyn->d_un.d_ptr;            
                 break;
             case DT_SCE_RELASZ:
                 // number of relas that follow PLT relas
-                dynInfo.relaSz = dynEnt->d_un.d_val;
+                dynInfo.relaSz = dyn->d_un.d_val;
                 break;
             case DT_SCE_RELAENT:
                 // size of rela entries (0x18)
-                assert(dynEnt->d_un.d_val == 0x18);
+                assert(dyn->d_un.d_val == 0x18);
+                dynInfo.relaEntSz = dyn->d_un.d_val;
                 break;
             case DT_SCE_STRTAB:
                 // Contains hashed sym names
                 // Convert to DT_STRTAB
                 // Unhash all known strings, put in .dynstr, map dynent to this
-                dynInfo.strtabOff = dynEnt->d_un.d_val;
+                dynInfo.strtabOff = dyn->d_un.d_val;
                 break;
             case DT_SCE_STRSZ:
                 // Convert to DT_STRSZ based on DT_SCE_STRTAB conversion
-                dynInfo.strtabSz = dynEnt->d_un.d_val;
+                dynInfo.strtabSz = dyn->d_un.d_val;
                 break;
             case DT_SCE_SYMTAB:
                 // Convert to DT_SYMTAB
@@ -554,24 +588,49 @@ static bool patchDynamicSegment(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, st
                 // Make new SHT_DYNSYM section, link to .dynsym/whatever DT_SCE_STRTAB maps to
                 // TODO, look at sh_info requirement for that section
                 // Special Sections at https://docs.oracle.com/cd/E19683-01/817-3677/6mj8mbtc9/index.html#chapter6-79797
-                dynInfo.symtabOff = dynEnt->d_un.d_val;
+                dynInfo.symtabOff = dyn->d_un.d_val;
                 break;
             case DT_SCE_SYMENT:
                 // size of syments (0x18)
-                assert(dynEnt->d_un.d_val == 0x18);
+                assert(dyn->d_un.d_val == 0x18);
+                dynInfo.symtabSz = dyn->d_un.d_val;
                 break;                                                
             case DT_SCE_HASHSZ:
                 // size of sym hashtable, ignore for now
-                dynInfo.hashSz = dynEnt->d_un.d_val;
+                dynInfo.hashSz = dyn->d_un.d_val;
                 break;
             case DT_SCE_SYMTABSZ:
                 // write size of converted symtab (might be same sz)
-                dynInfo.symtabSz = dynEnt->d_un.d_val;
+                dynInfo.symtabSz = dyn->d_un.d_val;
                 break;
             default:
                 break;
         }
     }
+    
+    sMap.gotpltIdx = sections.size();
+    // TODO find baseVA of segment containing pltgot
+    Elf64_Phdr *relroHeader = &progHdrs[1];
+    uint64_t relroVA = relroHeader->p_vaddr;
+    uint64_t relroFileOff = relroHeader->p_offset;
+    assert(relroVA <= dynInfo.pltgotAddr && dynInfo.pltgotAddr <= relroVA + relroHeader->p_filesz);
+
+    sHdr = {
+        .sh_name = appendToStrtab(sections[sMap.shstrtabIdx], ".got.plt"),
+        .sh_type = SHT_PROGBITS,
+        .sh_flags = SHF_ALLOC | SHF_WRITE,
+        .sh_addr = dynInfo.pltgotAddr,
+        .sh_offset = relroFileOff + (dynInfo.pltgotAddr - relroVA),
+        // TODO try (pltrelsz / relaentSz) x8, x16
+        // In example ELF, entsize is 8
+        // Can probably be conservative (too large)
+        // dunno if .got.plt is just array of slots, or if theres metadata
+        // should try to find out using example .got.plt
+        .sh_size = (dynInfo.pltrelsz / dynInfo.relaEntSz) * 8,
+        .sh_addralign = 8,
+        .sh_entsize = 8,
+    };
+    sections.emplace_back(sHdr);
 
     sMap.relaIdx = sections.size();
     sHdr = {
@@ -584,37 +643,90 @@ static bool patchDynamicSegment(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, st
     };
     sections.emplace_back(sHdr);
 
-    transformDynLibData(elf, &progHdrs[findPhdr(progHdrs, PT_SCE_DYNLIBDATA)], dynInfo, sections, sMap, newDynEnts);
+    assert(sMap.gotpltIdx);
+    sMap.jmprelIdx = sections.size();
+    sHdr = {
+        .sh_name = appendToStrtab(sections[sMap.shstrtabIdx], ".rela.plt"), // .rela.plt?
+        .sh_type = SHT_RELA,
+        .sh_flags = SHF_ALLOC | SHF_INFO_LINK,
+        .sh_link = sMap.dynsymIdx,
+        .sh_info = sMap.gotpltIdx, // In sample ELF, I see info for .rela.plt points to .got.plt
+        .sh_addralign = static_cast<Elf64_Xword>(PGSZ),
+        .sh_entsize = dynInfo.relaEntSz,
+    };
+    sections.emplace_back(sHdr);    
+
+    fixDynlibData(elf, progHdrs, dynInfo, sections, sMap, newDynEnts);
 
     // Write dynents to elf
     writePadding(elf, PGSZ);
     uint64_t segmentFileOff = ftell(elf);
     assert(1 == fwrite(newDynEnts.data(), newDynEnts.size() * sizeof(Elf64_Dyn), 1, elf));
 
+    newDynPhdr.p_align = PGSZ;    
     // calculate p_vaddr, p_paddr
-    dynPhdr->p_align = PGSZ;    
-    rebaseSegment(dynPhdr, progHdrs);
-    dynPhdr->p_flags = PF_X | PF_W | PF_R;
-    dynPhdr->p_offset = segmentFileOff;
-    dynPhdr->p_filesz = newDynEnts.size() * sizeof(Elf64_Dyn);
+    rebaseSegment(&newDynPhdr, progHdrs);
+    newDynPhdr.p_flags = PF_X | PF_W | PF_R;
+    newDynPhdr.p_offset = segmentFileOff;
+    newDynPhdr.p_filesz = newDynEnts.size() * sizeof(Elf64_Dyn);
+    progHdrs.push_back(newDynPhdr);
+
+    progHdrs[oldDynamicPIdx].p_type = PT_NULL;
 
     sMap.dynamicIdx = sections.size();
     sHdr = {
         .sh_name = appendToStrtab(sections[sMap.shstrtabIdx], ".dynamic"),
         .sh_type = SHT_DYNAMIC,
         .sh_flags = SHF_WRITE | SHF_ALLOC,
-        .sh_addr = dynPhdr->p_vaddr,
-        .sh_offset = dynPhdr->p_offset,
-        .sh_size = dynPhdr->p_memsz,
+        .sh_addr = newDynPhdr.p_vaddr,
+        .sh_offset = newDynPhdr.p_offset,
+        .sh_size = newDynPhdr.p_memsz,
         .sh_link = sMap.dynstrIdx,
-        .sh_addralign = dynPhdr->p_align,
+        .sh_addralign = newDynPhdr.p_align,
         .sh_entsize = sizeof(Elf64_Dyn),
     };
     sections.emplace_back(sHdr);
 
+    std::vector<uint> dynlibDataSections = {
+        sMap.dynstrIdx,
+        sMap.dynsymIdx,
+        sMap.jmprelIdx,
+        sMap.relaIdx,
+    };
+    Elf64_Phdr newDynlibDataSegmentHdr {
+        .p_type = PT_LOAD,
+        .p_flags = PF_R | PF_W | PF_X,
+        .p_align = static_cast<Elf64_Xword>(PGSZ)
+    };
+    rebaseSegment(&newDynlibDataSegmentHdr, progHdrs);
+    fseek(elf, 0, SEEK_END);
+    writePadding(elf, newDynlibDataSegmentHdr.p_align, true);
+    newDynlibDataSegmentHdr.p_offset = ftell(elf);
+    Segment dynlibDataSegment = CreateSegment(newDynlibDataSegmentHdr, sections, dynlibDataSections);
+    if (dynlibDataSegment.pHdr.p_filesz > 0) {
+        assert(1 == fwrite(dynlibDataSegment.contents.data(), dynlibDataSegment.contents.size(), 1, elf));
+    }
+    progHdrs.push_back(dynlibDataSegment.pHdr);
+
+    // TODO add sections for gotplt, relro, other sections that aren't changing location but are needed
+
     // TODO place extra dynamic ents with tags
     // DT_RELA
     // etc
+    // Add sections used in relocs, loading dynamic dependencies, etc
+    // These are sections we've moved out of the original dynlibdata segment
+
+    //Elf64_Dyn dyn;
+
+    newDynEnts.push_back({ 
+        DT_JMPREL,
+        {sections[sMap.jmprelIdx].getAddr()}
+    });    
+
+    newDynEnts.push_back({ 
+        DT_RELA,
+        {sections[sMap.relaIdx].getAddr()}
+    });
 
     return true;
 }
@@ -645,14 +757,6 @@ bool patchPs4Lib(Ps4Module &lib, /* ret */ std::string &newPath) {
     elfHdr.e_ident[EI_OSABI] = ELFOSABI_SYSV;
     elfHdr.e_type = ET_DYN;
 
-    // patches: 
-    // change ABI to SYSV (TODO may need to change for syscalls)
-    // possibly delete PT_SCE_DYNLIBDATA if errors, probably just need to delete pHeader
-    // remove SCE stuff from DynTable
-    // add .dynamic section that points to top of PT_DYNAMIC segment
-    // possibly add new PT_DYNAMIC segment, delete old one, and put both Dyn ents and dynamic data here
-    //      probably dont need this ^
-
     Elf64_Shdr sHdr;
 
     progHdrs.resize(elfHdr.e_phnum);
@@ -679,34 +783,15 @@ bool patchPs4Lib(Ps4Module &lib, /* ret */ std::string &newPath) {
     appendToStrtab(sections[sMap.shstrtabIdx], "\0");
     sections[sMap.shstrtabIdx].setName(appendToStrtab(sections[sMap.shstrtabIdx], ".shstrtab"));
 
-    patchDynamicSegment(f, progHdrs, sections, sMap);
+    // Patch dynamic segment with new dynents
+    // Copy parts of PT_SCE_DYNLIBDATA to new Segment, such as unhashed strings
+    // Fix up syms, relas, strings
+    // Crate relevant sections for dlopen
+    fixDynamicInfoForLinker(f, progHdrs, sections, sMap);
     // Change OS specific type
     // I don't think this should be loaded currently. p_vaddr and p_memsz are 0
     // I think plt/got are in different section which is already PT_LOAD
-    uint oldDynLibDataIdx = findPhdr(progHdrs, PT_SCE_DYNLIBDATA);
-    //progHdrs[oldDynLibDataIdx].p_type = PT_LOAD;
-
-    // Add sections used in relocs, loading dynamic dependencies, etc
-    // These are sections we've moved out of the original dynlibdata segment
-    std::vector<uint> dynlibDataSections = {
-        sMap.dynstrIdx,
-        sMap.dynsymIdx,
-        sMap.relaIdx,
-    };
-    Elf64_Phdr newDynlibDataSegmentHdr {
-        .p_type = PT_LOAD,
-        .p_flags = PF_R | PF_W | PF_X,
-        .p_align = static_cast<Elf64_Xword>(PGSZ)
-    };
-    rebaseSegment(&newDynlibDataSegmentHdr, progHdrs);
-    fseek(f, 0, SEEK_END);
-    writePadding(f, newDynlibDataSegmentHdr.p_align, true);
-    newDynlibDataSegmentHdr.p_offset = ftell(f);
-    Segment dynlibDataSegment = CreateSegment(newDynlibDataSegmentHdr, sections, dynlibDataSections);
-    if (dynlibDataSegment.pHdr.p_filesz > 0) {
-        assert(1 == fwrite(dynlibDataSegment.contents.data(), dynlibDataSegment.contents.size(), 1, f));
-    }
-    progHdrs.push_back(dynlibDataSegment.pHdr); // TODO 
+    progHdrs[findPhdr(progHdrs, PT_SCE_DYNLIBDATA)].p_type = PT_NULL;
 
     // For now, pack the extra sections into their own segment
     // in order to append them. The data is all that matters.

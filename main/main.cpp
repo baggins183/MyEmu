@@ -110,11 +110,11 @@ struct DynamicTableInfo {
     uint64_t relaOff;
     uint64_t relaSz;
     uint64_t relaEntSz;
-    uint64_t pltgotOff;
+    uint64_t pltgotAddr;
     //uint64_t pltgotSz;  // should figure this one out
     uint64_t pltrel;  /* Type of reloc in PLT */
     uint64_t jmprelOff;
-    uint64_t jmprelSz;
+    uint64_t pltrelsz;
     std::vector<uint64_t> neededLibs; // offsets into strtab for filenames
     std::vector<uint64_t> neededModules;
 };
@@ -167,10 +167,10 @@ static bool processDynamicSegment(Elf64_Phdr *phdr, FILE *elf, DynamicTableInfo 
                 info.neededLibs.push_back(entry.d_un.d_val);
                 break;
             case DT_PLTRELSZ:
-                info.jmprelSz = entry.d_un.d_val; // TODO check this
+                info.pltrelsz = entry.d_un.d_val; // TODO check this
                 break;
             case DT_PLTGOT:
-                info.pltgotOff = entry.d_un.d_ptr;
+                info.pltgotAddr = entry.d_un.d_ptr;
                 break;
             case DT_HASH:
                 info.hashOff = entry.d_un.d_ptr;
@@ -246,7 +246,7 @@ static bool processDynamicSegment(Elf64_Phdr *phdr, FILE *elf, DynamicTableInfo 
                 info.hashOff = entry.d_un.d_ptr;
                 break;
             case DT_SCE_PLTGOT:
-                info.pltgotOff = entry.d_un.d_ptr;
+                info.pltgotAddr = entry.d_un.d_ptr;
                 break;
             case DT_SCE_JMPREL:
                 info.jmprelOff = entry.d_un.d_ptr;
@@ -256,7 +256,7 @@ static bool processDynamicSegment(Elf64_Phdr *phdr, FILE *elf, DynamicTableInfo 
                 info.pltrel = entry.d_un.d_val;
                 break;
             case DT_SCE_PLTRELSZ:
-                info.jmprelSz = entry.d_un.d_val;
+                info.pltrelsz = entry.d_un.d_val;
                 break;                  
             case DT_SCE_RELA:
                 info.relaOff = entry.d_un.d_ptr;
@@ -567,7 +567,7 @@ bool parseNativeDynamicContents(DynamicTableInfo dynTableInfo, FILE *elf, /* ret
         dynLibStrings.push_back(path);
     }
 
-    for (uint i = 0; i < (dynTableInfo.jmprelSz + dynTableInfo.relaSz) / dynTableInfo.relaEntSz; i++) {
+    for (uint i = 0; i < (dynTableInfo.pltrelsz + dynTableInfo.relaSz) / dynTableInfo.relaEntSz; i++) {
         // handle endianess TODO
         uint64_t relaOff = dynTableInfo.jmprelOff + i * dynTableInfo.relaEntSz;
         Elf64_Rela *ent = (Elf64_Rela *) &dynLibDataContents[relaOff];
