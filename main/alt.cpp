@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <dlfcn.h>
 #include <libgen.h>
+#include <sqlite3.h>
 
 const long PGSZ = sysconf(_SC_PAGE_SIZE);
 const std::string ebootPath = "eboot.bin";
@@ -192,15 +193,17 @@ struct CmdConfig {
     bool dumpModuleInfo;
     bool dumpSymbols;
     bool dumpSections;
-    std::string pkgDumpPath;
+    //std::string pkgDumpPath;
     std::string dlPath;
+    std::string hashdbPath;
 };
 
 CmdConfig CmdArgs;
 
 bool parseCmdArgs(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "usage: %s [options] <PATH TO PKG DUMP>\n", argv[0]);
+        //fprintf(stderr, "usage: %s [options] <PATH TO PKG DUMP>\n", argv[0]);
+        fprintf(stderr, "usage: %s [options] <PATH TO ELF>\n", argv[0]);
         exit(1);
     }
 
@@ -215,7 +218,9 @@ bool parseCmdArgs(int argc, char **argv) {
             CmdArgs.dumpSymbols = true;
         } else if (!strcmp(argv[i], "--dump_sections")) {
             CmdArgs.dumpSections = true;
-        }else {
+        } else if (!strcmp(argv[i], "--hashdb")) {
+            CmdArgs.hashdbPath = argv[++i];
+        } else {
             fprintf(stderr, "Unrecognized cmd arg: %s\n", argv[i]);
             return false;
         }
@@ -301,11 +306,15 @@ bool writePadding(FILE *f, size_t alignment, bool forceBump = false) {
 }
 
 // return index into strtab
-uint appendToStrtab(Section &strtab, const char *str) {
+static uint appendToStrtab(Section &strtab, const char *str) {
     uint off = strtab.contents.size();
     strtab.appendContents((unsigned char *) str, strlen(str) + 1);
 
     return off;
+}
+
+static Elf64_Sym& getSymEnt(Section &symtab, uint idx) {
+    return *(reinterpret_cast<Elf64_Sym*>(symtab.contents[idx * sizeof(Elf64_Sym)]));
 }
 
 Segment CreateSegment(Elf64_Phdr pHdr, std::vector<Section> &sections, std::vector<uint> idxs) {
@@ -351,6 +360,67 @@ void rebaseSegment(Elf64_Phdr *pHdr, std::vector<Elf64_Phdr> &progHdrs) {
     pHdr->p_paddr = ROUND_UP(highestPAddr, pHdr->p_align);    
 }
 
+static int getLibraryOrModuleIndex(const char *str) {
+    const char *libModIndex = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+-";
+    const uint radix = strlen(libModIndex);
+    const uint chars = strlen(str);
+
+    // Keep this until we find a case of this
+    // If there are >radix modules/libs, we could need 2 digits
+    assert(chars == 1);
+
+    uint idx = 0;
+    for (uint i = 0; i < chars; i++)
+    {
+        uint j = 0;
+        for(; j < radix; j++) {
+            if (libModIndex[j] == str[i])
+                break;
+        }
+        assert((j < radix) && "Invalid character for library or module index");
+        if (j >= radix) {
+            return -1;
+        }
+        idx *= radix;
+        idx += j;
+    }
+    return idx;
+}
+
+static bool isHashedSymbol(std::string& str, int &libIdx, int &modIdx) {
+    if (str.length() > 12) {
+        std::string suff = str.substr(11);
+        if (suff[0] == '#') {
+            auto secondDelim = suff.find_first_of('#', 1);
+            if (secondDelim != suff.npos) {
+                assert(secondDelim != suff.size());
+                if (secondDelim != suff.size()) {
+                    std::string lib = suff.substr(1, secondDelim);
+                    std::string mod = suff.substr(secondDelim + 1);
+                    libIdx = getLibraryOrModuleIndex(lib.c_str());
+                    modIdx = getLibraryOrModuleIndex(mod.c_str());
+                    if (libIdx >= 0 && modIdx >= 0) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
+
+
+// Try to unhash the given string if it has a known name
+// Also take care of library index and module index
+std::string resolveStringName(std::string name) {
+    int libIdx;
+    int modIdx;
+    if (isHashedSymbol(name, libIdx, modIdx)) {
+        // TODO load some database
+    }
+    return "";
+}
+
 // Build new dynamic sections from the PT_SCE_DYNLIBDATA segment
 static bool fixDynlibData(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, struct DynamicTableInfo info, std::vector<Section> &sections, SectionMap &sMap, std::vector<Elf64_Dyn> &dynEnts) {
     uint phIdx = findPhdr(progHdrs, PT_SCE_DYNLIBDATA);
@@ -387,12 +457,25 @@ static bool fixDynlibData(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, struct D
         jmprela.appendContents((unsigned char *) &ent, sizeof(ent));
     }
 
-    uint numRelas = (info.relaSz) / info.relaEntSz;
+    uint numRelas = info.relaSz / info.relaEntSz;
     Elf64_Rela *relas = reinterpret_cast<Elf64_Rela *>(&dynlibContents[info.relaOff]);
     Section &rela = sections[sMap.relaIdx];
     for (uint i = 0; i < numRelas; i++) {
         Elf64_Rela ent = relas[i];
         rela.appendContents((unsigned char *) &ent, sizeof(ent));
+    }
+
+    uint numSyms = info.symtabSz / info.symtabEntSz;
+    Elf64_Sym *syms = reinterpret_cast<Elf64_Sym *>(&dynlibContents[info.symtabOff]);
+    Section &dynsym = sections[sMap.dynsymIdx];
+    for (uint i = 0; i < numSyms; i++) {
+        Elf64_Sym ent = syms[i];
+        std::string name;
+        if (ent.st_name) {
+            name = resolveStringName((char *) &dynlibContents[info.strtabOff]);
+        }
+
+        dynsym.appendContents((unsigned char *) &ent, sizeof(ent));
     }
 
     return true;
