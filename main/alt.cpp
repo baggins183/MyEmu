@@ -387,15 +387,16 @@ static int getLibraryOrModuleIndex(const char *str) {
     return idx;
 }
 
-static bool isHashedSymbol(std::string& str, int &libIdx, int &modIdx) {
-    if (str.length() > 12) {
-        std::string suff = str.substr(11);
+static bool isHashedSymbol(const char *str, int &libIdx, int &modIdx) {
+    std::string sym(str);
+    if (sym.length() > 12) {
+        std::string suff = sym.substr(11);
         if (suff[0] == '#') {
             auto secondDelim = suff.find_first_of('#', 1);
             if (secondDelim != suff.npos) {
                 assert(secondDelim != suff.size());
                 if (secondDelim != suff.size()) {
-                    std::string lib = suff.substr(1, secondDelim);
+                    std::string lib = suff.substr(1, secondDelim - 1);
                     std::string mod = suff.substr(secondDelim + 1);
                     libIdx = getLibraryOrModuleIndex(lib.c_str());
                     modIdx = getLibraryOrModuleIndex(mod.c_str());
@@ -409,16 +410,93 @@ static bool isHashedSymbol(std::string& str, int &libIdx, int &modIdx) {
     return false;
 }
 
-
-// Try to unhash the given string if it has a known name
-// Also take care of library index and module index
-std::string resolveStringName(std::string name) {
-    int libIdx;
-    int modIdx;
-    if (isHashedSymbol(name, libIdx, modIdx)) {
-        // TODO load some database
+static sqlite3 *openHashDb(const char *path) {
+    sqlite3 *db;
+    int res = sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, nullptr);
+    if (res != SQLITE_OK) {
+        fprintf(stderr, "Couldn't open database %s\n", path);
+        return nullptr;
     }
-    return "";
+    return db;
+}
+
+static bool reverseKnownHashes(std::vector<const char *> &oldStrings, std::vector<std::string> &newStrings) {
+    sqlite3 *db = openHashDb(CmdArgs.hashdbPath.c_str());
+
+    std::stringstream sql;
+    sql << 
+        "SELECT * FROM Hashes\n"
+        "WHERE hash IN\n"
+        "(";
+
+    uint numHashes = 0;
+    for (uint i = 0; i < oldStrings.size(); i++) {
+        const char *old = oldStrings[i];
+        int libIdx, modIdx;
+        if (!isHashedSymbol(old, libIdx, modIdx)) {
+            continue;
+        }
+        if (numHashes > 0) {
+            sql << ",";
+        }
+        std::string hash(old, 11);
+        sql << "'" << hash << "'";
+        numHashes++;
+    }
+
+    sql << ");";
+
+    auto ssql = sql.str();
+
+    sqlite3_stmt *stmt;
+    int res = sqlite3_prepare(db, ssql.c_str(), ssql.size(), &stmt, NULL);
+    if (res != SQLITE_OK) {
+        fprintf(stderr, "sqlite3_prepare errored\n");
+        return false;
+    }
+
+    std::map<std::string, std::string> hashToSymbol;
+    bool doMore;
+    do {
+        int res = sqlite3_step(stmt);
+        switch (res) {
+            case SQLITE_ROW:
+                doMore = true;
+                break;
+            case SQLITE_DONE:
+                doMore = false;
+                break;
+            case SQLITE_ERROR:
+                fprintf(stderr, "sqlite3_step errored\n");
+                return false;
+            default:
+                fprintf(stderr, "reverseKnownHashes: sqlite3_step unhandled code\n");
+                return false;
+        }
+        if (!doMore) {
+            break;
+        }
+
+        const char *symbol = (const char *) sqlite3_column_text(stmt, 0);
+        const char *hash = (const char *) sqlite3_column_text(stmt, 1);
+        hashToSymbol[hash] = symbol;
+    } while (doMore);
+
+    for (const char *old: oldStrings) {
+        int libIdx, modIdx;
+        if (isHashedSymbol(old, libIdx, modIdx)) {
+            std::string hash(old, 11);
+            const auto &it = hashToSymbol.find(hash);
+            if (it != hashToSymbol.end()) {
+                const std::string& symbol = it->second; 
+                newStrings.push_back(symbol);
+                continue;
+            }
+        }
+        newStrings.push_back(old);
+    }
+
+    return true;
 }
 
 // Build new dynamic sections from the PT_SCE_DYNLIBDATA segment
@@ -465,18 +543,33 @@ static bool fixDynlibData(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, struct D
         rela.appendContents((unsigned char *) &ent, sizeof(ent));
     }
 
+    std::vector<const char *> oldSymStrings;
+
     uint numSyms = info.symtabSz / info.symtabEntSz;
     Elf64_Sym *syms = reinterpret_cast<Elf64_Sym *>(&dynlibContents[info.symtabOff]);
+    for (uint i = 0; i < numSyms; i++) {
+        Elf64_Sym ent = syms[i];
+        if (ent.st_name) {
+            oldSymStrings.push_back((const char *) &dynlibContents[info.strtabOff+ ent.st_name]);
+        } else {
+            oldSymStrings.push_back("");
+        }
+    }
+
+    std::vector<std::string> newStrings;
+    if (!CmdArgs.hashdbPath.empty()) {
+        reverseKnownHashes(oldSymStrings, newStrings);
+    }
+
     Section &dynsym = sections[sMap.dynsymIdx];
     for (uint i = 0; i < numSyms; i++) {
         Elf64_Sym ent = syms[i];
-        std::string name;
         if (ent.st_name) {
-            name = resolveStringName((char *) &dynlibContents[info.strtabOff]);
+            ent.st_name = appendToStrtab(sections[sMap.dynstrIdx], newStrings[i].c_str());
         }
-
-        dynsym.appendContents((unsigned char *) &ent, sizeof(ent));
+        // TODO
     }
+
 
     return true;
 }
@@ -680,7 +773,7 @@ static bool fixDynamicInfoForLinker(FILE *elf, std::vector<Elf64_Phdr> &progHdrs
             case DT_SCE_SYMENT:
                 // size of syments (0x18)
                 assert(dyn->d_un.d_val == 0x18);
-                dynInfo.symtabSz = dyn->d_un.d_val;
+                dynInfo.symtabEntSz = dyn->d_un.d_val;
                 break;                                                
             case DT_SCE_HASHSZ:
                 // size of sym hashtable, ignore for now

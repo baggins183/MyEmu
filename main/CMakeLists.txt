@@ -10,5 +10,5 @@ target_link_options(main PRIVATE "${LINKER_ARGS}")
 
 add_executable(alt alt.cpp)
 set_property(TARGET alt PROPERTY POSITION_INDEPENDENT_CODE ON)
-target_link_libraries(alt pthread dl nid_hash)
+target_link_libraries(alt pthread dl nid_hash sqlite3)
 
