@@ -143,9 +143,13 @@ struct SectionMap {
     uint gotpltIdx;
     uint relaIdx;
     uint jmprelIdx;
+    uint hashIdx;
 };
 
 struct DynamicTableInfo {
+    // hashOff and hashSz can be ignored
+    // The Elf-mandatory hash table can be produced without referring to the
+    // hash table in PT_SCE_DYNAMIC/PT_SCE_DYNLIBDATA
     uint64_t hashOff;
     uint64_t hashSz;
     uint64_t strtabOff;
@@ -505,8 +509,58 @@ static bool reverseKnownHashes(std::vector<const char *> &oldStrings, std::vecto
     return true;
 }
 
+unsigned long elf_Hash(const unsigned char *name) {
+    unsigned long h = 0, g;
+ 
+	    while (*name)
+	    {
+		     h = (h << 4) + *name++;
+		     if ((g = h & 0xf0000000))
+			      h ^= g >> 24;
+				   h &= ~g;
+	    }
+	    return h;
+}
+
+static void createSymbolHashTable(DynamicTableInfo &info, std::vector<Section> &sections, SectionMap &sMap) {
+    Section &hashtable = sections[sMap.hashIdx];
+    const Section &dynsym = sections[sMap.dynsymIdx];
+    const Section &dynstr = sections[sMap.dynstrIdx];
+    
+    size_t numSyms = info.symtabSz / info.symtabEntSz;
+
+    Elf64_Word nbucket = 200;
+    Elf64_Word nchain = numSyms;
+
+    const Elf64_Sym *syms = reinterpret_cast<const Elf64_Sym *>(dynsym.contents.data());    
+
+    hashtable.appendContents((unsigned char *) &nbucket, sizeof(nbucket));
+    hashtable.appendContents((unsigned char *) &nchain, sizeof(nchain));
+    hashtable.contents.resize(sizeof(nbucket) + sizeof(nchain) + sizeof(Elf64_Word) * (nbucket + nchain));
+    Elf64_Word *buckets = reinterpret_cast<Elf64_Word *>(&hashtable.contents[sizeof(nbucket) + sizeof(nchain)]);
+    Elf64_Word *chains = buckets + nbucket;
+    for (uint i = 0; i < nbucket + nchain; i++) {
+        buckets[i] = STN_UNDEF;
+    }    
+
+    for (uint i = 0; i < numSyms; i++) {
+        Elf64_Word strOff = syms[i].st_name;
+        const unsigned char *name = &dynstr.contents[strOff];
+        size_t bIdx = elf_Hash(name) % nbucket;
+        if (buckets[bIdx] == STN_UNDEF) {
+            buckets[bIdx] = i;
+            continue;
+        }
+        size_t cIdx = buckets[bIdx];
+        while (chains[cIdx] != STN_UNDEF) {
+            cIdx = chains[cIdx];
+        }
+        chains[cIdx] = i;
+    }
+}
+
 // Build new dynamic sections from the PT_SCE_DYNLIBDATA segment
-static bool fixDynlibData(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, struct DynamicTableInfo info, std::vector<Section> &sections, SectionMap &sMap, std::vector<Elf64_Dyn> &dynEnts) {
+static bool fixDynlibData(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, DynamicTableInfo &info, std::vector<Section> &sections, SectionMap &sMap, std::vector<Elf64_Dyn> &dynEnts) {
     uint phIdx = findPhdr(progHdrs, PT_SCE_DYNLIBDATA);
     std::vector<unsigned char> dynlibContents(progHdrs[phIdx].p_filesz);
 
@@ -606,6 +660,9 @@ static bool fixDynlibData(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, struct D
     }
     sections[sMap.dynsymIdx].setInfo(firstNonLocalIdx);
 
+    // Create Hash table
+    createSymbolHashTable(info, sections, sMap);
+
     return true;
 }
 
@@ -624,7 +681,7 @@ static bool fixDynamicInfoForLinker(FILE *elf, std::vector<Elf64_Phdr> &progHdrs
     sHdr = {
         .sh_name = appendToStrtab(sections[sMap.shstrtabIdx], ".dynstr"),
         .sh_type = SHT_STRTAB,
-        .sh_flags = SHF_STRINGS | SHF_ALLOC,
+        .sh_flags = SHF_STRINGS | SHF_ALLOC, // TODO check this, confusingly ELFs I've seen don't set SHF_STRINGS
         .sh_addralign = static_cast<Elf64_Xword>(PGSZ),
     };
     sections.emplace_back(sHdr);
@@ -633,10 +690,21 @@ static bool fixDynamicInfoForLinker(FILE *elf, std::vector<Elf64_Phdr> &progHdrs
     sHdr = {
         .sh_name = appendToStrtab(sections[sMap.shstrtabIdx], ".dynsym"),
         .sh_type = SHT_SYMTAB,
-        .sh_flags = SHF_WRITE | SHF_ALLOC,
+        .sh_flags = SHF_ALLOC,
         .sh_link = sMap.dynstrIdx,
         .sh_addralign = static_cast<Elf64_Xword>(PGSZ),
         .sh_entsize = sizeof(Elf64_Sym),
+    };
+    sections.emplace_back(sHdr);
+
+    sMap.hashIdx = sections.size();
+    sHdr = {
+        .sh_name = appendToStrtab(sections[sMap.shstrtabIdx], ".hash"),
+        .sh_type = SHT_HASH,
+        .sh_flags = SHF_ALLOC,
+        .sh_link = sMap.dynsymIdx,
+        .sh_addralign = 8,
+        .sh_entsize = 0, // TODO?
     };
     sections.emplace_back(sHdr);
 
@@ -650,7 +718,6 @@ static bool fixDynamicInfoForLinker(FILE *elf, std::vector<Elf64_Phdr> &progHdrs
     for(int i = 0; i < maxDynHeaders; i++, dyn++) {
         DynamicTag tag = (DynamicTag) dyn->d_tag;
         if (tag == DT_NULL) {
-            newDynEnts.push_back(*dyn);
             break;
         }
 
@@ -668,22 +735,7 @@ static bool fixDynamicInfoForLinker(FILE *elf, std::vector<Elf64_Phdr> &progHdrs
                 // Find out which strtab this should use
                 dynInfo.neededLibs.push_back(dyn->d_un.d_val);
                 break;
-            case DT_PLTRELSZ:
-                dynInfo.pltrelsz = dyn->d_un.d_val;
-                break;
-            case DT_PLTGOT:
-                printf("Warning: unhandled DT_PLTGOT\n");
-                break;
-            case DT_HASH:
-            case DT_STRTAB:
-            case DT_SYMTAB:
-            case DT_RELA:
-                dynInfo.relaOff = dyn->d_un.d_ptr;            
-                break;            
-            case DT_RELASZ:
-            case DT_RELAENT:
-            case DT_STRSZ:
-            case DT_SYMENT:
+
             case DT_INIT:
                 // startup routine
                 // can probably leave as is
@@ -696,10 +748,8 @@ static bool fixDynamicInfoForLinker(FILE *elf, std::vector<Elf64_Phdr> &progHdrs
             case DT_REL:
             case DT_RELSZ:
             case DT_RELENT:
-            case DT_PLTREL:
             case DT_DEBUG:
             case DT_TEXTREL:
-            case DT_JMPREL:
             case DT_BIND_NOW:
             case DT_INIT_ARRAY:
             case DT_FINI_ARRAY:
@@ -724,20 +774,14 @@ static bool fixDynamicInfoForLinker(FILE *elf, std::vector<Elf64_Phdr> &progHdrs
                 newDynEnts.push_back(*dyn);
                 //printf("unhandled tag: %s\n", to_string(tag).c_str());
                 break;
-            default:
-                break;
-        }
 
-        //uint64_t val = entry.d_un.d_val;
-        switch(tag) {
-            // DT_SCE tags
             case DT_SCE_NEEDED_MODULE:
                 // dunno the difference between libs and modules here
                 // "The indexes into the library list start at index 0, and the indexes into the module
                 // list start at index 1. Most of the time, the library list and module list are in 
                 // the same order, so the module ID is usually the library ID + 1. 
                 // This is not always the case however because some modules contain more than one library."
-                fprintf(stderr, "Warning: Unhandled DT_SCE_NEEDED_MODULE\n");
+                dynInfo.neededMods.push_back(dyn->d_un.d_val);
                 break;
             case DT_SCE_IMPORT_LIB:
                 break;
@@ -765,6 +809,7 @@ static bool fixDynamicInfoForLinker(FILE *elf, std::vector<Elf64_Phdr> &progHdrs
             case DT_SCE_PLTREL:
                 // Types of relocations (DT_RELA)
                 assert(dyn->d_un.d_val == DT_RELA);
+                dynInfo.pltrel = dyn->d_un.d_val;
                 break;
             case DT_SCE_PLTRELSZ:
                 // Seems to be the # of jmp slot relocations (* relaentsz).
@@ -818,8 +863,13 @@ static bool fixDynamicInfoForLinker(FILE *elf, std::vector<Elf64_Phdr> &progHdrs
                 // write size of converted symtab (might be same sz)
                 dynInfo.symtabSz = dyn->d_un.d_val;
                 break;
+
             default:
+            {
+                std::string name = to_string(tag);
+                printf("Warning: unhandled DynEnt %s\n", name.c_str());
                 break;
+            }
         }
     }
     
@@ -904,6 +954,7 @@ static bool fixDynamicInfoForLinker(FILE *elf, std::vector<Elf64_Phdr> &progHdrs
     std::vector<uint> dynlibDataSections = {
         sMap.dynstrIdx,
         sMap.dynsymIdx,
+        sMap.hashIdx,
         sMap.jmprelIdx,
         sMap.relaIdx,
     };
@@ -932,14 +983,74 @@ static bool fixDynamicInfoForLinker(FILE *elf, std::vector<Elf64_Phdr> &progHdrs
 
     //Elf64_Dyn dyn;
 
+    for (uint64_t libStrOff: dynInfo.neededLibs) {
+
+    }
+
+    for (uint64_t modStrOff: dynInfo.neededMods) {
+
+    }
+
+    newDynEnts.push_back({
+        DT_HASH,
+        {static_cast<Elf64_Xword>(~0)} // TODO
+    });
+
+    newDynEnts.push_back({
+        DT_PLTGOT,
+        {dynInfo.pltgotAddr}
+    });
+
     newDynEnts.push_back({ 
         DT_JMPREL,
         {sections[sMap.jmprelIdx].getAddr()}
-    });    
+    });
+
+    newDynEnts.push_back({
+        DT_PLTREL,
+        {dynInfo.pltrel}
+    });
 
     newDynEnts.push_back({ 
         DT_RELA,
         {sections[sMap.relaIdx].getAddr()}
+    });
+
+    // DT_RELASZ
+    // TODO make sure this stays the same
+    newDynEnts.push_back({
+        DT_RELASZ,
+        {sections[sMap.relaIdx].getSize()}
+    });
+
+    // DT_RELAENT
+    newDynEnts.push_back({
+        DT_RELAENT,
+        {dynInfo.relaEntSz}
+    });
+
+    // DT_STRTAB
+    newDynEnts.push_back({
+        DT_STRTAB,
+        {sections[sMap.dynstrIdx].getAddr()}
+    });
+
+    // DT_STRSZ
+    newDynEnts.push_back({
+        DT_STRSZ,
+        {sections[sMap.dynstrIdx].getSize()}
+    });
+
+    // DT_SYMTAB
+    newDynEnts.push_back({
+        DT_SYMTAB,
+        {sections[sMap.dynsymIdx].getAddr()}
+    });
+
+    // DT_SYMENT
+    newDynEnts.push_back({
+        DT_SYMENT,
+        {dynInfo.symtabEntSz}
     });
 
     return true;
