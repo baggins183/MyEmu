@@ -230,6 +230,11 @@ bool parseCmdArgs(int argc, char **argv) {
         }
     }
 
+    if (CmdArgs.hashdbPath.empty()) {
+        fprintf(stderr, "Warning: no symbol hash database given\n");
+        exit(1); // For debugging
+    }
+
     //CmdArgs.pkgDumpPath = argv[argc - 1];
     CmdArgs.dlPath = argv[argc - 1];
     return true;
@@ -560,7 +565,7 @@ static void createSymbolHashTable(DynamicTableInfo &info, std::vector<Section> &
 }
 
 // Build new dynamic sections from the PT_SCE_DYNLIBDATA segment
-static bool fixDynlibData(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, DynamicTableInfo &info, std::vector<Section> &sections, SectionMap &sMap, std::vector<Elf64_Dyn> &dynEnts) {
+static bool fixDynlibData(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, DynamicTableInfo &dynInfo, std::vector<Section> &sections, SectionMap &sMap, std::vector<Elf64_Dyn> &newDynEnts) {
     uint phIdx = findPhdr(progHdrs, PT_SCE_DYNLIBDATA);
     std::vector<unsigned char> dynlibContents(progHdrs[phIdx].p_filesz);
 
@@ -575,28 +580,20 @@ static bool fixDynlibData(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, DynamicT
         return false;
     }
 
-    for (uint64_t strOff: info.neededLibs) {
-        uint64_t name = appendToStrtab(sections[sMap.dynstrIdx], reinterpret_cast<char *>(&dynlibContents[strOff]));
-        Elf64_Dyn needed;
-        needed.d_tag = DT_NEEDED;
-        needed.d_un.d_val = name;
-        dynEnts.push_back(needed);
-    }
-
     // Ps4 ELF's always seem to have plt rela entries (.rela.plt) followed immediately by normal rela entries (.rela)
     // Keep this until I find a counterexample
-    assert(info.relaOff == info.jmprelOff + info.pltrelsz);
+    assert(dynInfo.relaOff == dynInfo.jmprelOff + dynInfo.pltrelsz);
 
-    uint numJmpRelas = info.pltrelsz / info.relaEntSz;
-    Elf64_Rela *jmprelas = reinterpret_cast<Elf64_Rela *>(&dynlibContents[info.jmprelOff]);
+    uint numJmpRelas = dynInfo.pltrelsz / dynInfo.relaEntSz;
+    Elf64_Rela *jmprelas = reinterpret_cast<Elf64_Rela *>(&dynlibContents[dynInfo.jmprelOff]);
     Section &jmprela = sections[sMap.jmprelIdx];
     for (uint i = 0; i < numJmpRelas; i++) {
         Elf64_Rela ent = jmprelas[i];
         jmprela.appendContents((unsigned char *) &ent, sizeof(ent));
     }
 
-    uint numRelas = info.relaSz / info.relaEntSz;
-    Elf64_Rela *relas = reinterpret_cast<Elf64_Rela *>(&dynlibContents[info.relaOff]);
+    uint numRelas = dynInfo.relaSz / dynInfo.relaEntSz;
+    Elf64_Rela *relas = reinterpret_cast<Elf64_Rela *>(&dynlibContents[dynInfo.relaOff]);
     Section &rela = sections[sMap.relaIdx];
     for (uint i = 0; i < numRelas; i++) {
         Elf64_Rela ent = relas[i];
@@ -605,12 +602,12 @@ static bool fixDynlibData(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, DynamicT
 
     std::vector<const char *> oldSymStrings;
 
-    uint numSyms = info.symtabSz / info.symtabEntSz;
-    Elf64_Sym *syms = reinterpret_cast<Elf64_Sym *>(&dynlibContents[info.symtabOff]);
+    uint numSyms = dynInfo.symtabSz / dynInfo.symtabEntSz;
+    Elf64_Sym *syms = reinterpret_cast<Elf64_Sym *>(&dynlibContents[dynInfo.symtabOff]);
     for (uint i = 0; i < numSyms; i++) {
         Elf64_Sym ent = syms[i];
         if (ent.st_name) {
-            oldSymStrings.push_back((const char *) &dynlibContents[info.strtabOff+ ent.st_name]);
+            oldSymStrings.push_back((const char *) &dynlibContents[dynInfo.strtabOff+ ent.st_name]);
         } else {
             oldSymStrings.push_back("");
         }
@@ -661,7 +658,104 @@ static bool fixDynlibData(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, DynamicT
     sections[sMap.dynsymIdx].setInfo(firstNonLocalIdx);
 
     // Create Hash table
-    createSymbolHashTable(info, sections, sMap);
+    createSymbolHashTable(dynInfo, sections, sMap);
+
+    // Write needed libs and modules
+    for (uint64_t libStrOff: dynInfo.neededLibs) {
+        uint64_t name = appendToStrtab(sections[sMap.dynstrIdx], reinterpret_cast<char *>(&dynlibContents[dynInfo.strtabOff + libStrOff]));
+        Elf64_Dyn needed;
+        needed.d_tag = DT_NEEDED;
+        needed.d_un.d_val = name;
+        newDynEnts.push_back(needed);
+    }
+
+    for (uint64_t modStrOff: dynInfo.neededMods) {
+        //const char *name = reinterpret_cast<char *>(&dynlibContents[info.strtabOff + modStrOff]);
+        //fprintf(stderr, "Warning: unused module %s\n", name);
+    }
+
+    // Create dynlibdata segment
+    std::vector<uint> dynlibDataSections = {
+        sMap.dynstrIdx,
+        sMap.dynsymIdx,
+        sMap.hashIdx,
+        sMap.jmprelIdx,
+        sMap.relaIdx,
+    };
+    Elf64_Phdr newDynlibDataSegmentHdr {
+        .p_type = PT_LOAD,
+        .p_flags = PF_R | PF_W | PF_X,
+        .p_align = static_cast<Elf64_Xword>(PGSZ)
+    };
+    rebaseSegment(&newDynlibDataSegmentHdr, progHdrs);
+    fseek(elf, 0, SEEK_END);
+    writePadding(elf, newDynlibDataSegmentHdr.p_align, true);
+    newDynlibDataSegmentHdr.p_offset = ftell(elf);
+    Segment dynlibDataSegment = CreateSegment(newDynlibDataSegmentHdr, sections, dynlibDataSections);
+    assert(1 == fwrite(dynlibDataSegment.contents.data(), dynlibDataSegment.contents.size(), 1, elf));
+    progHdrs.push_back(dynlibDataSegment.pHdr);
+
+    newDynEnts.push_back({
+        DT_HASH,
+        {dynInfo.hashOff} // TODO
+    });
+
+    newDynEnts.push_back({
+        DT_PLTGOT,
+        {dynInfo.pltgotAddr}
+    });
+
+    newDynEnts.push_back({ 
+        DT_JMPREL,
+        {sections[sMap.jmprelIdx].getAddr()}
+    });
+
+    newDynEnts.push_back({
+        DT_PLTREL,
+        {dynInfo.pltrel}
+    });
+
+    newDynEnts.push_back({ 
+        DT_RELA,
+        {sections[sMap.relaIdx].getAddr()}
+    });
+
+    // DT_RELASZ
+    // TODO make sure this stays the same
+    newDynEnts.push_back({
+        DT_RELASZ,
+        {sections[sMap.relaIdx].getSize()}
+    });
+
+    // DT_RELAENT
+    newDynEnts.push_back({
+        DT_RELAENT,
+        {dynInfo.relaEntSz}
+    });
+
+    // DT_STRTAB
+    newDynEnts.push_back({
+        DT_STRTAB,
+        {sections[sMap.dynstrIdx].getAddr()}
+    });
+
+    // DT_STRSZ
+    newDynEnts.push_back({
+        DT_STRSZ,
+        {sections[sMap.dynstrIdx].getSize()}
+    });
+
+    // DT_SYMTAB
+    newDynEnts.push_back({
+        DT_SYMTAB,
+        {sections[sMap.dynsymIdx].getAddr()}
+    });
+
+    // DT_SYMENT
+    newDynEnts.push_back({
+        DT_SYMENT,
+        {dynInfo.symtabEntSz}
+    });
 
     return true;
 }
@@ -735,6 +829,22 @@ static bool fixDynamicInfoForLinker(FILE *elf, std::vector<Elf64_Phdr> &progHdrs
                 // Find out which strtab this should use
                 dynInfo.neededLibs.push_back(dyn->d_un.d_val);
                 break;
+            case DT_SONAME:
+                // TODO
+                fprintf(stderr, "Warning: unhandled DynEnt DT_SONAME\n");
+                break;
+
+            case DT_REL:
+            case DT_RELSZ:
+            case DT_RELENT:
+            {
+                std::string name = to_string(tag);
+                printf("Warning: unhandled DynEnt %s\n", name.c_str());
+                assert(false); // We will add empty DT_REL* tags for executables,
+                // so assume DT_RELA* are the only ones given until seeing otherwise
+                break;
+            }
+                
 
             case DT_INIT:
                 // startup routine
@@ -742,12 +852,8 @@ static bool fixDynamicInfoForLinker(FILE *elf, std::vector<Elf64_Phdr> &progHdrs
                 // https://docs.oracle.com/cd/E23824_01/html/819-0690/chapter2-55859.html#chapter2-48195
             case DT_FINI:
                 // ^
-            case DT_SONAME:
             case DT_RPATH:
             case DT_SYMBOLIC:
-            case DT_REL:
-            case DT_RELSZ:
-            case DT_RELENT:
             case DT_DEBUG:
             case DT_TEXTREL:
             case DT_BIND_NOW:
@@ -922,6 +1028,12 @@ static bool fixDynamicInfoForLinker(FILE *elf, std::vector<Elf64_Phdr> &progHdrs
 
     fixDynlibData(elf, progHdrs, dynInfo, sections, sMap, newDynEnts);
 
+    // End DynEnt array
+    newDynEnts.push_back({
+        DT_NULL,
+        {0}
+    });
+
     // Write dynents to elf
     writePadding(elf, PGSZ);
     uint64_t segmentFileOff = ftell(elf);
@@ -951,27 +1063,7 @@ static bool fixDynamicInfoForLinker(FILE *elf, std::vector<Elf64_Phdr> &progHdrs
     };
     sections.emplace_back(sHdr);
 
-    std::vector<uint> dynlibDataSections = {
-        sMap.dynstrIdx,
-        sMap.dynsymIdx,
-        sMap.hashIdx,
-        sMap.jmprelIdx,
-        sMap.relaIdx,
-    };
-    Elf64_Phdr newDynlibDataSegmentHdr {
-        .p_type = PT_LOAD,
-        .p_flags = PF_R | PF_W | PF_X,
-        .p_align = static_cast<Elf64_Xword>(PGSZ)
-    };
-    rebaseSegment(&newDynlibDataSegmentHdr, progHdrs);
-    fseek(elf, 0, SEEK_END);
-    writePadding(elf, newDynlibDataSegmentHdr.p_align, true);
-    newDynlibDataSegmentHdr.p_offset = ftell(elf);
-    Segment dynlibDataSegment = CreateSegment(newDynlibDataSegmentHdr, sections, dynlibDataSections);
-    if (dynlibDataSegment.pHdr.p_filesz > 0) {
-        assert(1 == fwrite(dynlibDataSegment.contents.data(), dynlibDataSegment.contents.size(), 1, elf));
-    }
-    progHdrs.push_back(dynlibDataSegment.pHdr);
+
 
     // TODO add sections for gotplt, relro, other sections that aren't changing location but are needed
 
@@ -983,75 +1075,7 @@ static bool fixDynamicInfoForLinker(FILE *elf, std::vector<Elf64_Phdr> &progHdrs
 
     //Elf64_Dyn dyn;
 
-    for (uint64_t libStrOff: dynInfo.neededLibs) {
 
-    }
-
-    for (uint64_t modStrOff: dynInfo.neededMods) {
-
-    }
-
-    newDynEnts.push_back({
-        DT_HASH,
-        {static_cast<Elf64_Xword>(~0)} // TODO
-    });
-
-    newDynEnts.push_back({
-        DT_PLTGOT,
-        {dynInfo.pltgotAddr}
-    });
-
-    newDynEnts.push_back({ 
-        DT_JMPREL,
-        {sections[sMap.jmprelIdx].getAddr()}
-    });
-
-    newDynEnts.push_back({
-        DT_PLTREL,
-        {dynInfo.pltrel}
-    });
-
-    newDynEnts.push_back({ 
-        DT_RELA,
-        {sections[sMap.relaIdx].getAddr()}
-    });
-
-    // DT_RELASZ
-    // TODO make sure this stays the same
-    newDynEnts.push_back({
-        DT_RELASZ,
-        {sections[sMap.relaIdx].getSize()}
-    });
-
-    // DT_RELAENT
-    newDynEnts.push_back({
-        DT_RELAENT,
-        {dynInfo.relaEntSz}
-    });
-
-    // DT_STRTAB
-    newDynEnts.push_back({
-        DT_STRTAB,
-        {sections[sMap.dynstrIdx].getAddr()}
-    });
-
-    // DT_STRSZ
-    newDynEnts.push_back({
-        DT_STRSZ,
-        {sections[sMap.dynstrIdx].getSize()}
-    });
-
-    // DT_SYMTAB
-    newDynEnts.push_back({
-        DT_SYMTAB,
-        {sections[sMap.dynsymIdx].getAddr()}
-    });
-
-    // DT_SYMENT
-    newDynEnts.push_back({
-        DT_SYMENT,
-        {dynInfo.symtabEntSz}
-    });
 
     return true;
 }
