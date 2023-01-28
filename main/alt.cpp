@@ -365,7 +365,7 @@ static int getLibraryOrModuleIndex(const char *str) {
     const uint radix = strlen(libModIndex);
     const uint chars = strlen(str);
 
-    // Keep this until we find a case of this
+    // Keep assert until we find a case of this
     // If there are >radix modules/libs, we could need 2 digits
     assert(chars == 1);
 
@@ -482,6 +482,9 @@ static bool reverseKnownHashes(std::vector<const char *> &oldStrings, std::vecto
         hashToSymbol[hash] = symbol;
     } while (doMore);
 
+    sqlite3_finalize(stmt);
+    sqlite3_close_v2(db);
+
     for (const char *old: oldStrings) {
         int libIdx, modIdx;
         if (isHashedSymbol(old, libIdx, modIdx)) {
@@ -490,10 +493,13 @@ static bool reverseKnownHashes(std::vector<const char *> &oldStrings, std::vecto
             if (it != hashToSymbol.end()) {
                 const std::string& symbol = it->second; 
                 newStrings.push_back(symbol);
-                continue;
+            } else {
+                // truncate #A#B lib/module id's
+                newStrings.push_back(hash);
             }
+        } else {
+            newStrings.push_back(old);
         }
-        newStrings.push_back(old);
     }
 
     return true;
@@ -561,15 +567,44 @@ static bool fixDynlibData(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, struct D
         reverseKnownHashes(oldSymStrings, newStrings);
     }
 
+    int firstNonLocalIdx = -1;
     Section &dynsym = sections[sMap.dynsymIdx];
     for (uint i = 0; i < numSyms; i++) {
         Elf64_Sym ent = syms[i];
         if (ent.st_name) {
             ent.st_name = appendToStrtab(sections[sMap.dynstrIdx], newStrings[i].c_str());
         }
-        // TODO
+        //ent.st_info = ELF64_ST_INFO(0, 0);
+        //ent.st_info;
+        //ent.st_other;
+        //ent.st_value;
+
+        // I think shndx doesn't matter for dynamic linking, and that st_value is just used as a VA
+        // I think it's only relevant for static linking, when sections from multiple objects are being rearranged
+        // and stitched into linked objects. In that case, providing the shndx is indirection that lets you keep the location
+        // section_base + st_value consistent with the real location, because the section contents are moved by the static linker
+        if (ent.st_shndx >= SHN_LORESERVE && ent.st_shndx <= SHN_LORESERVE) {
+            if (false) {
+                printf("Symbol has reserved symbol shndx\n");
+            }
+        } else if (ent.st_shndx != SHN_UNDEF) {
+            ent.st_shndx = 1;
+        }
+        //ent.st_value; // TODO - ensure all pointer values are in LOAD segments that haven't been rebased or removed
+        // For example, the got and plt
+        //ent.st_size;
+
+        if (firstNonLocalIdx < 0 && ELF64_ST_BIND(ent.st_info) != STB_LOCAL) {
+            firstNonLocalIdx = i;
+        }
+
+        dynsym.appendContents((unsigned char *) &ent, sizeof(ent));
     }
 
+    if (firstNonLocalIdx < 0) {
+        firstNonLocalIdx = numSyms;
+    }
+    sections[sMap.dynsymIdx].setInfo(firstNonLocalIdx);
 
     return true;
 }
