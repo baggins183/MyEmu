@@ -98,40 +98,9 @@ public:
         memcpy(&contents[off], data, len);
     }
 
-    std::string dump(const char *name = NULL) {
-        std::stringstream buf;
-        if (name) {
-            buf << "name: "  << name << std::endl;
-        }
-        buf << "sh_type: "     << to_string((ShtType) hdr.sh_type) << std::endl;
-        buf << "sh_addr: "     << hdr.sh_addr << std::endl;
-        buf << "sh_offset: "   << hdr.sh_offset << std::endl;
-        buf << "sh_size: "     << hdr.sh_size << std::endl;
-        buf << "sh_link: "     << hdr.sh_link << std::endl;
-        buf << "sh_info: "     << hdr.sh_info << std::endl;
-        buf << "sh_entsize: "  << hdr.sh_entsize<< std::endl;
-
-        return buf.str();
-    }
-
     Elf64_Shdr hdr;
     std::vector<unsigned char> contents;
 };
-
-static std::string dumpSections(std::vector<Section> &sections, Section *shstrtab = NULL) {
-    std::stringstream buf;
-    for (Section &s: sections) {
-        std::stringstream sbuf;
-        buf << "{" << std::endl;
-        sbuf << s.dump(shstrtab ? (char *) &shstrtab->contents[s.getName()] : NULL);
-        std::string line;
-        while (std::getline(sbuf, line)) {
-            buf << "\t" << line << std::endl;
-        }
-        buf << "}" << std::endl;
-    }
-    return buf.str();
-}
 
 struct SectionMap {
     // Assume first section is null, so 0 index is taken and invalid
@@ -170,8 +139,14 @@ struct DynamicTableInfo {
     // Wouldn't make much sense as all entries would be 24B, when 8B for an address in
     // the slot would make more sense
     uint64_t pltrelsz;
+    // lower 32 bits of DT_SCE_MODULE_INFO. String table offset to *this* mod's "project name"
+    uint32_t moduleInfoString;
     std::vector<uint64_t> neededLibs;
     std::vector<uint64_t> neededMods;
+    // module id (from DT_SCE_NEEDED_MODULE/DT_SCE_IMPORT_LIB/DT_SCE_IMPORT_LIB_ATTR)
+    // mapped to the name in the old dynlibdata's dynstr section
+    // module id and idx are confusing. id (top 16 bits of d_val's +- 1) seem to be the consistent piece
+    std::map<uint64_t, uint64_t> modIdToName;
 };
 
 struct Segment {
@@ -192,11 +167,6 @@ struct Segment {
 };
 
 struct CmdConfig {
-    bool dumpElfHeader;
-    bool dumpRelocs;
-    bool dumpModuleInfo;
-    bool dumpSymbols;
-    bool dumpSections;
     //std::string pkgDumpPath;
     std::string dlPath;
     std::string hashdbPath;
@@ -212,17 +182,7 @@ bool parseCmdArgs(int argc, char **argv) {
     }
 
     for (int i = 1; i < argc - 1; i++) {
-        if (!strcmp(argv[i], "--dump_elf_header")) {
-            CmdArgs.dumpElfHeader = true;
-        } else if (!strcmp(argv[i], "--dump_relocs")) {
-            CmdArgs.dumpRelocs = true;
-        } else if (!strcmp(argv[i], "--dump_module_info")) {
-            CmdArgs.dumpModuleInfo = true;
-        }else if (!strcmp(argv[i], "--dump_symbols")) {
-            CmdArgs.dumpSymbols = true;
-        } else if (!strcmp(argv[i], "--dump_sections")) {
-            CmdArgs.dumpSections = true;
-        } else if (!strcmp(argv[i], "--hashdb")) {
+        if (!strcmp(argv[i], "--hashdb")) {
             CmdArgs.hashdbPath = argv[++i];
         } else {
             fprintf(stderr, "Unrecognized cmd arg: %s\n", argv[i]);
@@ -238,50 +198,6 @@ bool parseCmdArgs(int argc, char **argv) {
     //CmdArgs.pkgDumpPath = argv[argc - 1];
     CmdArgs.dlPath = argv[argc - 1];
     return true;
-}
-
-static void dumpElfHdr(const char *name) {
-    FILE *f = fopen(name, "r+");
-    assert(f);
-
-    Elf64_Ehdr elfHdr;
-    fseek(f, 0, SEEK_SET);
-    assert (1 == fread(&elfHdr, sizeof(elfHdr), 1, f));    
-
-    printf("ELF HEADER DUMP:\n"
-        "name: %s\n"
-        "\te_ident: %s\n"
-        "\te_type: %s\n"
-        "\te_machine: %d\n"
-        "\te_version: %d\n"
-        "\te_entry: 0x%lx\n"
-        "\te_phoff: 0x%lx\n"
-        "\te_shoff: 0x%lx\n"
-        "\te_flags: %x\n"
-        "\te_phentsize: %d\n"
-        "\te_phnum: %d\n"
-        "\te_shentsize: %d\n"
-        "\te_shnum: %d\n"
-        "\te_shstrndx: %d\n"
-        "\tABI: %hhu\n",
-        name,
-        elfHdr.e_ident,
-        to_string((EtType) elfHdr.e_type).c_str(),
-        elfHdr.e_machine,
-        elfHdr.e_version,
-        elfHdr.e_entry,
-        elfHdr.e_phoff,
-        elfHdr.e_shoff,
-        elfHdr.e_flags,
-        elfHdr.e_phentsize,
-        elfHdr.e_phnum,
-        elfHdr.e_shentsize,
-        elfHdr.e_shnum,
-        elfHdr.e_shstrndx,
-        elfHdr.e_ident[EI_OSABI]
-    );
-
-    fclose(f);
 }
 
 void printSegmentRanges(std::vector<Elf64_Phdr>& progHdrs) {
@@ -320,10 +236,6 @@ static uint appendToStrtab(Section &strtab, const char *str) {
     strtab.appendContents((unsigned char *) str, strlen(str) + 1);
 
     return off;
-}
-
-static Elf64_Sym& getSymEnt(Section &symtab, uint idx) {
-    return *(reinterpret_cast<Elf64_Sym*>(symtab.contents[idx * sizeof(Elf64_Sym)]));
 }
 
 Segment CreateSegment(Elf64_Phdr pHdr, std::vector<Section> &sections, std::vector<uint> idxs) {
@@ -669,7 +581,20 @@ static bool fixDynlibData(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, DynamicT
         newDynEnts.push_back(needed);
     }
 
-    for (uint64_t modStrOff: dynInfo.neededMods) {
+    for (uint64_t modInfo: dynInfo.neededMods) {
+        uint64_t id = modInfo >> 48;
+        uint64_t minor = (modInfo >> 40) & 0xF;
+        uint64_t major  = (modInfo >> 32) & 0xF;
+        uint64_t index = modInfo & 0xFFF;
+
+        if (dynInfo.modIdToName.find(id) == dynInfo.modIdToName.end()) {
+            fprintf(stderr, "Warning: module with index %lu, id %lu, not found in previous DT_SCE_IMPORT_LIB\n", index, id);
+        } else {
+            uint64_t modStrOff = dynInfo.modIdToName[id];
+            const char *name = reinterpret_cast<char *>(&dynlibContents[dynInfo.strtabOff + modStrOff]);
+
+            printf("Module name for index %lu: %s\n", index, name);
+        }
         //const char *name = reinterpret_cast<char *>(&dynlibContents[info.strtabOff + modStrOff]);
         //fprintf(stderr, "Warning: unused module %s\n", name);
     }
@@ -881,6 +806,14 @@ static bool fixDynamicInfoForLinker(FILE *elf, std::vector<Elf64_Phdr> &progHdrs
                 //printf("unhandled tag: %s\n", to_string(tag).c_str());
                 break;
 
+            case DT_SCE_MODULE_INFO:
+            {
+                uint64_t upp = dyn->d_un.d_val >> 32;
+                uint64_t low = dyn->d_un.d_val & 0xffffffff;
+                assert(upp == 0x101);
+                dynInfo.moduleInfoString = low;
+                break;
+            }
             case DT_SCE_NEEDED_MODULE:
                 // dunno the difference between libs and modules here
                 // "The indexes into the library list start at index 0, and the indexes into the module
@@ -889,10 +822,26 @@ static bool fixDynamicInfoForLinker(FILE *elf, std::vector<Elf64_Phdr> &progHdrs
                 // This is not always the case however because some modules contain more than one library."
                 dynInfo.neededMods.push_back(dyn->d_un.d_val);
                 break;
-            case DT_SCE_IMPORT_LIB:
+            case DT_SCE_MODULE_ATTR:
+                // ignore
                 break;
+            case DT_SCE_IMPORT_LIB:
+            {
+                uint64_t upp = dyn->d_un.d_val >> 32;
+                uint64_t low = dyn->d_un.d_val & 0xffffffff;
+                assert((upp - 1) % 0x10000 == 0);
+                uint64_t modIdx = (upp - 1) / 0x10000;
+                dynInfo.modIdToName[modIdx] = low;
+                break;
+            }
             case DT_SCE_IMPORT_LIB_ATTR:
-                break;                       
+            {
+                uint64_t upp = dyn->d_un.d_val >> 32;
+                uint64_t low = dyn->d_un.d_val & 0xffffffff;
+                assert(upp % 0x10000 == 0);
+                assert(low == 0x9);
+                break;
+            }
             case DT_SCE_HASH:
                 // sym hashtable, ignore for now
                 dynInfo.hashOff = dyn->d_un.d_val;
@@ -1185,11 +1134,6 @@ bool patchPs4Lib(Ps4Module &lib, /* ret */ std::string &newPath) {
     fseek(f, 0, SEEK_SET);
     assert(1 == fwrite(&elfHdr, sizeof(Elf64_Ehdr), 1, f));
 
-    if (CmdArgs.dumpSections) {
-        std::string dump = dumpSections(sections, &sections[sMap.shstrtabIdx]);
-        printf("%s\n", dump.c_str());
-    }
-
     fsync(fileno(f));
     fclose(f);
 
@@ -1234,11 +1178,6 @@ int main(int argc, char **argv) {
 
     if (!res)
         return -1;
-
-    if (CmdArgs.dumpElfHeader) {
-        dumpElfHdr(module.path.c_str());
-        dumpElfHdr(newPath.c_str());
-    }
 
     printf("hi from main\n");
 
