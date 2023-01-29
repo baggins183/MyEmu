@@ -582,18 +582,22 @@ static bool fixDynlibData(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, DynamicT
     }
 
     for (uint64_t modInfo: dynInfo.neededMods) {
-        uint64_t id = modInfo >> 48;
+        //uint64_t id = modInfo >> 48;
+        // I think we should subtract 1 here.
+        // Otherwise the DT_SCE_NEEDED_MODULE and DT_SCE_IMPORT_LIB tags seem to be off by 1
+        uint64_t id = (modInfo >> 48) - 1;
         uint64_t minor = (modInfo >> 40) & 0xF;
         uint64_t major  = (modInfo >> 32) & 0xF;
         uint64_t index = modInfo & 0xFFF;
 
         if (dynInfo.modIdToName.find(id) == dynInfo.modIdToName.end()) {
-            fprintf(stderr, "Warning: module with index %lu, id %lu, not found in previous DT_SCE_IMPORT_LIB\n", index, id);
+            fprintf(stderr, "Warning: module with id %lu (idx %lu, version %lu.%lu), not found in previous DT_SCE_IMPORT_LIB\n", 
+                id, index, major, minor);
         } else {
             uint64_t modStrOff = dynInfo.modIdToName[id];
             const char *name = reinterpret_cast<char *>(&dynlibContents[dynInfo.strtabOff + modStrOff]);
 
-            printf("Module name for index %lu: %s\n", index, name);
+            printf("Module name for id %lu (idx %lu, version %lu.%lu) : %s\n", id, index, major, minor, name);
         }
         //const char *name = reinterpret_cast<char *>(&dynlibContents[info.strtabOff + modStrOff]);
         //fprintf(stderr, "Warning: unused module %s\n", name);
@@ -830,8 +834,8 @@ static bool fixDynamicInfoForLinker(FILE *elf, std::vector<Elf64_Phdr> &progHdrs
                 uint64_t upp = dyn->d_un.d_val >> 32;
                 uint64_t low = dyn->d_un.d_val & 0xffffffff;
                 assert((upp - 1) % 0x10000 == 0);
-                uint64_t modIdx = (upp - 1) / 0x10000;
-                dynInfo.modIdToName[modIdx] = low;
+                uint64_t id = (upp - 1) / 0x10000;
+                dynInfo.modIdToName[id] = low;
                 break;
             }
             case DT_SCE_IMPORT_LIB_ATTR:
