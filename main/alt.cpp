@@ -4,7 +4,9 @@
 
 #include <elf.h>
 #include <sstream>
+#include <sys/stat.h>
 #include <sys/types.h>
+#include <system_error>
 #ifdef __linux
 #include <cstdint>
 #endif
@@ -21,11 +23,15 @@
 #include <pthread.h>
 #include <map>
 #include <utility>
+#include <array>
 
+#include <filesystem>
+namespace fs = std::filesystem;
 #include <algorithm>
 #include <dlfcn.h>
 #include <libgen.h>
 #include <sqlite3.h>
+#include <set>
 
 const long PGSZ = sysconf(_SC_PAGE_SIZE);
 const std::string ebootPath = "eboot.bin";
@@ -33,26 +39,128 @@ const std::string ebootPath = "eboot.bin";
 #define ROUND_DOWN(x, SZ) ((x) - (x) % (SZ))
 #define ROUND_UP(x, SZ) ( (x) % (SZ) ? (x) - ((x) % (SZ)) + (SZ) : (x))
 
-class Module {
-public:
-    Module() {};
+struct CmdConfig {
+    //std::string pkgDumpPath;
+    std::string dlPath;
+    std::string hashdbPath;
+    std::string nativeElfOutputDir;
+    std::string pkgdumpPath;
+    std::string ps4libsPath;
 
-    uint64_t baseVA;
-    bool isEntryModule;
-    std::vector<Elf64_Phdr> pHeaders;
-    std::string path;
-    std::vector<char> strtab;
+    CmdConfig(): nativeElfOutputDir("./elfdump/") {}
 };
 
-class Ps4Module : public Module {
-public:
-    std::vector<Elf64_Rela> relocs;
-    std::vector<Elf64_Sym> symbols;
-};
+CmdConfig CmdArgs;
 
-class HostModule : public Module {
+bool parseCmdArgs(int argc, char **argv) {
+    if (argc < 2) {
+        //fprintf(stderr, "usage: %s [options] <PATH TO PKG DUMP>\n", argv[0]);
+        fprintf(stderr, "usage: %s [options] <PATH TO ELF>\n", argv[0]);
+        exit(1);
+    }
 
-};
+    for (int i = 1; i < argc - 1; i++) {
+        if (!strcmp(argv[i], "--hashdb")) {
+            CmdArgs.hashdbPath = argv[++i];
+        } else if (!strcmp(argv[i], "--native_elf_output")) {
+            CmdArgs.nativeElfOutputDir = argv[++i];
+        } else if(!strcmp(argv[i], "--pkgdump")) {
+            CmdArgs.pkgdumpPath = argv[++i];
+        } else if(!strcmp(argv[i], "--ps4libs")) {
+            CmdArgs.ps4libsPath = argv[++i];
+        } else {
+            fprintf(stderr, "Unrecognized cmd arg: %s\n", argv[i]);
+            return false;
+        }
+    }
+
+    if (CmdArgs.hashdbPath.empty()) {
+        fprintf(stderr, "Warning: no symbol hash database given\n");
+        exit(1); // For debugging
+    }
+
+    //CmdArgs.pkgDumpPath = argv[argc - 1];
+    CmdArgs.dlPath = argv[argc - 1];
+    return true;
+}
+
+static fs::path getNativeLibPath(fs::path ps4LibName, std::string &outdir) {
+    assert(ps4LibName.has_filename());
+
+    auto ext = ps4LibName.extension();
+    assert(ext != ".native");
+    if (ext == ".sprx") {
+        ext = ".prx";
+    }
+    ext += ".native";
+
+    auto libStem = ps4LibName.stem();
+    fs::path newPath = outdir;
+    newPath /= libStem;
+    newPath += ext;
+    return newPath;
+}
+
+static bool searchDir(fs::path dirPath, fs::path stem, std::vector<std::string> validExts, bool recurse, fs::path &foundAtpath) {
+    for (auto &ext: validExts) {
+        fs::path filename = stem;
+        filename += ext;
+        // For now, assume there is no directory in a DT_NEEDED entry, such as A/B.so
+        assert( !filename.has_parent_path());
+        if (!recurse) {
+            fs::path path(dirPath);
+            path /= filename;
+            struct stat buf;
+            if ( !stat(path.c_str(), &buf)) {
+                foundAtpath = path;
+                return true;
+            }
+        } else {
+            fs::recursive_directory_iterator it(dirPath);
+            for (const fs::directory_entry& dirent: it) {
+                if (dirent.is_regular_file()) {
+                    auto entpath = dirent.path();
+                    if (entpath.filename() == filename) {
+                        foundAtpath = entpath;
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
+
+static bool findPathToLibName(fs::path ps4LibName, fs::path& libPath) {
+    if (ps4LibName == CmdArgs.dlPath) {
+        libPath = ps4LibName;
+        return true;
+    }
+
+    if (!ps4LibName.has_extension()) {
+        fprintf(stderr, "Warning, findPathToLibName: library %s has no extension\n", ps4LibName.c_str());
+    }
+
+    fs::path ext = ps4LibName.extension();
+    std::vector<std::string> validExts = { ext };
+    if (ext == ".prx") {
+        validExts.push_back(".sprx");
+    } else if (ext == ".sprx") {
+        validExts.push_back(".prx");
+    }
+
+    fs::path libStem = ps4LibName.stem();
+
+    if ( !CmdArgs.pkgdumpPath.empty() && searchDir(CmdArgs.pkgdumpPath, libStem, validExts, true, libPath)) {
+        return true;
+    }
+
+    if ( !CmdArgs.ps4libsPath.empty() && searchDir(CmdArgs.ps4libsPath, libStem, validExts, false, libPath)) {
+        return true;
+    }    
+
+    return false;
+}
 
 struct Section {
 public:
@@ -131,7 +239,7 @@ struct DynamicTableInfo {
     uint64_t relaEntSz;
     uint64_t pltgotAddr;
     //uint64_t pltgotSz;  // should figure this one out
-    uint64_t pltrel;  /* Type of reloc in PLT */
+    uint64_t pltrel; // Type of reloc in PLT
     uint64_t jmprelOff;
     // pltrelsz aka jmprelSz
     // holds total size of all jmprel relocations
@@ -165,40 +273,6 @@ struct Segment {
         *this = std::move(other);
     }    
 };
-
-struct CmdConfig {
-    //std::string pkgDumpPath;
-    std::string dlPath;
-    std::string hashdbPath;
-};
-
-CmdConfig CmdArgs;
-
-bool parseCmdArgs(int argc, char **argv) {
-    if (argc < 2) {
-        //fprintf(stderr, "usage: %s [options] <PATH TO PKG DUMP>\n", argv[0]);
-        fprintf(stderr, "usage: %s [options] <PATH TO ELF>\n", argv[0]);
-        exit(1);
-    }
-
-    for (int i = 1; i < argc - 1; i++) {
-        if (!strcmp(argv[i], "--hashdb")) {
-            CmdArgs.hashdbPath = argv[++i];
-        } else {
-            fprintf(stderr, "Unrecognized cmd arg: %s\n", argv[i]);
-            return false;
-        }
-    }
-
-    if (CmdArgs.hashdbPath.empty()) {
-        fprintf(stderr, "Warning: no symbol hash database given\n");
-        exit(1); // For debugging
-    }
-
-    //CmdArgs.pkgDumpPath = argv[argc - 1];
-    CmdArgs.dlPath = argv[argc - 1];
-    return true;
-}
 
 void printSegmentRanges(std::vector<Elf64_Phdr>& progHdrs) {
     for (auto p: progHdrs) {
@@ -343,6 +417,9 @@ static sqlite3 *openHashDb(const char *path) {
 
 static bool reverseKnownHashes(std::vector<const char *> &oldStrings, std::vector<std::string> &newStrings) {
     sqlite3 *db = openHashDb(CmdArgs.hashdbPath.c_str());
+    if ( !db) {
+        return false;
+    }
 
     std::stringstream sql;
     sql << 
@@ -477,7 +554,7 @@ static void createSymbolHashTable(DynamicTableInfo &info, std::vector<Section> &
 }
 
 // Build new dynamic sections from the PT_SCE_DYNLIBDATA segment
-static bool fixDynlibData(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, DynamicTableInfo &dynInfo, std::vector<Section> &sections, SectionMap &sMap, std::vector<Elf64_Dyn> &newDynEnts) {
+static bool fixDynlibData(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, DynamicTableInfo &dynInfo, std::vector<Section> &sections, SectionMap &sMap, std::vector<Elf64_Dyn> &newDynEnts, std::set<std::string> &dependencies) {
     uint phIdx = findPhdr(progHdrs, PT_SCE_DYNLIBDATA);
     std::vector<unsigned char> dynlibContents(progHdrs[phIdx].p_filesz);
 
@@ -527,7 +604,9 @@ static bool fixDynlibData(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, DynamicT
 
     std::vector<std::string> newStrings;
     if (!CmdArgs.hashdbPath.empty()) {
-        reverseKnownHashes(oldSymStrings, newStrings);
+        if ( !reverseKnownHashes(oldSymStrings, newStrings)) {
+            return false;
+        }
     }
 
     int firstNonLocalIdx = -1;
@@ -551,7 +630,7 @@ static bool fixDynlibData(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, DynamicT
                 printf("Symbol has reserved symbol shndx\n");
             }
         } else if (ent.st_shndx != SHN_UNDEF) {
-            ent.st_shndx = 1;
+            ent.st_shndx = 3; // TODO
         }
         //ent.st_value; // TODO - ensure all pointer values are in LOAD segments that haven't been rebased or removed
         // For example, the got and plt
@@ -574,7 +653,14 @@ static bool fixDynlibData(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, DynamicT
 
     // Write needed libs and modules
     for (uint64_t libStrOff: dynInfo.neededLibs) {
-        uint64_t name = appendToStrtab(sections[sMap.dynstrIdx], reinterpret_cast<char *>(&dynlibContents[dynInfo.strtabOff + libStrOff]));
+        std::string ps4Name = reinterpret_cast<char *>(&dynlibContents[dynInfo.strtabOff + libStrOff]);
+        fs::path pPs4Name = ps4Name;
+        dependencies.insert(ps4Name);
+
+        fs::path nativePath = getNativeLibPath(pPs4Name, CmdArgs.nativeElfOutputDir);
+        std::string nativeName = nativePath.filename();
+
+        uint64_t name = appendToStrtab(sections[sMap.dynstrIdx], nativeName.c_str());
         Elf64_Dyn needed;
         needed.d_tag = DT_NEEDED;
         needed.d_un.d_val = name;
@@ -626,12 +712,12 @@ static bool fixDynlibData(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, DynamicT
 
     newDynEnts.push_back({
         DT_HASH,
-        {dynInfo.hashOff} // TODO
+        {sections[sMap.hashIdx].getAddr()} // TODO
     });
 
     newDynEnts.push_back({
         DT_PLTGOT,
-        {dynInfo.pltgotAddr}
+        {sections[sMap.gotpltIdx].getAddr()}
     });
 
     newDynEnts.push_back({ 
@@ -693,9 +779,9 @@ static bool fixDynlibData(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, DynamicT
 // append to end of file
 // modify the progHdrs array
 // add new dynlibdata sections and update section map
-static bool fixDynamicInfoForLinker(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, std::vector<Section> &sections, SectionMap &sMap) {
+static bool fixDynamicInfoForLinker(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, std::vector<Section> &sections, SectionMap &sMap, std::set<std::string> &dependencies) {
     uint oldDynamicPIdx = findPhdr(progHdrs, PT_DYNAMIC);
-    Elf64_Phdr newDynPhdr = progHdrs[oldDynamicPIdx];
+    Elf64_Phdr DynPhdr = progHdrs[oldDynamicPIdx];
     Elf64_Shdr sHdr;
     std::vector<Elf64_Dyn> newDynEnts;
     DynamicTableInfo dynInfo;
@@ -731,13 +817,13 @@ static bool fixDynamicInfoForLinker(FILE *elf, std::vector<Elf64_Phdr> &progHdrs
     };
     sections.emplace_back(sHdr);
 
-    std::vector<unsigned char> buf(newDynPhdr.p_filesz);
-    fseek(elf, newDynPhdr.p_offset, SEEK_SET);
-    assert(1 == fread(buf.data(), newDynPhdr.p_filesz, 1, elf));
+    std::vector<unsigned char> buf(DynPhdr.p_filesz);
+    fseek(elf, DynPhdr.p_offset, SEEK_SET);
+    assert(1 == fread(buf.data(), DynPhdr.p_filesz, 1, elf));
 
     Elf64_Dyn *dyn = (Elf64_Dyn*) buf.data();
     
-    int maxDynHeaders = newDynPhdr.p_filesz / sizeof(Elf64_Dyn);
+    int maxDynHeaders = DynPhdr.p_filesz / sizeof(Elf64_Dyn);
     for(int i = 0; i < maxDynHeaders; i++, dyn++) {
         DynamicTag tag = (DynamicTag) dyn->d_tag;
         if (tag == DT_NULL) {
@@ -760,7 +846,7 @@ static bool fixDynamicInfoForLinker(FILE *elf, std::vector<Elf64_Phdr> &progHdrs
                 break;
             case DT_SONAME:
                 // TODO
-                fprintf(stderr, "Warning: unhandled DynEnt DT_SONAME\n");
+                //fprintf(stderr, "Warning: unhandled DynEnt DT_SONAME\n");
                 break;
 
             case DT_REL:
@@ -814,7 +900,10 @@ static bool fixDynamicInfoForLinker(FILE *elf, std::vector<Elf64_Phdr> &progHdrs
             {
                 uint64_t upp = dyn->d_un.d_val >> 32;
                 uint64_t low = dyn->d_un.d_val & 0xffffffff;
-                assert(upp == 0x101);
+                //assert(upp == 0x101);
+                if (upp != 0x101) {
+                    fprintf(stderr, "Warning: upp != 0x101 in DT_SCE_MODULE_INFO\n");
+                }
                 dynInfo.moduleInfoString = low;
                 break;
             }
@@ -979,7 +1068,9 @@ static bool fixDynamicInfoForLinker(FILE *elf, std::vector<Elf64_Phdr> &progHdrs
     };
     sections.emplace_back(sHdr);    
 
-    fixDynlibData(elf, progHdrs, dynInfo, sections, sMap, newDynEnts);
+    if ( !fixDynlibData(elf, progHdrs, dynInfo, sections, sMap, newDynEnts, dependencies)) {
+        return false;
+    };
 
     // End DynEnt array
     newDynEnts.push_back({
@@ -992,12 +1083,13 @@ static bool fixDynamicInfoForLinker(FILE *elf, std::vector<Elf64_Phdr> &progHdrs
     uint64_t segmentFileOff = ftell(elf);
     assert(1 == fwrite(newDynEnts.data(), newDynEnts.size() * sizeof(Elf64_Dyn), 1, elf));
 
-    newDynPhdr.p_align = PGSZ;    
+    Elf64_Phdr newDynPhdr = DynPhdr;
+    newDynPhdr.p_align = PGSZ;
+    newDynPhdr.p_filesz = newDynEnts.size() * sizeof(Elf64_Dyn);
     // calculate p_vaddr, p_paddr
     rebaseSegment(&newDynPhdr, progHdrs);
     newDynPhdr.p_flags = PF_X | PF_W | PF_R;
     newDynPhdr.p_offset = segmentFileOff;
-    newDynPhdr.p_filesz = newDynEnts.size() * sizeof(Elf64_Dyn);
     progHdrs.push_back(newDynPhdr);
 
     progHdrs[oldDynamicPIdx].p_type = PT_NULL;
@@ -1009,7 +1101,7 @@ static bool fixDynamicInfoForLinker(FILE *elf, std::vector<Elf64_Phdr> &progHdrs
         .sh_flags = SHF_WRITE | SHF_ALLOC,
         .sh_addr = newDynPhdr.p_vaddr,
         .sh_offset = newDynPhdr.p_offset,
-        .sh_size = newDynPhdr.p_memsz,
+        .sh_size = newDynPhdr.p_filesz,
         .sh_link = sMap.dynstrIdx,
         .sh_addralign = newDynPhdr.p_align,
         .sh_entsize = sizeof(Elf64_Dyn),
@@ -1033,7 +1125,7 @@ static bool fixDynamicInfoForLinker(FILE *elf, std::vector<Elf64_Phdr> &progHdrs
     return true;
 }
 
-bool patchPs4Lib(Ps4Module &lib, /* ret */ std::string &newPath) {
+bool patchPs4Lib(std::string nativePath, std::set<std::string> &dependencies) {
     std::vector<Elf64_Phdr> progHdrs;
     // in a Ps4 module, these Dyn Ents are in the DYNAMIC segment/.dynamic section,
     // and describe the DYNLIBDATA segment
@@ -1041,14 +1133,9 @@ bool patchPs4Lib(Ps4Module &lib, /* ret */ std::string &newPath) {
     std::vector<Elf64_Dyn> newElfDynEnts;
     // index of the strtab in the shEntries
 
-    newPath = lib.path + ".new";
-
-    std::string cmd = "cp " + lib.path + " " + newPath;
-    system(cmd.c_str());
-
-    FILE *f = fopen(newPath.c_str(), "r+");
+    FILE *f = fopen(nativePath.c_str(), "r+");
     if (!f) {
-        fprintf(stderr, "couldn't open %s\n", newPath.c_str());
+        fprintf(stderr, "couldn't open %s\n", nativePath.c_str());
         return false;
     }
 
@@ -1056,7 +1143,8 @@ bool patchPs4Lib(Ps4Module &lib, /* ret */ std::string &newPath) {
     fseek(f, 0, SEEK_SET);
     assert (1 == fread(&elfHdr, sizeof(elfHdr), 1, f));
 
-    elfHdr.e_ident[EI_OSABI] = ELFOSABI_SYSV;
+    //elfHdr.e_ident[EI_OSABI] = ELFOSABI_SYSV;
+    elfHdr.e_ident[EI_OSABI] = ELFOSABI_GNU;
     elfHdr.e_type = ET_DYN;
 
     Elf64_Shdr sHdr;
@@ -1089,7 +1177,9 @@ bool patchPs4Lib(Ps4Module &lib, /* ret */ std::string &newPath) {
     // Copy parts of PT_SCE_DYNLIBDATA to new Segment, such as unhashed strings
     // Fix up syms, relas, strings
     // Crate relevant sections for dlopen
-    fixDynamicInfoForLinker(f, progHdrs, sections, sMap);
+    if ( !fixDynamicInfoForLinker(f, progHdrs, sections, sMap, dependencies)) {
+        return false;
+    }
     // Change OS specific type
     // I don't think this should be loaded currently. p_vaddr and p_memsz are 0
     // I think plt/got are in different section which is already PT_LOAD
@@ -1114,6 +1204,28 @@ bool patchPs4Lib(Ps4Module &lib, /* ret */ std::string &newPath) {
     Segment extraSegment = CreateSegment(extraSegmentHdr, sections, extraSections);
     assert(1 == fwrite(extraSegment.contents.data(), extraSegment.contents.size(), 1, f));
     progHdrs.push_back(extraSegment.pHdr);
+
+    for (Elf64_Phdr &pHdr: progHdrs) {
+        switch(pHdr.p_type) {
+            case PT_SCE_RELA:	
+            case PT_SCE_DYNLIBDATA:	
+            case PT_SCE_PROCPARAM:	
+            case PT_SCE_MODULEPARAM:	
+            case PT_SCE_RELRO:	
+            case PT_SCE_COMMENT:	
+            case PT_SCE_LIBVERSION:
+                if (pHdr.p_memsz) {
+                    pHdr.p_type = PT_LOAD;
+                } else {
+                    pHdr.p_type = PT_NULL;
+                }
+                break;
+            default:
+                break;
+        }
+
+        //pHdr.p_align = PGSZ;
+    }
 
     // write program headers
     fseek(f, 0, SEEK_END);
@@ -1144,50 +1256,58 @@ bool patchPs4Lib(Ps4Module &lib, /* ret */ std::string &newPath) {
     return true;
 }
 
-bool dumpHostElfSectionsHdrs(HostModule &mod) {
-    FILE *f = fopen(mod.path.c_str(), "r");
-    if (!f) {
-        fprintf(stderr, "couldn't open %s\n", mod.path.c_str());
-        return false;
-    }
-
-    Elf64_Ehdr elfHdr;
-    fseek(f, 0, SEEK_SET);
-    if (1 != fread(&elfHdr, sizeof(elfHdr), 1, f)) {
-        return false;
-    }
-
-    fseek(f, elfHdr.e_shoff, SEEK_SET);
-
-    std::vector<Elf64_Shdr> sectionHdrs(elfHdr.e_shnum);
-    assert(elfHdr.e_shnum == fread(sectionHdrs.data(), sizeof(Elf64_Shdr), elfHdr.e_shnum, f));
-
-    fclose(f);
-
-    return true;
-}
-
 int main(int argc, char **argv) {
     //FILE *eboot;
     void *dl;
-    bool res = true;
     
     parseCmdArgs(argc, argv);
 
-    Ps4Module module;
-    module.path = CmdArgs.dlPath;
-
-    std::string newPath;
-    res = patchPs4Lib(module, newPath);
-
-    if (!res)
+    std::error_code ec;
+    fs::create_directory(CmdArgs.nativeElfOutputDir, ".", ec);
+    if (ec) {
+        std::string m = ec.message();
+        fprintf(stderr, "Failed to create directory %s: %s\n", CmdArgs.nativeElfOutputDir.c_str(), m.c_str());
         return -1;
+    }    
+
+    std::set<std::string> dependencies = { CmdArgs.dlPath };
+    std::set<std::string> satisfied;
+    while (!dependencies.empty()) {
+        auto it = dependencies.begin();
+        fs::path libName = *it;
+        dependencies.erase(it);
+
+        fs::path libPath;
+        if (!findPathToLibName(libName, libPath)) {
+            fprintf(stderr, "Warning: unable to locate library %s\n", libName.c_str());
+            continue;
+        }
+
+        std::string nativePath = getNativeLibPath(libPath, CmdArgs.nativeElfOutputDir);
+        std::string cmd = "cp " + libPath.string() + " " + nativePath;
+        system(cmd.c_str());
+
+        if (chmod(nativePath.c_str(), S_IRWXU | (S_IRGRP | S_IXGRP) | (S_IROTH | S_IXOTH))) {
+            fprintf(stderr, "chmod failed\n");
+            return -1;
+        }
+
+        if ( !patchPs4Lib(nativePath, dependencies)) {
+            return -1;
+        }
+        satisfied.insert(libName.filename());
+        for (auto &sat: satisfied) {
+            dependencies.erase(sat);
+        }
+    }
 
     printf("hi from main\n");
 
     //setenv("LD_DEBUG", "all", 1);
 
-    dl = dlopen(newPath.c_str(), RTLD_LAZY);
+    std::string firstLib = getNativeLibPath(CmdArgs.dlPath, CmdArgs.nativeElfOutputDir);
+
+    dl = dlopen(firstLib.c_str(), RTLD_LAZY);
     if (!dl) {
         char *err;
         while ((err = dlerror())) {

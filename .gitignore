@@ -9,3 +9,4 @@ nid_hash/nid_hash
 *.so
 .*
 build/
+elfdump/
