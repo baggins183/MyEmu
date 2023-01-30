@@ -1099,6 +1099,12 @@ static bool fixDynamicInfoForLinker(FILE *elf, std::vector<Elf64_Phdr> &progHdrs
 
     progHdrs[oldDynamicPIdx].p_type = PT_NULL;
 
+    // Need to create load command for the DYNAMIC segment.
+    // Just use the same ranges
+    Elf64_Phdr loadPhdrForDynSegment = newDynPhdr;
+    loadPhdrForDynSegment.p_type = PT_LOAD;
+    progHdrs.push_back(loadPhdrForDynSegment);
+
     sMap.dynamicIdx = sections.size();
     sHdr = {
         .sh_name = appendToStrtab(sections[sMap.shstrtabIdx], ".dynamic"),
@@ -1133,8 +1139,8 @@ static bool fixDynamicInfoForLinker(FILE *elf, std::vector<Elf64_Phdr> &progHdrs
 static bool isLoadableSegType(Elf64_Word p_type) {
     switch (p_type) {
         case PT_LOAD:
-        case PT_GNU_RELRO:
-        case PT_DYNAMIC:
+        //case PT_GNU_RELRO:
+        //case PT_DYNAMIC:
         //case PT_TLS:
             return true;
 
@@ -1144,38 +1150,40 @@ static bool isLoadableSegType(Elf64_Word p_type) {
 }
 
 static void finalizeProgramHeaders(std::vector<Elf64_Phdr> &progHdrs) {
-    printf("final headers:\n");
-    for (Elf64_Phdr &pHdr: progHdrs) {
-        printf("\t%s\n", to_string((ProgramSegmentType) pHdr.p_type).c_str());
-    }
+    //printf("before:\n");
+    //for (Elf64_Phdr &pHdr: progHdrs) {
+        //printf("\t%s\n", to_string((ProgramSegmentType) pHdr.p_type).c_str());
+    //}
 
+    // TODO look into which SCE segments need to be kept or converted to PT_LOAD
+
+    // Convert certain SCE Segments
     for (Elf64_Phdr &pHdr: progHdrs) {
         switch(pHdr.p_type) {
             case PT_SCE_RELRO:	
-                pHdr.p_type = PT_GNU_RELRO;
+                //pHdr.p_type = PT_GNU_RELRO;
+                pHdr.p_type = PT_LOAD;
                 break;
             case PT_GNU_EH_FRAME:
-                break;
             case PT_SCE_PROCPARAM:	
             case PT_SCE_MODULEPARAM:
             case PT_SCE_LIBVERSION:
-                break;
             case PT_SCE_RELA:	
-            case PT_SCE_COMMENT:	
+            case PT_SCE_COMMENT:
+                /*
                 if (pHdr.p_memsz) {
                     pHdr.p_type = PT_LOAD;
                 } else {
                     pHdr.p_type = PT_NULL;
-                }
+                }*/
                 break;
             default:
                 break;
         }
-
-        //pHdr.p_align = PGSZ;
     }
 
-    std::vector<Elf64_Phdr> afterRemovingSegments;
+    // Get rid of  certain Segments
+    std::vector<Elf64_Phdr> finalSegments;
     for (Elf64_Phdr &pHdr: progHdrs) {
         switch(pHdr.p_type) {
             case PT_NULL:
@@ -1185,13 +1193,17 @@ static void finalizeProgramHeaders(std::vector<Elf64_Phdr> &progHdrs) {
             case PT_SCE_MODULEPARAM:
             case PT_SCE_LIBVERSION:
             case PT_SCE_DYNLIBDATA:
+            case PT_SCE_COMMENT:
                 break;
             default:
-                afterRemovingSegments.push_back(pHdr);
+                finalSegments.push_back(pHdr);
         }
     }
+    progHdrs = finalSegments;
 
-    progHdrs = afterRemovingSegments;    
+    for (Elf64_Phdr &pHdr: progHdrs) {
+        pHdr.p_flags = PF_X | PF_W | PF_R;
+    }
 
     std::stable_sort(progHdrs.begin(), progHdrs.end(), [](const Elf64_Phdr& left, const Elf64_Phdr& right){
         if (isLoadableSegType(left.p_type) && isLoadableSegType(right.p_type)) {
@@ -1202,6 +1214,11 @@ static void finalizeProgramHeaders(std::vector<Elf64_Phdr> &progHdrs) {
         }
         return isLoadableSegType(left.p_type);
     });
+
+    //printf("final headers:\n");
+    //for (Elf64_Phdr &pHdr: progHdrs) {
+        //printf("\t%s\n", to_string((ProgramSegmentType) pHdr.p_type).c_str());
+    //}
 }
 
 bool patchPs4Lib(std::string nativePath, std::set<std::string> &dependencies) {
@@ -1222,8 +1239,7 @@ bool patchPs4Lib(std::string nativePath, std::set<std::string> &dependencies) {
     fseek(f, 0, SEEK_SET);
     assert (1 == fread(&elfHdr, sizeof(elfHdr), 1, f));
 
-    //elfHdr.e_ident[EI_OSABI] = ELFOSABI_SYSV;
-    elfHdr.e_ident[EI_OSABI] = ELFOSABI_GNU;
+    elfHdr.e_ident[EI_OSABI] = ELFOSABI_SYSV;
     elfHdr.e_type = ET_DYN;
 
     Elf64_Shdr sHdr;
@@ -1288,6 +1304,7 @@ bool patchPs4Lib(std::string nativePath, std::set<std::string> &dependencies) {
 
     // write program headers
     fseek(f, 0, SEEK_END);
+    writePadding(f, PGSZ, true);
     elfHdr.e_phoff = ftell(f);
     elfHdr.e_phnum = progHdrs.size();
     assert(elfHdr.e_phnum == fwrite(progHdrs.data(), sizeof(Elf64_Phdr), elfHdr.e_phnum, f));
@@ -1358,7 +1375,6 @@ int main(int argc, char **argv) {
         for (auto &sat: satisfied) {
             dependencies.erase(sat);
         }
-        break; // TODO
     }
 
     printf("hi from main\n");
