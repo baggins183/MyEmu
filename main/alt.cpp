@@ -726,6 +726,11 @@ static bool fixDynlibData(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, DynamicT
     });
 
     newDynEnts.push_back({
+        DT_PLTRELSZ,
+        {sections[sMap.jmprelIdx].getSize()}
+    });
+
+    newDynEnts.push_back({
         DT_PLTREL,
         {dynInfo.pltrel}
     });
@@ -1125,6 +1130,80 @@ static bool fixDynamicInfoForLinker(FILE *elf, std::vector<Elf64_Phdr> &progHdrs
     return true;
 }
 
+static bool isLoadableSegType(Elf64_Word p_type) {
+    switch (p_type) {
+        case PT_LOAD:
+        case PT_GNU_RELRO:
+        case PT_DYNAMIC:
+        //case PT_TLS:
+            return true;
+
+        default:
+            return false;
+    }
+}
+
+static void finalizeProgramHeaders(std::vector<Elf64_Phdr> &progHdrs) {
+    printf("final headers:\n");
+    for (Elf64_Phdr &pHdr: progHdrs) {
+        printf("\t%s\n", to_string((ProgramSegmentType) pHdr.p_type).c_str());
+    }
+
+    for (Elf64_Phdr &pHdr: progHdrs) {
+        switch(pHdr.p_type) {
+            case PT_SCE_RELRO:	
+                pHdr.p_type = PT_GNU_RELRO;
+                break;
+            case PT_GNU_EH_FRAME:
+                break;
+            case PT_SCE_PROCPARAM:	
+            case PT_SCE_MODULEPARAM:
+            case PT_SCE_LIBVERSION:
+                break;
+            case PT_SCE_RELA:	
+            case PT_SCE_COMMENT:	
+                if (pHdr.p_memsz) {
+                    pHdr.p_type = PT_LOAD;
+                } else {
+                    pHdr.p_type = PT_NULL;
+                }
+                break;
+            default:
+                break;
+        }
+
+        //pHdr.p_align = PGSZ;
+    }
+
+    std::vector<Elf64_Phdr> afterRemovingSegments;
+    for (Elf64_Phdr &pHdr: progHdrs) {
+        switch(pHdr.p_type) {
+            case PT_NULL:
+            case PT_EMU_IGNORE:
+            //case PT_GNU_EH_FRAME:
+            case PT_SCE_PROCPARAM:	
+            case PT_SCE_MODULEPARAM:
+            case PT_SCE_LIBVERSION:
+            case PT_SCE_DYNLIBDATA:
+                break;
+            default:
+                afterRemovingSegments.push_back(pHdr);
+        }
+    }
+
+    progHdrs = afterRemovingSegments;    
+
+    std::stable_sort(progHdrs.begin(), progHdrs.end(), [](const Elf64_Phdr& left, const Elf64_Phdr& right){
+        if (isLoadableSegType(left.p_type) && isLoadableSegType(right.p_type)) {
+            if (left.p_vaddr == right.p_vaddr) {
+                return left.p_memsz >= right.p_memsz;
+            }
+            return left.p_vaddr <= right.p_vaddr;
+        }
+        return isLoadableSegType(left.p_type);
+    });
+}
+
 bool patchPs4Lib(std::string nativePath, std::set<std::string> &dependencies) {
     std::vector<Elf64_Phdr> progHdrs;
     // in a Ps4 module, these Dyn Ents are in the DYNAMIC segment/.dynamic section,
@@ -1183,7 +1262,7 @@ bool patchPs4Lib(std::string nativePath, std::set<std::string> &dependencies) {
     // Change OS specific type
     // I don't think this should be loaded currently. p_vaddr and p_memsz are 0
     // I think plt/got are in different section which is already PT_LOAD
-    progHdrs[findPhdr(progHdrs, PT_SCE_DYNLIBDATA)].p_type = PT_NULL;
+    //progHdrs[findPhdr(progHdrs, PT_SCE_DYNLIBDATA)].p_type = PT_NULL;
 
     // For now, pack the extra sections into their own segment
     // in order to append them. The data is all that matters.
@@ -1193,7 +1272,7 @@ bool patchPs4Lib(std::string nativePath, std::set<std::string> &dependencies) {
         sMap.shstrtabIdx
     };
     Elf64_Phdr extraSegmentHdr {
-        .p_type = PT_NULL,
+        .p_type = PT_EMU_IGNORE,
         .p_flags = PF_R | PF_W | PF_X,
         .p_align = static_cast<Elf64_Xword>(PGSZ)
     };
@@ -1205,27 +1284,7 @@ bool patchPs4Lib(std::string nativePath, std::set<std::string> &dependencies) {
     assert(1 == fwrite(extraSegment.contents.data(), extraSegment.contents.size(), 1, f));
     progHdrs.push_back(extraSegment.pHdr);
 
-    for (Elf64_Phdr &pHdr: progHdrs) {
-        switch(pHdr.p_type) {
-            case PT_SCE_RELA:	
-            case PT_SCE_DYNLIBDATA:	
-            case PT_SCE_PROCPARAM:	
-            case PT_SCE_MODULEPARAM:	
-            case PT_SCE_RELRO:	
-            case PT_SCE_COMMENT:	
-            case PT_SCE_LIBVERSION:
-                if (pHdr.p_memsz) {
-                    pHdr.p_type = PT_LOAD;
-                } else {
-                    pHdr.p_type = PT_NULL;
-                }
-                break;
-            default:
-                break;
-        }
-
-        //pHdr.p_align = PGSZ;
-    }
+    finalizeProgramHeaders(progHdrs);
 
     // write program headers
     fseek(f, 0, SEEK_END);
@@ -1246,7 +1305,7 @@ bool patchPs4Lib(std::string nativePath, std::set<std::string> &dependencies) {
     elfHdr.e_shentsize = sizeof(Elf64_Shdr);
     assert(elfHdr.e_shnum == fwrite(sectionHeaders.data(), sizeof(Elf64_Shdr), elfHdr.e_shnum, f));
 
-    // write elf headers, now referring to new program and section headers
+    // write elf header, now referring to new program and section headers
     fseek(f, 0, SEEK_SET);
     assert(1 == fwrite(&elfHdr, sizeof(Elf64_Ehdr), 1, f));
 
@@ -1299,6 +1358,7 @@ int main(int argc, char **argv) {
         for (auto &sat: satisfied) {
             dependencies.erase(sat);
         }
+        break; // TODO
     }
 
     printf("hi from main\n");

@@ -96,6 +96,7 @@ static std::map<EtType, const char *> et_strings_map = {
     OP(PT_LOSUNW,	0x6ffffffa) \
     OP(PT_SUNWBSS,	0x6ffffffa) \
     OP(PT_SUNWSTACK,	0x6ffffffb) \
+    OP(PT_EMU_IGNORE, 0x6fffabcd) \
     OP(PT_HISUNW,	0x6fffffff) \
     OP(PT_HIOS,		0x6fffffff) \
     OP(PT_LOPROC,	0x70000000) \
