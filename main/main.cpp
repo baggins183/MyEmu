@@ -1,6 +1,12 @@
 #include "Common.h"
 #include "Elf/elf-sce.h"
-#include "Elf/elf_amd64.h"
+#include "nid_hash/nid_hash.h"
+
+#include <elf.h>
+#include <sstream>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <system_error>
 #ifdef __linux
 #include <cstdint>
 #endif
@@ -9,7 +15,6 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <errno.h>
-#include <elf.h>
 #include <stdlib.h>
 #include <cassert>
 #include <vector>
@@ -18,88 +23,210 @@
 #include <pthread.h>
 #include <map>
 #include <utility>
+#include <array>
 
+#include <filesystem>
+namespace fs = std::filesystem;
 #include <algorithm>
-#include "nid_hash/nid_hash.h"
+#include <dlfcn.h>
+#include <libgen.h>
+#include <sqlite3.h>
+#include <set>
+
+const long PGSZ = sysconf(_SC_PAGE_SIZE);
+const std::string ebootPath = "eboot.bin";
 
 #define ROUND_DOWN(x, SZ) ((x) - (x) % (SZ))
 #define ROUND_UP(x, SZ) ( (x) % (SZ) ? (x) - ((x) % (SZ)) + (SZ) : (x))
 
-static void dumpElfHdr(const char *name, Elf64_Ehdr *elfHdr) {
-    printf("ELF HEADER DUMP:\n"
-        "name: %s\n"
-        "\te_ident: %s\n"
-        "\te_type: %d\n"
-        "\te_machine: %d\n"
-        "\te_version: %d\n"
-        "\te_entry: 0x%lx\n"
-        "\te_phoff: 0x%lx\n"
-        "\te_shoff: 0x%lx\n"
-        "\te_flags: %x\n"
-        "\te_phentsize: %d\n"
-        "\te_phnum: %d\n"
-        "\te_shentsize: %d\n"
-        "\te_shnum: %d\n"
-        "\te_shstrndx: %d\n",
-        name,
-        elfHdr->e_ident,
-        elfHdr->e_type,
-        elfHdr->e_machine,
-        elfHdr->e_version,
-        elfHdr->e_entry,
-        elfHdr->e_phoff,
-        elfHdr->e_shoff,
-        elfHdr->e_flags,
-        elfHdr->e_phentsize,
-        elfHdr->e_phnum,
-        elfHdr->e_shentsize,
-        elfHdr->e_shnum,
-        elfHdr->e_shstrndx      
-    );
-}
-
-const long pgsz = sysconf(_SC_PAGE_SIZE);
-
 struct CmdConfig {
-    bool dumpElfHeader;
-    bool dumpRelocs;
-    bool dumpModuleInfo;
-    bool dumpSymbols;
-    std::string pkgDumpPath;
+    //std::string pkgDumpPath;
+    std::string dlPath;
+    std::string hashdbPath;
+    std::string nativeElfOutputDir;
+    std::string pkgdumpPath;
+    std::string ps4libsPath;
 
+    CmdConfig(): nativeElfOutputDir("./elfdump/") {}
 };
 
 CmdConfig CmdArgs;
 
-struct EntryPointWrapperArg {
-    Elf64_Addr entryPointAddr;
-    Ps4EntryArg entryArg;
+bool parseCmdArgs(int argc, char **argv) {
+    if (argc < 2) {
+        //fprintf(stderr, "usage: %s [options] <PATH TO PKG DUMP>\n", argv[0]);
+        fprintf(stderr, "usage: %s [options] <PATH TO ELF>\n", argv[0]);
+        exit(1);
+    }
+
+    for (int i = 1; i < argc - 1; i++) {
+        if (!strcmp(argv[i], "--hashdb")) {
+            CmdArgs.hashdbPath = argv[++i];
+        } else if (!strcmp(argv[i], "--native_elf_output")) {
+            CmdArgs.nativeElfOutputDir = argv[++i];
+        } else if(!strcmp(argv[i], "--pkgdump")) {
+            CmdArgs.pkgdumpPath = argv[++i];
+        } else if(!strcmp(argv[i], "--ps4libs")) {
+            CmdArgs.ps4libsPath = argv[++i];
+        } else {
+            fprintf(stderr, "Unrecognized cmd arg: %s\n", argv[i]);
+            return false;
+        }
+    }
+
+    if (CmdArgs.hashdbPath.empty()) {
+        fprintf(stderr, "Warning: no symbol hash database given\n");
+        exit(1); // For debugging
+    }
+
+    //CmdArgs.pkgDumpPath = argv[argc - 1];
+    CmdArgs.dlPath = argv[argc - 1];
+    return true;
+}
+
+static fs::path getNativeLibPath(fs::path ps4LibName, std::string &outdir) {
+    assert(ps4LibName.has_filename());
+
+    auto ext = ps4LibName.extension();
+    assert(ext != ".native");
+    if (ext == ".sprx") {
+        ext = ".prx";
+    }
+    ext += ".native";
+
+    auto libStem = ps4LibName.stem();
+    fs::path newPath = outdir;
+    newPath /= libStem;
+    newPath += ext;
+    return newPath;
+}
+
+static bool searchDir(fs::path dirPath, fs::path stem, std::vector<std::string> validExts, bool recurse, fs::path &foundAtpath) {
+    for (auto &ext: validExts) {
+        fs::path filename = stem;
+        filename += ext;
+        // For now, assume there is no directory in a DT_NEEDED entry, such as A/B.so
+        assert( !filename.has_parent_path());
+        if (!recurse) {
+            fs::path path(dirPath);
+            path /= filename;
+            struct stat buf;
+            if ( !stat(path.c_str(), &buf)) {
+                foundAtpath = path;
+                return true;
+            }
+        } else {
+            fs::recursive_directory_iterator it(dirPath);
+            for (const fs::directory_entry& dirent: it) {
+                if (dirent.is_regular_file()) {
+                    auto entpath = dirent.path();
+                    if (entpath.filename() == filename) {
+                        foundAtpath = entpath;
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
+
+static bool findPathToLibName(fs::path ps4LibName, fs::path& libPath) {
+    if (ps4LibName == CmdArgs.dlPath) {
+        libPath = ps4LibName;
+        return true;
+    }
+
+    if (!ps4LibName.has_extension()) {
+        fprintf(stderr, "Warning, findPathToLibName: library %s has no extension\n", ps4LibName.c_str());
+    }
+
+    fs::path ext = ps4LibName.extension();
+    std::vector<std::string> validExts = { ext };
+    if (ext == ".prx") {
+        validExts.push_back(".sprx");
+    } else if (ext == ".sprx") {
+        validExts.push_back(".prx");
+    }
+
+    fs::path libStem = ps4LibName.stem();
+
+    if ( !CmdArgs.pkgdumpPath.empty() && searchDir(CmdArgs.pkgdumpPath, libStem, validExts, true, libPath)) {
+        return true;
+    }
+
+    if ( !CmdArgs.ps4libsPath.empty() && searchDir(CmdArgs.ps4libsPath, libStem, validExts, false, libPath)) {
+        return true;
+    }    
+
+    return false;
+}
+
+struct Section {
+public:
+    Section(Elf64_Shdr sHdr): hdr(sHdr) {}
+    Section() {
+        hdr.sh_name = 0;
+        hdr.sh_type = SHT_NULL;
+        hdr.sh_flags = 0;
+        hdr.sh_addr = 0;
+        hdr.sh_offset = 0;
+        hdr.sh_size = 0;
+        hdr.sh_link = 0;
+        hdr.sh_info = 0;
+        hdr.sh_addralign = 0;
+        hdr.sh_entsize = 0;
+    }
+
+    Elf64_Word getName() { return hdr.sh_name; }
+    Elf64_Word getType() { return hdr.sh_type; }
+    Elf64_Xword getFlags() { return hdr.sh_flags; }
+    Elf64_Addr getAddr() { return hdr.sh_addr; }
+    Elf64_Off getOffset() { return hdr.sh_offset; }
+    Elf64_Xword getSize() { return hdr.sh_size; }
+    Elf64_Word getLink() { return hdr.sh_link; }
+    Elf64_Word getInfo() { return hdr.sh_info; }
+    Elf64_Xword getAddrAlign() { return hdr.sh_addralign; }
+    Elf64_Xword getEntSize() { return hdr.sh_entsize; }
+
+    void setName(Elf64_Word name) { hdr.sh_name = name; }
+    void setType(Elf64_Word type) { hdr.sh_type = type; }
+    void setFlags(Elf64_Xword flags) { hdr.sh_flags = flags; }
+    void setAddr(Elf64_Addr addr) { hdr.sh_addr = addr; }
+    void setOffset(Elf64_Off offset) { hdr.sh_offset = offset; }
+    void setSize(Elf64_Xword size) { hdr.sh_size = size; }
+    void setLink(Elf64_Word link) { hdr.sh_link = link; }
+    void setInfo(Elf64_Word info) { hdr.sh_info = info; }
+    void setAddrAlign(Elf64_Xword addralign) { hdr.sh_addralign = addralign; }
+    void setEntSize(Elf64_Xword entsize) { hdr.sh_entsize = entsize; }
+
+    void appendContents(unsigned char *data, size_t len) {
+        size_t off = contents.size();
+        contents.resize(contents.size() + len);
+        memcpy(&contents[off], data, len);
+    }
+
+    Elf64_Shdr hdr;
+    std::vector<unsigned char> contents;
 };
 
-static void ps4ThreadExitFn(void) {
-    printf("ps4 thread exited\n");
-}
-
-static void *ps4EntryWrapper(void *arg) {
-    EntryPointWrapperArg *wrapperArg = (EntryPointWrapperArg *) arg;
-    Elf64_Addr entryPoint = wrapperArg->entryPointAddr;
-    //void (*entryFn)(void) = (void (*)(void)) entryPoint;
-    PFUNC_GameTheadEntry entryFn = (PFUNC_GameTheadEntry) entryPoint;
-
-    printf("in ps4EntryWrapper()\n");
-
-    entryFn((void *) &wrapperArg->entryArg, ps4ThreadExitFn);
-    return NULL;
-}
-
-struct MappedSegment {
-    Elf64_Addr mStart;
-    Elf64_Off mSize;
+struct SectionMap {
+    // Assume first section is null, so 0 index is taken and invalid
+    uint shstrtabIdx;
+    uint dynstrIdx;
+    uint dynsymIdx;
+    uint dynamicIdx;
+    uint relroIdx;
+    uint gotpltIdx;
+    uint relaIdx;
+    uint jmprelIdx;
+    uint hashIdx;
 };
 
 struct DynamicTableInfo {
-    Elf64_Phdr dynamicPHdr;
-    Elf64_Phdr dynlibdataPHdr;
+    // hashOff and hashSz can be ignored
+    // The Elf-mandatory hash table can be produced without referring to the
+    // hash table in PT_SCE_DYNAMIC/PT_SCE_DYNLIBDATA
     uint64_t hashOff;
     uint64_t hashSz;
     uint64_t strtabOff;
@@ -112,105 +239,641 @@ struct DynamicTableInfo {
     uint64_t relaEntSz;
     uint64_t pltgotAddr;
     //uint64_t pltgotSz;  // should figure this one out
-    uint64_t pltrel;  /* Type of reloc in PLT */
+    uint64_t pltrel; // Type of reloc in PLT
     uint64_t jmprelOff;
+    // pltrelsz aka jmprelSz
+    // holds total size of all jmprel relocations
+    // Is this also the size of the .got.plt section?
+    // Wouldn't make much sense as all entries would be 24B, when 8B for an address in
+    // the slot would make more sense
     uint64_t pltrelsz;
-    std::vector<uint64_t> neededLibs; // offsets into strtab for filenames
-    std::vector<uint64_t> neededModules;
+    // lower 32 bits of DT_SCE_MODULE_INFO. String table offset to *this* mod's "project name"
+    uint32_t moduleInfoString;
+    std::vector<uint64_t> neededLibs;
+    std::vector<uint64_t> neededMods;
+    // module id (from DT_SCE_NEEDED_MODULE/DT_SCE_IMPORT_LIB/DT_SCE_IMPORT_LIB_ATTR)
+    // mapped to the name in the old dynlibdata's dynstr section
+    // module id and idx are confusing. id (top 16 bits of d_val's +- 1) seem to be the consistent piece
+    std::map<uint64_t, uint64_t> modIdToName;
 };
 
-struct Module {
-    std::string name;
-    std::string path; // location in filesystem
-    uint64_t baseVA;
-    // total memory this takes from baseVA onwards
-    // should be a multiple of pagesz, s.t. next module can start at this->baseVA + this->memSz
-    uint64_t memSz;
-    // VA ranges (without base offset of module)
-    // mmap will be called on ranges with baseVA added
-    std::vector<MappedSegment> mappedSegments;
-    std::vector<Elf64_Phdr> pHeaders;
-    DynamicTableInfo dynTableInfo;
-    std::vector<std::string> neededLibsStrings;
+struct Segment {
+    Elf64_Phdr pHdr;
+    std::vector<unsigned char> contents;
 
-    std::vector<char> strtab;
-    std::vector<Elf64_Rela> relocs;
-    std::vector<Elf64_Sym> symbols;
-    bool isNative;
+    Segment() {}
+
+    Segment & operator=( Segment && rhs) {
+        this->contents = std::move(rhs.contents);
+        this->pHdr = rhs.pHdr;
+        return *this;
+    }
+
+    Segment (Segment && other) {
+        *this = std::move(other);
+    }    
 };
 
-static bool processDynamicSegment(Elf64_Phdr *phdr, FILE *elf, DynamicTableInfo &info) {
-    std::vector<unsigned char> buf;
-    buf.resize(phdr->p_filesz);
+void printSegmentRanges(std::vector<Elf64_Phdr>& progHdrs) {
+    for (auto p: progHdrs) {
+        printf("[%lx, %lx), size=%lx\n", p.p_offset, p.p_offset + p.p_filesz, p.p_filesz);
+    }
+}
 
-    info.dynamicPHdr = *phdr;
+int findPhdr(std::vector<Elf64_Phdr> &pHdrs, Elf64_Word type) {
+    for (size_t i = 0; i < pHdrs.size(); i++) {
+        if (pHdrs[i].p_type == type) {
+            return i;
+        }
+    }
+    return -1;
+}
 
-    fseek(elf, phdr->p_offset, SEEK_SET);
-    if (1 != fread(buf.data(), phdr->p_filesz, 1, elf)) {
+bool writePadding(FILE *f, size_t alignment, bool forceBump = false) {
+    fseek(f, 0, SEEK_END);
+    size_t flen = ftell(f);
+
+    // force power of 2
+    assert(alignment != 0 && (((alignment - 1) & alignment) == 0)); 
+    size_t padlen = ROUND_UP(flen | (forceBump ? 1 : 0), alignment) - flen;
+    std::vector<unsigned char> padding(padlen, 0);
+    if (padlen > 0) {
+        assert(1 == fwrite(padding.data(), padlen, 1, f));
+    }
+
+    return true;
+}
+
+// return index into strtab
+static uint appendToStrtab(Section &strtab, const char *str) {
+    uint off = strtab.contents.size();
+    strtab.appendContents((unsigned char *) str, strlen(str) + 1);
+
+    return off;
+}
+
+Segment CreateSegment(Elf64_Phdr pHdr, std::vector<Section> &sections, std::vector<uint> idxs) {
+    Segment seg;
+    seg.pHdr = pHdr;
+
+    uint64_t segBeginVa = pHdr.p_vaddr;
+    uint64_t segBeginFileOff = pHdr.p_offset;
+
+    std::vector<unsigned char> &totalContents = seg.contents;
+
+    for (uint idx: idxs) {
+        Section &section = sections[idx];
+        uint64_t segOff = ROUND_UP(totalContents.size(), section.getAddrAlign());
+        std::vector<unsigned char> &sectionContents = section.contents;
+        totalContents.resize(segOff + sectionContents.size());
+
+        memcpy(&totalContents[segOff], &sectionContents[0], sectionContents.size());
+
+        section.setAddr(segBeginVa + segOff);
+        section.setOffset(segBeginFileOff + segOff);
+        section.setSize(sectionContents.size());
+
+        assert((seg.pHdr.p_vaddr + segOff) % section.getAddrAlign() == 0);
+    }
+
+    seg.pHdr.p_filesz = totalContents.size();
+    seg.pHdr.p_memsz = totalContents.size(); // ??? TODO possibly
+
+    return seg;
+}
+
+// find a new virtual and physical address for pHdr
+// use the maximum offsets of other progHdrs so no overlapping happens
+void rebaseSegment(Elf64_Phdr *pHdr, std::vector<Elf64_Phdr> &progHdrs) {
+    uint64_t highestVAddr = 0;
+    uint64_t highestPAddr = 0;    
+    for (auto phdr: progHdrs) {
+        highestVAddr = std::max(highestVAddr, phdr.p_vaddr + phdr.p_memsz);
+        highestPAddr = std::max(highestPAddr, phdr.p_paddr + phdr.p_memsz);
+    }
+    pHdr->p_vaddr = ROUND_UP(highestVAddr, pHdr->p_align);
+    pHdr->p_paddr = ROUND_UP(highestPAddr, pHdr->p_align);    
+}
+
+static int getLibraryOrModuleIndex(const char *str) {
+    const char *libModIndex = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+-";
+    const uint radix = strlen(libModIndex);
+    const uint chars = strlen(str);
+
+    // Keep assert until we find a case of this
+    // If there are >radix modules/libs, we could need 2 digits
+    assert(chars == 1);
+
+    uint idx = 0;
+    for (uint i = 0; i < chars; i++)
+    {
+        uint j = 0;
+        for(; j < radix; j++) {
+            if (libModIndex[j] == str[i])
+                break;
+        }
+        assert((j < radix) && "Invalid character for library or module index");
+        if (j >= radix) {
+            return -1;
+        }
+        idx *= radix;
+        idx += j;
+    }
+    return idx;
+}
+
+static bool isHashedSymbol(const char *str, int &libIdx, int &modIdx) {
+    std::string sym(str);
+    if (sym.length() > 12) {
+        std::string suff = sym.substr(11);
+        if (suff[0] == '#') {
+            auto secondDelim = suff.find_first_of('#', 1);
+            if (secondDelim != suff.npos) {
+                assert(secondDelim != suff.size());
+                if (secondDelim != suff.size()) {
+                    std::string lib = suff.substr(1, secondDelim - 1);
+                    std::string mod = suff.substr(secondDelim + 1);
+                    libIdx = getLibraryOrModuleIndex(lib.c_str());
+                    modIdx = getLibraryOrModuleIndex(mod.c_str());
+                    if (libIdx >= 0 && modIdx >= 0) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
+
+static sqlite3 *openHashDb(const char *path) {
+    sqlite3 *db;
+    int res = sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, nullptr);
+    if (res != SQLITE_OK) {
+        fprintf(stderr, "Couldn't open database %s\n", path);
+        return nullptr;
+    }
+    return db;
+}
+
+static bool reverseKnownHashes(std::vector<const char *> &oldStrings, std::vector<std::string> &newStrings) {
+    sqlite3 *db = openHashDb(CmdArgs.hashdbPath.c_str());
+    if ( !db) {
         return false;
     }
 
-    Elf64_Dyn entry;
-    for(int i = 0; ; i++) {
-        assert((i + 1) * sizeof(Elf64_Dyn) <= phdr->p_filesz);
-        unsigned char *off = &buf[i * sizeof(Elf64_Dyn)];
-        memcpy(&entry, off, sizeof(entry));
+    std::stringstream sql;
+    sql << 
+        "SELECT * FROM Hashes\n"
+        "WHERE hash IN\n"
+        "(";
 
-        if (entry.d_tag == DT_NULL) {
+    uint numHashes = 0;
+    for (uint i = 0; i < oldStrings.size(); i++) {
+        const char *old = oldStrings[i];
+        int libIdx, modIdx;
+        if (!isHashedSymbol(old, libIdx, modIdx)) {
+            continue;
+        }
+        if (numHashes > 0) {
+            sql << ",";
+        }
+        std::string hash(old, 11);
+        sql << "'" << hash << "'";
+        numHashes++;
+    }
+
+    sql << ");";
+
+    auto ssql = sql.str();
+
+    sqlite3_stmt *stmt;
+    int res = sqlite3_prepare(db, ssql.c_str(), ssql.size(), &stmt, NULL);
+    if (res != SQLITE_OK) {
+        fprintf(stderr, "sqlite3_prepare errored\n");
+        return false;
+    }
+
+    std::map<std::string, std::string> hashToSymbol;
+    bool doMore;
+    do {
+        int res = sqlite3_step(stmt);
+        switch (res) {
+            case SQLITE_ROW:
+                doMore = true;
+                break;
+            case SQLITE_DONE:
+                doMore = false;
+                break;
+            case SQLITE_ERROR:
+                fprintf(stderr, "sqlite3_step errored\n");
+                return false;
+            default:
+                fprintf(stderr, "reverseKnownHashes: sqlite3_step unhandled code\n");
+                return false;
+        }
+        if (!doMore) {
             break;
         }
 
-        switch(entry.d_tag) {
+        const char *symbol = (const char *) sqlite3_column_text(stmt, 0);
+        const char *hash = (const char *) sqlite3_column_text(stmt, 1);
+        hashToSymbol[hash] = symbol;
+    } while (doMore);
+
+    sqlite3_finalize(stmt);
+    sqlite3_close_v2(db);
+
+    for (const char *old: oldStrings) {
+        int libIdx, modIdx;
+        if (isHashedSymbol(old, libIdx, modIdx)) {
+            std::string hash(old, 11);
+            const auto &it = hashToSymbol.find(hash);
+            if (it != hashToSymbol.end()) {
+                const std::string& symbol = it->second; 
+                newStrings.push_back(symbol);
+            } else {
+                // truncate #A#B lib/module id's
+                newStrings.push_back(hash);
+            }
+        } else {
+            newStrings.push_back(old);
+        }
+    }
+
+    return true;
+}
+
+unsigned long elf_Hash(const unsigned char *name) {
+    unsigned long h = 0, g;
+ 
+	    while (*name)
+	    {
+		     h = (h << 4) + *name++;
+		     if ((g = h & 0xf0000000))
+			      h ^= g >> 24;
+				   h &= ~g;
+	    }
+	    return h;
+}
+
+static void createSymbolHashTable(DynamicTableInfo &info, std::vector<Section> &sections, SectionMap &sMap) {
+    Section &hashtable = sections[sMap.hashIdx];
+    const Section &dynsym = sections[sMap.dynsymIdx];
+    const Section &dynstr = sections[sMap.dynstrIdx];
+    
+    size_t numSyms = info.symtabSz / info.symtabEntSz;
+
+    Elf64_Word nbucket = 200;
+    Elf64_Word nchain = numSyms;
+
+    const Elf64_Sym *syms = reinterpret_cast<const Elf64_Sym *>(dynsym.contents.data());    
+
+    hashtable.appendContents((unsigned char *) &nbucket, sizeof(nbucket));
+    hashtable.appendContents((unsigned char *) &nchain, sizeof(nchain));
+    hashtable.contents.resize(sizeof(nbucket) + sizeof(nchain) + sizeof(Elf64_Word) * (nbucket + nchain));
+    Elf64_Word *buckets = reinterpret_cast<Elf64_Word *>(&hashtable.contents[sizeof(nbucket) + sizeof(nchain)]);
+    Elf64_Word *chains = buckets + nbucket;
+    for (uint i = 0; i < nbucket + nchain; i++) {
+        buckets[i] = STN_UNDEF;
+    }    
+
+    for (uint i = 0; i < numSyms; i++) {
+        Elf64_Word strOff = syms[i].st_name;
+        const unsigned char *name = &dynstr.contents[strOff];
+        size_t bIdx = elf_Hash(name) % nbucket;
+        if (buckets[bIdx] == STN_UNDEF) {
+            buckets[bIdx] = i;
+            continue;
+        }
+        size_t cIdx = buckets[bIdx];
+        while (chains[cIdx] != STN_UNDEF) {
+            cIdx = chains[cIdx];
+        }
+        chains[cIdx] = i;
+    }
+}
+
+// Build new dynamic sections from the PT_SCE_DYNLIBDATA segment
+static bool fixDynlibData(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, DynamicTableInfo &dynInfo, std::vector<Section> &sections, SectionMap &sMap, std::vector<Elf64_Dyn> &newDynEnts, std::set<std::string> &dependencies) {
+    uint phIdx = findPhdr(progHdrs, PT_SCE_DYNLIBDATA);
+    std::vector<unsigned char> dynlibContents(progHdrs[phIdx].p_filesz);
+
+    assert(sMap.dynstrIdx);
+    assert(sMap.shstrtabIdx);
+    assert(sMap.dynsymIdx);
+    assert(sMap.relaIdx);
+    assert(sMap.gotpltIdx);
+
+    fseek(elf, progHdrs[phIdx].p_offset, SEEK_SET);
+    if (1 != fread(dynlibContents.data(), progHdrs[phIdx].p_filesz, 1, elf)) {
+        return false;
+    }
+
+    // Ps4 ELF's always seem to have plt rela entries (.rela.plt) followed immediately by normal rela entries (.rela)
+    // Keep this until I find a counterexample
+    assert(dynInfo.relaOff == dynInfo.jmprelOff + dynInfo.pltrelsz);
+
+    uint numJmpRelas = dynInfo.pltrelsz / dynInfo.relaEntSz;
+    Elf64_Rela *jmprelas = reinterpret_cast<Elf64_Rela *>(&dynlibContents[dynInfo.jmprelOff]);
+    Section &jmprela = sections[sMap.jmprelIdx];
+    for (uint i = 0; i < numJmpRelas; i++) {
+        Elf64_Rela ent = jmprelas[i];
+        jmprela.appendContents((unsigned char *) &ent, sizeof(ent));
+    }
+
+    uint numRelas = dynInfo.relaSz / dynInfo.relaEntSz;
+    Elf64_Rela *relas = reinterpret_cast<Elf64_Rela *>(&dynlibContents[dynInfo.relaOff]);
+    Section &rela = sections[sMap.relaIdx];
+    for (uint i = 0; i < numRelas; i++) {
+        Elf64_Rela ent = relas[i];
+        rela.appendContents((unsigned char *) &ent, sizeof(ent));
+    }
+
+    std::vector<const char *> oldSymStrings;
+
+    uint numSyms = dynInfo.symtabSz / dynInfo.symtabEntSz;
+    Elf64_Sym *syms = reinterpret_cast<Elf64_Sym *>(&dynlibContents[dynInfo.symtabOff]);
+    for (uint i = 0; i < numSyms; i++) {
+        Elf64_Sym ent = syms[i];
+        if (ent.st_name) {
+            oldSymStrings.push_back((const char *) &dynlibContents[dynInfo.strtabOff+ ent.st_name]);
+        } else {
+            oldSymStrings.push_back("");
+        }
+    }
+
+    std::vector<std::string> newStrings;
+    if (!CmdArgs.hashdbPath.empty()) {
+        if ( !reverseKnownHashes(oldSymStrings, newStrings)) {
+            return false;
+        }
+    }
+
+    int firstNonLocalIdx = -1;
+    Section &dynsym = sections[sMap.dynsymIdx];
+    for (uint i = 0; i < numSyms; i++) {
+        Elf64_Sym ent = syms[i];
+        if (ent.st_name) {
+            ent.st_name = appendToStrtab(sections[sMap.dynstrIdx], newStrings[i].c_str());
+        }
+        //ent.st_info = ELF64_ST_INFO(0, 0);
+        //ent.st_info;
+        //ent.st_other;
+        //ent.st_value;
+
+        // I think shndx doesn't matter for dynamic linking, and that st_value is just used as a VA
+        // I think it's only relevant for static linking, when sections from multiple objects are being rearranged
+        // and stitched into linked objects. In that case, providing the shndx is indirection that lets you keep the location
+        // section_base + st_value consistent with the real location, because the section contents are moved by the static linker
+        if (ent.st_shndx >= SHN_LORESERVE && ent.st_shndx <= SHN_LORESERVE) {
+            if (false) {
+                printf("Symbol has reserved symbol shndx\n");
+            }
+        } else if (ent.st_shndx != SHN_UNDEF) {
+            ent.st_shndx = 3; // TODO
+        }
+        //ent.st_value; // TODO - ensure all pointer values are in LOAD segments that haven't been rebased or removed
+        // For example, the got and plt
+        //ent.st_size;
+
+        if (firstNonLocalIdx < 0 && ELF64_ST_BIND(ent.st_info) != STB_LOCAL) {
+            firstNonLocalIdx = i;
+        }
+
+        dynsym.appendContents((unsigned char *) &ent, sizeof(ent));
+    }
+
+    if (firstNonLocalIdx < 0) {
+        firstNonLocalIdx = numSyms;
+    }
+    sections[sMap.dynsymIdx].setInfo(firstNonLocalIdx);
+
+    // Create Hash table
+    createSymbolHashTable(dynInfo, sections, sMap);
+
+    // Write needed libs and modules
+    for (uint64_t libStrOff: dynInfo.neededLibs) {
+        std::string ps4Name = reinterpret_cast<char *>(&dynlibContents[dynInfo.strtabOff + libStrOff]);
+        fs::path pPs4Name = ps4Name;
+        dependencies.insert(ps4Name);
+
+        fs::path nativePath = getNativeLibPath(pPs4Name, CmdArgs.nativeElfOutputDir);
+        std::string nativeName = nativePath.filename();
+
+        uint64_t name = appendToStrtab(sections[sMap.dynstrIdx], nativeName.c_str());
+        Elf64_Dyn needed;
+        needed.d_tag = DT_NEEDED;
+        needed.d_un.d_val = name;
+        newDynEnts.push_back(needed);
+    }
+
+    for (uint64_t modInfo: dynInfo.neededMods) {
+        //uint64_t id = modInfo >> 48;
+        // I think we should subtract 1 here.
+        // Otherwise the DT_SCE_NEEDED_MODULE and DT_SCE_IMPORT_LIB tags seem to be off by 1
+        uint64_t id = (modInfo >> 48) - 1;
+        uint64_t minor = (modInfo >> 40) & 0xF;
+        uint64_t major  = (modInfo >> 32) & 0xF;
+        uint64_t index = modInfo & 0xFFF;
+
+        if (dynInfo.modIdToName.find(id) == dynInfo.modIdToName.end()) {
+            fprintf(stderr, "Warning: module with id %lu (idx %lu, version %lu.%lu), not found in previous DT_SCE_IMPORT_LIB\n", 
+                id, index, major, minor);
+        } else {
+            uint64_t modStrOff = dynInfo.modIdToName[id];
+            const char *name = reinterpret_cast<char *>(&dynlibContents[dynInfo.strtabOff + modStrOff]);
+
+            printf("Module name for id %lu (idx %lu, version %lu.%lu) : %s\n", id, index, major, minor, name);
+        }
+        //const char *name = reinterpret_cast<char *>(&dynlibContents[info.strtabOff + modStrOff]);
+        //fprintf(stderr, "Warning: unused module %s\n", name);
+    }
+
+    // Create dynlibdata segment
+    std::vector<uint> dynlibDataSections = {
+        sMap.dynstrIdx,
+        sMap.dynsymIdx,
+        sMap.hashIdx,
+        sMap.jmprelIdx,
+        sMap.relaIdx,
+    };
+    Elf64_Phdr newDynlibDataSegmentHdr {
+        .p_type = PT_LOAD,
+        .p_flags = PF_R | PF_W | PF_X,
+        .p_align = static_cast<Elf64_Xword>(PGSZ)
+    };
+    rebaseSegment(&newDynlibDataSegmentHdr, progHdrs);
+    fseek(elf, 0, SEEK_END);
+    writePadding(elf, newDynlibDataSegmentHdr.p_align, true);
+    newDynlibDataSegmentHdr.p_offset = ftell(elf);
+    Segment dynlibDataSegment = CreateSegment(newDynlibDataSegmentHdr, sections, dynlibDataSections);
+    assert(1 == fwrite(dynlibDataSegment.contents.data(), dynlibDataSegment.contents.size(), 1, elf));
+    progHdrs.push_back(dynlibDataSegment.pHdr);
+
+    newDynEnts.push_back({
+        DT_HASH,
+        {sections[sMap.hashIdx].getAddr()} // TODO
+    });
+
+    newDynEnts.push_back({
+        DT_PLTGOT,
+        {sections[sMap.gotpltIdx].getAddr()}
+    });
+
+    newDynEnts.push_back({ 
+        DT_JMPREL,
+        {sections[sMap.jmprelIdx].getAddr()}
+    });
+
+    newDynEnts.push_back({
+        DT_PLTRELSZ,
+        {sections[sMap.jmprelIdx].getSize()}
+    });
+
+    newDynEnts.push_back({
+        DT_PLTREL,
+        {dynInfo.pltrel}
+    });
+
+    newDynEnts.push_back({ 
+        DT_RELA,
+        {sections[sMap.relaIdx].getAddr()}
+    });
+
+    // DT_RELASZ
+    // TODO make sure this stays the same
+    newDynEnts.push_back({
+        DT_RELASZ,
+        {sections[sMap.relaIdx].getSize()}
+    });
+
+    // DT_RELAENT
+    newDynEnts.push_back({
+        DT_RELAENT,
+        {dynInfo.relaEntSz}
+    });
+
+    // DT_STRTAB
+    newDynEnts.push_back({
+        DT_STRTAB,
+        {sections[sMap.dynstrIdx].getAddr()}
+    });
+
+    // DT_STRSZ
+    newDynEnts.push_back({
+        DT_STRSZ,
+        {sections[sMap.dynstrIdx].getSize()}
+    });
+
+    // DT_SYMTAB
+    newDynEnts.push_back({
+        DT_SYMTAB,
+        {sections[sMap.dynsymIdx].getAddr()}
+    });
+
+    // DT_SYMENT
+    newDynEnts.push_back({
+        DT_SYMENT,
+        {dynInfo.symtabEntSz}
+    });
+
+    return true;
+}
+
+// write new Segment for PT_DYNAMIC based on SCE dynamic entries
+// append to end of file
+// modify the progHdrs array
+// add new dynlibdata sections and update section map
+static bool fixDynamicInfoForLinker(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, std::vector<Section> &sections, SectionMap &sMap, std::set<std::string> &dependencies) {
+    uint oldDynamicPIdx = findPhdr(progHdrs, PT_DYNAMIC);
+    Elf64_Phdr DynPhdr = progHdrs[oldDynamicPIdx];
+    Elf64_Shdr sHdr;
+    std::vector<Elf64_Dyn> newDynEnts;
+    DynamicTableInfo dynInfo;
+
+    sMap.dynstrIdx = sections.size();
+    sHdr = {
+        .sh_name = appendToStrtab(sections[sMap.shstrtabIdx], ".dynstr"),
+        .sh_type = SHT_STRTAB,
+        .sh_flags = SHF_STRINGS | SHF_ALLOC, // TODO check this, confusingly ELFs I've seen don't set SHF_STRINGS
+        .sh_addralign = static_cast<Elf64_Xword>(PGSZ),
+    };
+    sections.emplace_back(sHdr);
+
+    sMap.dynsymIdx = sections.size();
+    sHdr = {
+        .sh_name = appendToStrtab(sections[sMap.shstrtabIdx], ".dynsym"),
+        .sh_type = SHT_SYMTAB,
+        .sh_flags = SHF_ALLOC,
+        .sh_link = sMap.dynstrIdx,
+        .sh_addralign = static_cast<Elf64_Xword>(PGSZ),
+        .sh_entsize = sizeof(Elf64_Sym),
+    };
+    sections.emplace_back(sHdr);
+
+    sMap.hashIdx = sections.size();
+    sHdr = {
+        .sh_name = appendToStrtab(sections[sMap.shstrtabIdx], ".hash"),
+        .sh_type = SHT_HASH,
+        .sh_flags = SHF_ALLOC,
+        .sh_link = sMap.dynsymIdx,
+        .sh_addralign = 8,
+        .sh_entsize = 0, // TODO?
+    };
+    sections.emplace_back(sHdr);
+
+    std::vector<unsigned char> buf(DynPhdr.p_filesz);
+    fseek(elf, DynPhdr.p_offset, SEEK_SET);
+    assert(1 == fread(buf.data(), DynPhdr.p_filesz, 1, elf));
+
+    Elf64_Dyn *dyn = (Elf64_Dyn*) buf.data();
+    
+    int maxDynHeaders = DynPhdr.p_filesz / sizeof(Elf64_Dyn);
+    for(int i = 0; i < maxDynHeaders; i++, dyn++) {
+        DynamicTag tag = (DynamicTag) dyn->d_tag;
+        if (tag == DT_NULL) {
+            break;
+        }
+
+        //printf("%s\n", to_string(tag).c_str());
+        switch(tag) {
+            // DT_ tags
             case DT_NULL:
+                assert(false && "shouldn't be here");
                 break;
             case DT_NEEDED:
-                info.neededLibs.push_back(entry.d_un.d_val);
+                // "Additionally, DT_NEEDED tags are created for each dynamic library used by the application.
+                // The value is set to the offset of the library's name in the string table. Each DT_NEEDED tag 
+                // should also have a corresponding DT_SCE_IMPORT_LIB and DT_SCE_IMPORT_LIB_ATTR tag."
+                // Need to change strings to their legal ELF counterparts.
+                // Find out which strtab this should use
+                dynInfo.neededLibs.push_back(dyn->d_un.d_val);
                 break;
-            case DT_PLTRELSZ:
-                info.pltrelsz = entry.d_un.d_val; // TODO check this
-                break;
-            case DT_PLTGOT:
-                info.pltgotAddr = entry.d_un.d_ptr;
-                break;
-            case DT_HASH:
-                info.hashOff = entry.d_un.d_ptr;
-                break;
-            case DT_STRTAB:
-                info.strtabOff = entry.d_un.d_ptr;
-                break;
-            case DT_SYMTAB:
-                info.symtabOff = entry.d_un.d_ptr;
-                break;
-            case DT_RELA:
-                info.relaOff = entry.d_un.d_ptr;            
-                break;
-            case DT_RELASZ:
-                info.relaSz = entry.d_un.d_val;
-                break;
-            case DT_RELAENT:
-                info.relaEntSz = entry.d_un.d_val;
-                break;
-            case DT_STRSZ:
-                info.strtabSz = entry.d_un.d_val;
-                break;
-            case DT_SYMENT:
-                info.symtabEntSz = entry.d_un.d_val;
-                break;
-            case DT_PLTREL:
-                assert(entry.d_un.d_val == DT_RELA);
-                info.pltrel = entry.d_un.d_val;            
-                break;
-            case DT_JMPREL:
-                info.jmprelOff = entry.d_un.d_ptr;
-                break;                
-            case DT_INIT:
-            case DT_FINI:
             case DT_SONAME:
-            case DT_RPATH:
-            case DT_SYMBOLIC:
+                // TODO
+                //fprintf(stderr, "Warning: unhandled DynEnt DT_SONAME\n");
+                break;
+
             case DT_REL:
             case DT_RELSZ:
             case DT_RELENT:
+            {
+                std::string name = to_string(tag);
+                printf("Warning: unhandled DynEnt %s\n", name.c_str());
+                assert(false); // We will add empty DT_REL* tags for executables,
+                // so assume DT_RELA* are the only ones given until seeing otherwise
+                break;
+            }
+                
+
+            case DT_INIT:
+                // startup routine
+                // can probably leave as is
+                // https://docs.oracle.com/cd/E23824_01/html/819-0690/chapter2-55859.html#chapter2-48195
+            case DT_FINI:
+                // ^
+            case DT_RPATH:
+            case DT_SYMBOLIC:
             case DT_DEBUG:
             case DT_TEXTREL:
             case DT_BIND_NOW:
@@ -220,733 +883,514 @@ static bool processDynamicSegment(Elf64_Phdr *phdr, FILE *elf, DynamicTableInfo 
             case DT_FINI_ARRAYSZ:
             case DT_RUNPATH:
             case DT_FLAGS:
-            case DT_ENCODING:
+                //https://docs.oracle.com/cd/E23824_01/html/819-0690/chapter6-42444.html#chapter7-tbl-5            
+                // should be DF_TEXTREL
+            case DT_PREINIT_ARRAY:
             case DT_PREINIT_ARRAYSZ:
             case DT_SYMTAB_SHNDX:
+            case DT_RELRSZ:
+            case DT_RELR:
+            case DT_RELRENT:
             case DT_NUM:
             case DT_LOOS:
             case DT_HIOS:
-            default:
+            case DT_LOPROC:
+            case DT_HIPROC:
+            case DT_PROCNUM:
+                newDynEnts.push_back(*dyn);
+                //printf("unhandled tag: %s\n", to_string(tag).c_str());
                 break;
-        }
 
-        //uint64_t val = entry.d_un.d_val;
-        switch(entry.d_tag) {
+            case DT_SCE_MODULE_INFO:
+            {
+                uint64_t upp = dyn->d_un.d_val >> 32;
+                uint64_t low = dyn->d_un.d_val & 0xffffffff;
+                //assert(upp == 0x101);
+                if (upp != 0x101) {
+                    fprintf(stderr, "Warning: upp != 0x101 in DT_SCE_MODULE_INFO\n");
+                }
+                dynInfo.moduleInfoString = low;
+                break;
+            }
             case DT_SCE_NEEDED_MODULE:
-                info.neededModules.push_back(entry.d_un.d_val);
-                //printf("dyn case DT_SCE_NEEDED_MODULE: %lx\n", val);
+                // dunno the difference between libs and modules here
+                // "The indexes into the library list start at index 0, and the indexes into the module
+                // list start at index 1. Most of the time, the library list and module list are in 
+                // the same order, so the module ID is usually the library ID + 1. 
+                // This is not always the case however because some modules contain more than one library."
+                dynInfo.neededMods.push_back(dyn->d_un.d_val);
+                break;
+            case DT_SCE_MODULE_ATTR:
+                // ignore
                 break;
             case DT_SCE_IMPORT_LIB:
-                //printf("dyn case DT_SCE_IMPORT_LIB: %lx\n", val);
+            {
+                uint64_t upp = dyn->d_un.d_val >> 32;
+                uint64_t low = dyn->d_un.d_val & 0xffffffff;
+                assert((upp - 1) % 0x10000 == 0);
+                uint64_t id = (upp - 1) / 0x10000;
+                dynInfo.modIdToName[id] = low;
                 break;
+            }
             case DT_SCE_IMPORT_LIB_ATTR:
-                //printf("dyn case DT_SCE_IMPORT_LIB_ATTR: %lx\n", val);
-                break;                       
+            {
+                uint64_t upp = dyn->d_un.d_val >> 32;
+                uint64_t low = dyn->d_un.d_val & 0xffffffff;
+                assert(upp % 0x10000 == 0);
+                assert(low == 0x9);
+                break;
+            }
             case DT_SCE_HASH:
-                info.hashOff = entry.d_un.d_ptr;
+                // sym hashtable, ignore for now
+                dynInfo.hashOff = dyn->d_un.d_val;
                 break;
             case DT_SCE_PLTGOT:
-                info.pltgotAddr = entry.d_un.d_ptr;
+                // Addr of table that contains .data.rel.ro and .got.plt
+                // Can possibly just convert to DT_PLTGOT
+                // (didn't need this in old attempt, relocs just affect this area)
+                // Should add section headers
+                dynInfo.pltgotAddr = dyn->d_un.d_val;
+
                 break;
             case DT_SCE_JMPREL:
-                info.jmprelOff = entry.d_un.d_ptr;
+                // Offset of the table containing jump slot relocations
+                // relative to dynlibdata segment start
+                // At this offset, there are DT_SCE_PLTRELSZ:d_val jmp slot relocations,
+                // then DT_SCE_RELASZ:d_val relas seem to follow
+                dynInfo.jmprelOff = dyn->d_un.d_val;
                 break;                 
             case DT_SCE_PLTREL:
-                assert(entry.d_un.d_val == DT_RELA);
-                info.pltrel = entry.d_un.d_val;
+                // Types of relocations (DT_RELA)
+                assert(dyn->d_un.d_val == DT_RELA);
+                dynInfo.pltrel = dyn->d_un.d_val;
                 break;
             case DT_SCE_PLTRELSZ:
-                info.pltrelsz = entry.d_un.d_val;
+                // Seems to be the # of jmp slot relocations (* relaentsz).
+                // See DT_SCE_JMPREL
+                // point of confusion
+                dynInfo.pltrelsz = dyn->d_un.d_val;
                 break;                  
             case DT_SCE_RELA:
-                info.relaOff = entry.d_un.d_ptr;
+                // seems unecessary
+                // maybe because redundancy with DT_SCE_JMPREL, DT_SCE_PLTRELSZ, DT_SCE_RELASZ
+                // Most likely this is DT_SCE_JMPREL (jmprelOff) + DT_SCE_PLTRELSZ (jmprelSz), haven't verified
+                dynInfo.relaOff = dyn->d_un.d_ptr;            
                 break;
             case DT_SCE_RELASZ:
-                info.relaSz = entry.d_un.d_val;
+                // number of relas that follow PLT relas
+                dynInfo.relaSz = dyn->d_un.d_val;
                 break;
             case DT_SCE_RELAENT:
-                info.relaEntSz = entry.d_un.d_val;
+                // size of rela entries (0x18)
+                assert(dyn->d_un.d_val == 0x18);
+                dynInfo.relaEntSz = dyn->d_un.d_val;
                 break;
             case DT_SCE_STRTAB:
-                info.strtabOff = entry.d_un.d_ptr;
+                // Contains hashed sym names
+                // Convert to DT_STRTAB
+                // Unhash all known strings, put in .dynstr, map dynent to this
+                dynInfo.strtabOff = dyn->d_un.d_val;
                 break;
             case DT_SCE_STRSZ:
-                info.strtabSz = entry.d_un.d_val;
+                // Convert to DT_STRSZ based on DT_SCE_STRTAB conversion
+                dynInfo.strtabSz = dyn->d_un.d_val;
                 break;
             case DT_SCE_SYMTAB:
-                info.symtabOff = entry.d_un.d_ptr;
+                // Convert to DT_SYMTAB
+                // find new string offsets based on DT_SCE_STRTAB
+                // Make new SHT_DYNSYM section, link to .dynsym/whatever DT_SCE_STRTAB maps to
+                // TODO, look at sh_info requirement for that section
+                // Special Sections at https://docs.oracle.com/cd/E19683-01/817-3677/6mj8mbtc9/index.html#chapter6-79797
+                dynInfo.symtabOff = dyn->d_un.d_val;
                 break;
             case DT_SCE_SYMENT:
-                info.symtabEntSz = entry.d_un.d_val;
+                // size of syments (0x18)
+                assert(dyn->d_un.d_val == 0x18);
+                dynInfo.symtabEntSz = dyn->d_un.d_val;
                 break;                                                
             case DT_SCE_HASHSZ:
-                info.hashSz = entry.d_un.d_val;
+                // size of sym hashtable, ignore for now
+                dynInfo.hashSz = dyn->d_un.d_val;
                 break;
             case DT_SCE_SYMTABSZ:
-                info.symtabSz = entry.d_un.d_val;
+                // write size of converted symtab (might be same sz)
+                dynInfo.symtabSz = dyn->d_un.d_val;
+                break;
+
+            default:
+            {
+                std::string name = to_string(tag);
+                printf("Warning: unhandled DynEnt %s\n", name.c_str());
+                break;
+            }
+        }
+    }
+    
+    Elf64_Phdr *relroHeader = &progHdrs[1];
+    uint64_t relroVA = relroHeader->p_vaddr;
+    uint64_t relroFileOff = relroHeader->p_offset;
+    assert(relroVA <= dynInfo.pltgotAddr && dynInfo.pltgotAddr <= relroVA + relroHeader->p_filesz);
+
+    sMap.gotpltIdx = sections.size();
+    sHdr = {
+        .sh_name = appendToStrtab(sections[sMap.shstrtabIdx], ".got.plt"),
+        .sh_type = SHT_PROGBITS,
+        .sh_flags = SHF_ALLOC | SHF_WRITE,
+        .sh_addr = dynInfo.pltgotAddr,
+        .sh_offset = relroFileOff + (dynInfo.pltgotAddr - relroVA),
+        // TODO try (pltrelsz / relaentSz) x8, x16
+        // In example ELF, entsize is 8
+        // Can probably be conservative (too large)
+        // dunno if .got.plt is just array of slots, or if theres metadata
+        // should try to find out using example .got.plt
+        .sh_size = (dynInfo.pltrelsz / dynInfo.relaEntSz) * 8,
+        .sh_addralign = 8,
+        .sh_entsize = 8,
+    };
+    sections.emplace_back(sHdr);
+
+    sMap.relaIdx = sections.size();
+    sHdr = {
+        .sh_name = appendToStrtab(sections[sMap.shstrtabIdx], ".rela"),
+        .sh_type = SHT_RELA,
+        .sh_flags = SHF_ALLOC,
+        .sh_link = sMap.dynsymIdx,
+        .sh_addralign = static_cast<Elf64_Xword>(PGSZ),
+        .sh_entsize = dynInfo.relaEntSz
+    };
+    sections.emplace_back(sHdr);
+
+    assert(sMap.gotpltIdx);
+    sMap.jmprelIdx = sections.size();
+    sHdr = {
+        .sh_name = appendToStrtab(sections[sMap.shstrtabIdx], ".rela.plt"), // .rela.plt?
+        .sh_type = SHT_RELA,
+        .sh_flags = SHF_ALLOC | SHF_INFO_LINK,
+        .sh_link = sMap.dynsymIdx,
+        .sh_info = sMap.gotpltIdx, // In sample ELF, I see info for .rela.plt points to .got.plt
+        .sh_addralign = static_cast<Elf64_Xword>(PGSZ),
+        .sh_entsize = dynInfo.relaEntSz,
+    };
+    sections.emplace_back(sHdr);    
+
+    if ( !fixDynlibData(elf, progHdrs, dynInfo, sections, sMap, newDynEnts, dependencies)) {
+        return false;
+    };
+
+    // End DynEnt array
+    newDynEnts.push_back({
+        DT_NULL,
+        {0}
+    });
+
+    // Write dynents to elf
+    writePadding(elf, PGSZ);
+    uint64_t segmentFileOff = ftell(elf);
+    assert(1 == fwrite(newDynEnts.data(), newDynEnts.size() * sizeof(Elf64_Dyn), 1, elf));
+
+    Elf64_Phdr newDynPhdr = DynPhdr;
+    newDynPhdr.p_align = PGSZ;
+    newDynPhdr.p_filesz = newDynEnts.size() * sizeof(Elf64_Dyn);
+    // calculate p_vaddr, p_paddr
+    rebaseSegment(&newDynPhdr, progHdrs);
+    newDynPhdr.p_flags = PF_X | PF_W | PF_R;
+    newDynPhdr.p_offset = segmentFileOff;
+    progHdrs.push_back(newDynPhdr);
+
+    progHdrs[oldDynamicPIdx].p_type = PT_NULL;
+
+    // Need to create load command for the DYNAMIC segment.
+    // Just use the same ranges
+    Elf64_Phdr loadPhdrForDynSegment = newDynPhdr;
+    loadPhdrForDynSegment.p_type = PT_LOAD;
+    progHdrs.push_back(loadPhdrForDynSegment);
+
+    sMap.dynamicIdx = sections.size();
+    sHdr = {
+        .sh_name = appendToStrtab(sections[sMap.shstrtabIdx], ".dynamic"),
+        .sh_type = SHT_DYNAMIC,
+        .sh_flags = SHF_WRITE | SHF_ALLOC,
+        .sh_addr = newDynPhdr.p_vaddr,
+        .sh_offset = newDynPhdr.p_offset,
+        .sh_size = newDynPhdr.p_filesz,
+        .sh_link = sMap.dynstrIdx,
+        .sh_addralign = newDynPhdr.p_align,
+        .sh_entsize = sizeof(Elf64_Dyn),
+    };
+    sections.emplace_back(sHdr);
+
+
+
+    // TODO add sections for gotplt, relro, other sections that aren't changing location but are needed
+
+    // TODO place extra dynamic ents with tags
+    // DT_RELA
+    // etc
+    // Add sections used in relocs, loading dynamic dependencies, etc
+    // These are sections we've moved out of the original dynlibdata segment
+
+    //Elf64_Dyn dyn;
+
+
+
+    return true;
+}
+
+static bool isLoadableSegType(Elf64_Word p_type) {
+    switch (p_type) {
+        case PT_LOAD:
+        //case PT_GNU_RELRO:
+        //case PT_DYNAMIC:
+        //case PT_TLS:
+            return true;
+
+        default:
+            return false;
+    }
+}
+
+static void finalizeProgramHeaders(std::vector<Elf64_Phdr> &progHdrs) {
+    //printf("before:\n");
+    //for (Elf64_Phdr &pHdr: progHdrs) {
+        //printf("\t%s\n", to_string((ProgramSegmentType) pHdr.p_type).c_str());
+    //}
+
+    // TODO look into which SCE segments need to be kept or converted to PT_LOAD
+
+    // Convert certain SCE Segments
+    for (Elf64_Phdr &pHdr: progHdrs) {
+        switch(pHdr.p_type) {
+            case PT_SCE_RELRO:	
+                //pHdr.p_type = PT_GNU_RELRO;
+                pHdr.p_type = PT_LOAD;
+                break;
+            case PT_GNU_EH_FRAME:
+            case PT_SCE_PROCPARAM:	
+            case PT_SCE_MODULEPARAM:
+            case PT_SCE_LIBVERSION:
+            case PT_SCE_RELA:	
+            case PT_SCE_COMMENT:
+                /*
+                if (pHdr.p_memsz) {
+                    pHdr.p_type = PT_LOAD;
+                } else {
+                    pHdr.p_type = PT_NULL;
+                }*/
                 break;
             default:
                 break;
         }
     }
 
-    return true;
-}
-
-static bool isHashedSymbol(const std::string &sym) {
-    if (sym.length() == 15) {
-        std::string suffix = sym.substr(11);
-        return suffix[0] == '#' && suffix[2] == '#' 
-            /* && suffix[1] >= 'A' && suffix[1] <= 'Z' && suffix[3] >= 'A' && suffix[3] <= 'Z' */;
-    }
-    return false;
-}
-
-// if ref is hash:
-//      if def is hash:
-//          compare
-//      else:
-//          hash def
-//          compare
-// else:
-//      look for exact match (not hash)
-bool findSymbolDef(Elf64_Sym sym, Module &referenceLocation, std::map<std::string, Module> &modules,  
-                /* ret */Module &defLocation, Elf64_Sym &symDef) {
-    std::string refName(&referenceLocation.strtab[sym.st_name]);
-    std::string origName = refName;
-
-    std::vector<std::string> moduleOverrides;
-    moduleOverrides.push_back("all.sprx");
-    std::vector<std::string> searchPaths;
-
-    searchPaths.insert(searchPaths.end(), moduleOverrides.begin(), moduleOverrides.end());
-    searchPaths.insert(searchPaths.end(), referenceLocation.neededLibsStrings.begin(), referenceLocation.neededLibsStrings.end());
-
-    bool found = false;
-    for (uint i = 0; i < searchPaths.size(); i++) {
-        std::string modName = searchPaths[i];
-        if (modules.find(modName) == modules.end()) {
-            continue;
-        }
-        Module &mod = modules[modName];
-
-        for (uint i = 0; i < mod.symbols.size(); i++) {
-            Elf64_Sym modSym = mod.symbols[i];
-
-            if (modSym.st_value == STN_UNDEF) {
-                continue;
-            }
-
-            std::string defName(&mod.strtab[modSym.st_name]);
-
-            if (isHashedSymbol(refName)) {
-                std::string hashedDef;
-                if (isHashedSymbol(defName)) {
-                    hashedDef = defName;
-                } else {
-                    char hash[12];
-                    calculateNid(defName.c_str(), defName.size(), hash);           
-                    hashedDef = std::string(hash);
-                } 
-
-                if (refName.substr(0, 11) != hashedDef.substr(0, 11)) {
-                    continue;
-                }
-            } else if (refName != defName) {
-                continue;
-            }
-
-            uint8_t bind_type = ELF64_ST_BIND(sym.st_info);
-            switch(bind_type) {
-                case STB_LOCAL:
-                    //fprintf(stderr, "found local symbol matching name: %s\n", origName.c_str());
-                    continue;
-                case STB_GLOBAL:
-                    assert(ELF64_ST_TYPE(modSym.st_info) == ELF64_ST_TYPE(sym.st_info));
-                    symDef = modSym;
-                    defLocation = mod;
-                    printf("resolved GLOBAL symbol: %s, needed in module %s, found in %s\n", origName.c_str(), referenceLocation.name.c_str(), mod.name.c_str());                    
-                    return true;                
-                case STB_WEAK:
-                    // TODO just skip if mismatch, this is legal
-                    assert(ELF64_ST_TYPE(modSym.st_info) == ELF64_ST_TYPE(sym.st_info));
-                    symDef = modSym;
-                    defLocation = mod;
-                    found = true;
-                    break;                
-                //case STB_NUM: // not defined in FreeBSD 9.0
-                case STB_LOOS:
-                case STB_HIOS:
-                case STB_LOPROC:
-                case STB_HIPROC:
-                default:
-                    //fprintf(stderr, "unhandled binding type: %d\n", bind_type);
-                    break;
-            }
-
-            return true;
+    // Get rid of  certain Segments
+    std::vector<Elf64_Phdr> finalSegments;
+    for (Elf64_Phdr &pHdr: progHdrs) {
+        switch(pHdr.p_type) {
+            case PT_NULL:
+            case PT_EMU_IGNORE:
+            //case PT_GNU_EH_FRAME:
+            case PT_SCE_PROCPARAM:	
+            case PT_SCE_MODULEPARAM:
+            case PT_SCE_LIBVERSION:
+            case PT_SCE_DYNLIBDATA:
+            case PT_SCE_COMMENT:
+                break;
+            default:
+                finalSegments.push_back(pHdr);
         }
     }
+    progHdrs = finalSegments;
 
-    if (found) {
-        //printf("resolved WEAK symbol: %s, needed in module %s, found in %s\n", origName.c_str(), referenceLocation.name.c_str(), defLocation.name.c_str());
+    for (Elf64_Phdr &pHdr: progHdrs) {
+        pHdr.p_flags = PF_X | PF_W | PF_R;
     }
 
-    return found;
-}
-
-void printReloc(Elf64_Rela reloc, Module &mod, FILE *stream = stdout) {
-    Elf64_Sym sym = mod.symbols[ELF64_R_SYM(reloc.r_info)];
-    fprintf(stream, "RELOC DUMP: %s -> 0x%lx\n"
-                "\tsym: %s\n"
-                "\tmodule: %s\n"
-                "\tsym idx: %lu\n"                
-                "\tr_type: %lu\n"
-                "\tr_offset: 0x%lx\n"
-                "\tr_addend: 0x%lx\n"
-                "\tMapped Addr (mod.baseVA + r_offset): 0x%lx\n",
-        &mod.strtab[sym.st_name], mod.baseVA + reloc.r_offset,
-        &mod.strtab[sym.st_name],
-        mod.name.c_str(),
-        ELF64_R_SYM(reloc.r_info),
-        ELF64_R_TYPE(reloc.r_info),
-        reloc.r_offset,
-        reloc.r_addend,
-        mod.baseVA + reloc.r_offset
-    );
-}
-
-void printModuleInfo(Module &mod, FILE *stream = stdout) {
-    printf("MODULE %s, path: %s ***************************\n", mod.name.c_str(), mod.path.c_str());
-    printf("baseVA: 0x%lx, endVA: 0x%lx, memSz: 0x%lx\n", mod.baseVA, mod.baseVA + mod.memSz, mod.memSz);
-}
-
-bool handleRelocations(Module &mod, std::map<std::string, Module> &modules) {
-    //std::map<std::basic_string<char>, Module>::iterator it = modules.begin();
-    for (uint j = 0; j < mod.relocs.size(); j++) {
-        Elf64_Rela reloc = mod.relocs[j];
-        uint64_t r_type = ELF64_R_TYPE(reloc.r_info);
-        uint64_t symIdx = ELF64_R_SYM(reloc.r_info);
-
-        if (symIdx == STN_UNDEF) {
-            // "If the index is STN_UNDEF, the undefined symbol index, the relocation uses 0 as the symbol value"
-            // TODO write 0
-        } else {
-            Elf64_Sym sym = mod.symbols[ELF64_R_SYM(reloc.r_info)];
-            const char *symName = &mod.strtab[sym.st_name];            
-            //printReloc(reloc, mod);
-
-            Module defLocation;
-            Elf64_Sym symDef;
-            bool res = findSymbolDef(sym, mod, modules, defLocation, symDef);
-            if (!res) {
-                fprintf(stderr, "couldn't find definition for relocation sym %s in module %s, path %s\n", symName, mod.name.c_str(), mod.path.c_str());
-                //printReloc(reloc, mod, stderr);
-                continue;
+    std::stable_sort(progHdrs.begin(), progHdrs.end(), [](const Elf64_Phdr& left, const Elf64_Phdr& right){
+        if (isLoadableSegType(left.p_type) && isLoadableSegType(right.p_type)) {
+            if (left.p_vaddr == right.p_vaddr) {
+                return left.p_memsz >= right.p_memsz;
             }
-
-            switch (r_type) {
-                case R_AMD64_NONE:
-                    break;
-                case R_AMD64_64:
-                {
-                    uint64_t addr = mod.baseVA + reloc.r_offset;
-                    uint64_t value = defLocation.baseVA + symDef.st_value + reloc.r_addend;
-                    //uint64_t value = symDef.st_value + reloc.r_addend;
-                    *((uint64_t *) addr) = value;
-
-                    printf("symbol: %s, type: R_AMD64_64, addr: 0x%lx, value: 0x%lx, addend %lx, \n", symName, addr, value, reloc.r_addend);
-                    break;
-                }
-                case R_AMD64_JUMP_SLOT:
-                {
-                    uint64_t addr = mod.baseVA + reloc.r_offset;
-                    uint64_t value = defLocation.baseVA + symDef.st_value;
-                    //uint64_t value = symDef.st_value;
-                    *((uint64_t *) addr) = value;
-                    printf("symbol: %s, type: R_AMD64_JUMP_SLOT, addr: 0x%lx, value: 0x%lx, \n", symName, addr, value);
-                    break;
-                }
-                case R_AMD64_DTPMOD64:
-                {
-                    // "https://chao-tic.github.io/blog/2018/12/25/tls"
-                    //uint64_t addr = mod.baseVA + reloc.r_offset;
-                    //fprintf(stderr, "mod %s, symbol: %s, type: R_AMD64_JUMP_SLOT, addr: 0x%lx\n", mod.name.c_str(), symName, addr);    
-                }                
-                case R_AMD64_PC32:
-                case R_AMD64_GOT32:
-                case R_AMD64_PLT32:
-                case R_AMD64_COPY:
-                case R_AMD64_GLOB_DAT:                
-                case R_AMD64_RELATIVE:
-                case R_AMD64_GOTPCREL:
-                case R_AMD64_32:
-                case R_AMD64_32S:
-                case R_AMD64_16:
-                case R_AMD64_PC16:
-                case R_AMD64_8:
-                case R_AMD64_PC8:
-                case R_AMD64_DTPOFF64:
-                case R_AMD64_TPOFF64:
-                case R_AMD64_TLSGD:
-                case R_AMD64_TLSLD:
-                case R_AMD64_DTPOFF32:
-                case R_AMD64_GOTTPOFF:
-                case R_AMD64_TPOFF32:
-                case R_AMD64_PC64:
-                case R_AMD64_GOTOFF64:
-                case R_AMD64_GOTPC32:
-                default:
-                {
-                    // See the R_X86_64* types if the type is > R_AMD64_GOTPC32
-                    //fprintf(stderr, "unhandled relocation type: %lu\n", r_type);
-                    //assert(false && "unhandled relocation type");        
-                }
-            }            
+            return left.p_vaddr <= right.p_vaddr;
         }
-    }
+        return isLoadableSegType(left.p_type);
+    });
 
-    return true;
+    //printf("final headers:\n");
+    //for (Elf64_Phdr &pHdr: progHdrs) {
+        //printf("\t%s\n", to_string((ProgramSegmentType) pHdr.p_type).c_str());
+    //}
 }
 
-FILE *openWithSearchPaths(std::string name, std::string mode, 
-        /* ret */ std::string *path) {
-
-    std::vector<std::string> paths;
-
-    paths.push_back("./");
-    paths.push_back(CmdArgs.pkgDumpPath);
-    paths.push_back(CmdArgs.pkgDumpPath + "/sce_sys/");
-    paths.push_back(CmdArgs.pkgDumpPath + "/sce_module/");
-    paths.push_back("../../dynlibs/lib/");
-    paths.push_back("../library_overloads/");
-
-    std::vector<std::string> basenamePermutations;
-    basenamePermutations.push_back(name);
-
-    // TODO replace .prx extension with .sprx
-    size_t extPos = name.find_last_of('.');
-    if (extPos != std::string::npos && name.substr(extPos) == ".prx") {
-        std::string sprx = name.substr(0, extPos) + ".sprx";
-        basenamePermutations.push_back(sprx);
-    }
-
-    FILE *file;
-    for (uint i = 0; i < paths.size(); i++) {
-        for (uint j = 0; j < basenamePermutations.size(); j++) {
-            std::string basename = basenamePermutations[j];
-            std::string fpath = std::string(paths[i]) + std::string("/") + basename;
-            file = fopen(fpath.c_str(), mode.c_str());
-            if (file) {
-                if (path) {
-                    *path = fpath;
-                }
-                return file;
-            }
-        }
-    }
-    return NULL;
-}
-
-bool parseNativeDynamicContents(DynamicTableInfo dynTableInfo, FILE *elf, /* ret */
-                    std::vector<char> &strtab, 
-                    std::vector<std::string> &dynLibStrings,
-                    std::vector<Elf64_Rela> &relocs,
-                    std::vector<Elf64_Sym> &symbols) {
-    
-    
-    std::vector<unsigned char> dynLibDataContents(dynTableInfo.dynlibdataPHdr.p_filesz);
-    fseek(elf, dynTableInfo.dynlibdataPHdr.p_offset, SEEK_SET);
-    if (1 != fread(dynLibDataContents.data(), dynTableInfo.dynlibdataPHdr.p_filesz, 1, elf)) {
-        return false;
-    }
-
-    for (uint i = 0; i < dynTableInfo.neededLibs.size(); i++) {
-        uint64_t strOff = dynTableInfo.strtabOff + dynTableInfo.neededLibs[i];
-        std::string path((char *) &dynLibDataContents[strOff]);
-        dynLibStrings.push_back(path);
-    }
-
-    for (uint i = 0; i < (dynTableInfo.pltrelsz + dynTableInfo.relaSz) / dynTableInfo.relaEntSz; i++) {
-        // handle endianess TODO
-        uint64_t relaOff = dynTableInfo.jmprelOff + i * dynTableInfo.relaEntSz;
-        Elf64_Rela *ent = (Elf64_Rela *) &dynLibDataContents[relaOff];
-        relocs.push_back(*ent);
-    }
-
-    for (uint i = 0; i < dynTableInfo.symtabSz / dynTableInfo.symtabEntSz; i++) {
-        // handle endianess TODO
-        uint64_t symOff = dynTableInfo.symtabOff + i * dynTableInfo.symtabEntSz;
-        Elf64_Sym *ent = (Elf64_Sym *) &dynLibDataContents[symOff];
-        symbols.push_back(*ent);
-    }
-
-    strtab.resize(dynTableInfo.strtabSz);
-    memcpy(strtab.data(), &dynLibDataContents[dynTableInfo.strtabOff], dynTableInfo.strtabSz);
-
-    return true;
-}
-
-bool parseHostDynamicContents(FILE *elf, Elf64_Ehdr elfHdr, /* ret */
-                    std::vector<char> &strtab, 
-                    std::vector<std::string> &dynLibStrings,
-                    std::vector<Elf64_Rela> &relocs,
-                    std::vector<Elf64_Sym> &symbols) {
-
-
-    // anything in dynTableInfo should look in .dyn* section of elf
-    // e.g. neededLibStrings should use .dynstr.base + offset
-
-    // otherwise look in symtab section, need to figure this out 
-    return true;
-}
-
-// fill out Module struct with metadata for module at given path and put in Module table
-// don't decide on baseVA yet
-// recurse to other necessary modules
-
-// TODO change or make different function for custom compiled modules that reads traditional section hdrs and symtab
-bool getModuleInfo(std::string basename, bool isNative, std::map<std::string, Module> &modules, Elf64_Addr &lastModuleEndAddr) {
-    FILE *elf;
-    Module mod;
-    DynamicTableInfo dynTableInfo;
+bool patchPs4Lib(std::string nativePath, std::set<std::string> &dependencies) {
     std::vector<Elf64_Phdr> progHdrs;
+    // in a Ps4 module, these Dyn Ents are in the DYNAMIC segment/.dynamic section,
+    // and describe the DYNLIBDATA segment
+    std::vector<Elf64_Dyn> oldPs4DynEnts;    
+    std::vector<Elf64_Dyn> newElfDynEnts;
+    // index of the strtab in the shEntries
 
-    if (modules.find(basename) != modules.end()) {
-        return true;
-    }
-
-    //printf("getModuleInfo: %s\n", path.c_str());
-
-    std::string fullModulePath;
-    elf = openWithSearchPaths(basename, "r", &fullModulePath);
-    if (!elf) {
-        //fprintf(stderr, "couldn't open %s\n", basename.c_str());
+    FILE *f = fopen(nativePath.c_str(), "r+");
+    if (!f) {
+        fprintf(stderr, "couldn't open %s\n", nativePath.c_str());
         return false;
     }
 
     Elf64_Ehdr elfHdr;
-    fseek(elf, 0, SEEK_SET);
-    if (1 != fread(&elfHdr, sizeof(elfHdr), 1, elf)) {
-        return false;
-    }
+    fseek(f, 0, SEEK_SET);
+    assert (1 == fread(&elfHdr, sizeof(elfHdr), 1, f));
 
-    if (CmdArgs.dumpElfHeader) {
-        dumpElfHdr(basename.c_str(), &elfHdr);
-    }
+    elfHdr.e_ident[EI_OSABI] = ELFOSABI_SYSV;
+    elfHdr.e_type = ET_DYN;
+
+    Elf64_Shdr sHdr;
 
     progHdrs.resize(elfHdr.e_phnum);
-    fseek(elf, elfHdr.e_phoff, SEEK_SET);
-    if (elfHdr.e_phnum != fread(progHdrs.data(), sizeof(Elf64_Phdr), elfHdr.e_phnum, elf)) {
-        return false;
-    }
+    fseek(f, elfHdr.e_phoff, SEEK_SET);
+    assert(elfHdr.e_phnum == fread(progHdrs.data(), sizeof(Elf64_Phdr), elfHdr.e_phnum, f));
 
-    std::vector<MappedSegment> mappedSegments;
+    // Section headers accumulate here
+    std::vector<Section> sections;
+    SectionMap sMap;
 
-    for (uint i = 0; i < progHdrs.size(); i++) {
-        Elf64_Phdr *phdr = &progHdrs[i];
-        // guarantees that we can put dynamic libraries in memory at the start of the next page after the last module ended
-        //assert(pgsz % phdr->p_align == 0);
-        switch (progHdrs[i].p_type) {
-            //case PT_PHDR:
-            //case PT_INTERP:
-            case PT_DYNAMIC:
-                processDynamicSegment(phdr, elf, dynTableInfo);
-                if (!isNative) {
-                    dynTableInfo.dynlibdataPHdr = *phdr;
-                }
-                break;
-            case PT_SCE_DYNLIBDATA:
-                dynTableInfo.dynlibdataPHdr = *phdr;
-                break;
-            case PT_LOAD:
-            //case PT_GNU_EH_FRAME:
-            case PT_SCE_RELRO:
-            //case PT_SCE_MODULEPARAM:
-            //case PT_SCE_PROCPARAM:
-            {
-                // TODO make it so all PIC shared libs start at 0
-
-                uint64_t mappingStart = ROUND_DOWN(phdr->p_vaddr, pgsz);
-                // should be last byte on a page
-                uint64_t mappingEnd = ROUND_UP(phdr->p_vaddr + phdr->p_filesz - 1, pgsz) - 1;
-                uint64_t mappingSize = mappingEnd - mappingStart + 1;
-                MappedSegment segA;
-                segA.mStart = mappingStart;
-                segA.mSize = mappingSize;
-
-                bool shouldCreateSeg = true;
-                for (uint j = 0; j < mappedSegments.size(); j++) {
-                    MappedSegment segB = mappedSegments[j];
-                    // see if  intervals overlap in some way
-                    if (segA.mStart > segB.mStart) {
-                        std::swap(segA, segB);
-                    }
-
-                    if (segB.mStart > segA.mStart + segA.mSize) {
-                        // they don't overlap
-                        continue;
-                    }
-
-                    // they overlap
-                    // coalesce into new interval
-                    MappedSegment replacedSeg;
-                    replacedSeg.mStart = segA.mStart;
-                    replacedSeg.mSize = (segB.mStart - segA.mStart) + segB.mSize;
-                    mappedSegments[j] = replacedSeg;
-                    shouldCreateSeg = false;
-                    break;
-                }
-
-                if (shouldCreateSeg) {
-                    MappedSegment newSeg;
-                    newSeg.mStart = mappingStart;
-                    newSeg.mSize = mappingSize;
-                    mappedSegments.push_back(newSeg);                    
-                }
-            }
-                break;
-            default:
-                break;
-        }
-    }
-
-    Elf64_Off highestAddr = 0;
-    for (uint i = 0; i < mappedSegments.size(); i++) {
-        MappedSegment *seg = &mappedSegments[i];
-        assert(seg->mSize % pgsz == 0);
-        highestAddr = std::max(highestAddr, seg->mStart + seg->mSize);
-    }
-
-    /////////////////////////////////////////////////////////////////////////////////////////
-    // parse dynlibdata for relocations, symbols, strings
-
-    std::vector<unsigned char> dynLibDataContents;
-    std::vector<char> strtab;
-    std::vector<std::string> dynLibStrings;
-    std::vector<Elf64_Rela> relocs;
-    std::vector<Elf64_Sym> symbols;
-
-    //if (isNative) {
-        if (!parseNativeDynamicContents(dynTableInfo, elf, strtab, dynLibStrings, relocs, symbols))
-            return false;
-    //} else {}
-
-    //////////////////////////////////////////////////////////////////////////////////////////////////////
-    assert(lastModuleEndAddr % pgsz == 0);
-
-    mod.name = basename;
-    mod.path = fullModulePath;
-    mod.baseVA = lastModuleEndAddr;
-    mod.memSz = highestAddr;
-    mod.mappedSegments = mappedSegments;
-    mod.pHeaders = progHdrs;
-    mod.dynTableInfo = dynTableInfo;
-    mod.neededLibsStrings = dynLibStrings;
-
-    mod.strtab = strtab;
-
-    mod.relocs = relocs;
-    mod.symbols = symbols;
-    mod.isNative = isNative;
-
-    modules[basename] = mod;
-
-    lastModuleEndAddr += mod.memSz;
-    for (uint i = 0; i < dynLibStrings.size(); i++) {
-        std::string lib = dynLibStrings[i];
-        if (!getModuleInfo(lib, true, modules, lastModuleEndAddr))
-            ;//return false;
-    }
-    fclose(elf);
-
-    return true;
-}
-
-// map one module into memory and do relocations
-bool mapModule(Module &mod, std::map<std::string, Module> &modules) {
-    FILE *elf = fopen(mod.path.c_str(), "r");
-    if (!elf) {
-        fprintf(stderr, "couldn't open %s to map module\n", mod.name.c_str());
-        return 1;
-    }
-
-    for (uint i = 0; i < mod.mappedSegments.size(); i++) {
-        MappedSegment seg = mod.mappedSegments[i];
-        void *addr = mmap((void *) (mod.baseVA + seg.mStart), seg.mSize, 
-                PROT_EXEC | PROT_READ | PROT_WRITE,
-                MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS,
-                -1, 0 );
-        assert((uint64_t) addr == mod.baseVA + seg.mStart);
-    }
-
-    std::vector<unsigned char> buf;
-    for (uint i = 0; i < mod.pHeaders.size(); i++) {
-        Elf64_Phdr *phdr = &mod.pHeaders[i];
-        switch (phdr->p_type) {
-            case PT_LOAD:
-            case PT_SCE_RELRO:
-            {
-                buf.resize(phdr->p_filesz);
-
-                fseek(elf, phdr->p_offset, SEEK_SET);
-                assert( 1 == fread(buf.data(), phdr->p_filesz, 1, elf) );
-                memcpy((char *) (mod.baseVA + phdr->p_vaddr), buf.data(), phdr->p_filesz);                
-            }
-            default:
-                break;
-        }
-    }
-
-    fclose(elf);
-
-    if (!handleRelocations(mod, modules))
-        return false;  // TODO
-
-    return true;
-}
-
-bool loadCustomModules(std::map<std::string, Module> &modules, Elf64_Addr &lastModuleEndAddr) {
-    const char *overrides[] = {
-        "all.so"
+    sHdr = {
+        .sh_name = 0,
+        .sh_type = SHT_NULL
     };
+    sections.emplace_back(sHdr);
 
-    for (uint i = 0; i < ARRLEN(overrides); i++) {
-        if (!getModuleInfo(std::string(overrides[i]), false, modules, lastModuleEndAddr)) {
-            fprintf(stderr, "couldn't load custom module %s\n", overrides[i]);
-            return false;
-        }
-    }
+    sMap.shstrtabIdx = sections.size();
+    sHdr = {
+        .sh_type = SHT_STRTAB,
+        .sh_flags = 0,
+        .sh_addralign = 1,
+    };
+    sections.emplace_back(sHdr);
+    appendToStrtab(sections[sMap.shstrtabIdx], "\0");
+    sections[sMap.shstrtabIdx].setName(appendToStrtab(sections[sMap.shstrtabIdx], ".shstrtab"));
 
-    return true;
-}
-
-// get info about all necessary dynamic libraries, map process memory, and do relocations
-bool loadFirstModule(std::string name, std::map<std::string, Module> &modules) {
-    Elf64_Addr lastModuleEndAddr = 0;
-    if (!getModuleInfo(name, true, modules, lastModuleEndAddr))
-        return false;
-
-    // load our own modules that we want to take precedence during relocations
-    // names of these modules should be different from any requested in ps4 ELF's
-    if (!loadCustomModules(modules, lastModuleEndAddr))  {
+    // Patch dynamic segment with new dynents
+    // Copy parts of PT_SCE_DYNLIBDATA to new Segment, such as unhashed strings
+    // Fix up syms, relas, strings
+    // Crate relevant sections for dlopen
+    if ( !fixDynamicInfoForLinker(f, progHdrs, sections, sMap, dependencies)) {
         return false;
     }
+    // Change OS specific type
+    // I don't think this should be loaded currently. p_vaddr and p_memsz are 0
+    // I think plt/got are in different section which is already PT_LOAD
+    //progHdrs[findPhdr(progHdrs, PT_SCE_DYNLIBDATA)].p_type = PT_NULL;
 
-    std::map<std::basic_string<char>, Module>::iterator it = modules.begin();
-    for (; it != modules.end(); it++) {
-#ifndef __linux
-        Module &mod = it->second;
-        if (!mapModule(mod, modules)) {
-            fprintf(stderr, "Error while mapping %s\n", it->second.name.c_str());
-            return false;
-        }
-#endif
+    // For now, pack the extra sections into their own segment
+    // in order to append them. The data is all that matters.
+    // Want to make sure they own their own parts of the ELF and
+    // future segments see that their region is owned when using rebaseSegment
+    std::vector<uint> extraSections {
+        sMap.shstrtabIdx
+    };
+    Elf64_Phdr extraSegmentHdr {
+        .p_type = PT_EMU_IGNORE,
+        .p_flags = PF_R | PF_W | PF_X,
+        .p_align = static_cast<Elf64_Xword>(PGSZ)
+    };
+    rebaseSegment(&extraSegmentHdr, progHdrs);
+    fseek(f, 0, SEEK_END);
+    writePadding(f, extraSegmentHdr.p_align, true);
+    extraSegmentHdr.p_offset = ftell(f);
+    Segment extraSegment = CreateSegment(extraSegmentHdr, sections, extraSections);
+    assert(1 == fwrite(extraSegment.contents.data(), extraSegment.contents.size(), 1, f));
+    progHdrs.push_back(extraSegment.pHdr);
+
+    finalizeProgramHeaders(progHdrs);
+
+    // write program headers
+    fseek(f, 0, SEEK_END);
+    writePadding(f, PGSZ, true);
+    elfHdr.e_phoff = ftell(f);
+    elfHdr.e_phnum = progHdrs.size();
+    assert(elfHdr.e_phnum == fwrite(progHdrs.data(), sizeof(Elf64_Phdr), elfHdr.e_phnum, f));
+
+    // write section headers
+    fseek(f, 0, SEEK_END);
+    writePadding(f, PGSZ, true);
+    elfHdr.e_shoff = ftell(f);
+    elfHdr.e_shstrndx = sMap.shstrtabIdx;
+    std::vector<Elf64_Shdr> sectionHeaders;
+    for (Section &section: sections) {
+        sectionHeaders.push_back(section.hdr);
     }
-    
+    elfHdr.e_shnum = sectionHeaders.size();
+    elfHdr.e_shentsize = sizeof(Elf64_Shdr);
+    assert(elfHdr.e_shnum == fwrite(sectionHeaders.data(), sizeof(Elf64_Shdr), elfHdr.e_shnum, f));
+
+    // write elf header, now referring to new program and section headers
+    fseek(f, 0, SEEK_SET);
+    assert(1 == fwrite(&elfHdr, sizeof(Elf64_Ehdr), 1, f));
+
+    fsync(fileno(f));
+    fclose(f);
+
     return true;
-}
-
-bool parseCmdArgs(int argc, char **argv) {
-    if (argc < 2) {
-        fprintf(stderr, "usage: %s [options] <PATH TO PKG DUMP>\n", argv[0]);
-        exit(1);
-    }
-
-    for (int i = 1; i < argc - 1; i++) {
-        if (!strcmp(argv[i], "--dump_elf_header")) {
-            CmdArgs.dumpElfHeader = true;
-        } else if (!strcmp(argv[i], "--dump_relocs")) {
-            CmdArgs.dumpRelocs = true;
-        } else if (!strcmp(argv[i], "--dump_module_info")) {
-            CmdArgs.dumpModuleInfo = true;
-        }else if (!strcmp(argv[i], "--dump_symbols")) {
-            CmdArgs.dumpSymbols = true;
-        } else {
-            fprintf(stderr, "Unrecognized cmd arg: %s\n", argv[i]);
-            return false;
-        }
-    }
-
-    CmdArgs.pkgDumpPath = argv[argc - 1];
-    return true;
-}
-
-bool modulelambda(Module &a, Module &b) {
-    return a.baseVA < b.baseVA;    
 }
 
 int main(int argc, char **argv) {
-    const std::string ebootPath = "eboot.bin";
-    FILE *eboot;
-    std::map<std::string, Module> modules;
-
-    if (!parseCmdArgs(argc, argv)) {
-        return 1;
-    }
+    //FILE *eboot;
+    void *dl;
     
-    eboot = openWithSearchPaths(ebootPath, "r", NULL);
-    if (!eboot) {
-        fprintf(stderr, "couldn't open eboot.bin\n");
-        return 1;
-    }
+    parseCmdArgs(argc, argv);
 
-    Elf64_Ehdr elfHdr;
-    fseek(eboot, 0, SEEK_SET);
-    if (1 != fread(&elfHdr, sizeof(elfHdr), 1, eboot)) {
-        return 1;
-    }
+    std::error_code ec;
+    fs::create_directory(CmdArgs.nativeElfOutputDir, ".", ec);
+    if (ec) {
+        std::string m = ec.message();
+        fprintf(stderr, "Failed to create directory %s: %s\n", CmdArgs.nativeElfOutputDir.c_str(), m.c_str());
+        return -1;
+    }    
 
-    // loadEntryModule will open file again
-    fclose(eboot);
-    if ( !loadFirstModule(ebootPath, modules)) {
-        return 1;
-    }
+    std::set<std::string> dependencies = { CmdArgs.dlPath };
+    std::set<std::string> satisfied;
+    while (!dependencies.empty()) {
+        auto it = dependencies.begin();
+        fs::path libName = *it;
+        dependencies.erase(it);
 
-    std::vector<Module> sortedModules;
-    std::map<std::basic_string<char>, Module>::iterator it = modules.begin();
-    for (; it != modules.end(); it++) {
-        sortedModules.push_back(it->second);
-    }
-
-#ifdef __linux
-    std::sort(sortedModules.begin(), sortedModules.end(), [](const Module &a, const Module &b) -> bool {
-        return a.baseVA < b.baseVA;
-    });
-    for (Module &mod: sortedModules) {
-        if (CmdArgs.dumpModuleInfo) {
-            printModuleInfo(mod);
+        fs::path libPath;
+        if (!findPathToLibName(libName, libPath)) {
+            fprintf(stderr, "Warning: unable to locate library %s\n", libName.c_str());
+            continue;
         }
 
-        if (CmdArgs.dumpSymbols) {
-            for (Elf64_Sym &sym: mod.symbols) {
-                fprintf(stderr, "Module: %s\n", mod.name.c_str());
-                fprintf(stderr, "SYMBOL DUMP: %s\n", &mod.strtab[sym.st_name]);
-            }
+        std::string nativePath = getNativeLibPath(libPath, CmdArgs.nativeElfOutputDir);
+        std::string cmd = "cp " + libPath.string() + " " + nativePath;
+        system(cmd.c_str());
+
+        if (chmod(nativePath.c_str(), S_IRWXU | (S_IRGRP | S_IXGRP) | (S_IROTH | S_IXOTH))) {
+            fprintf(stderr, "chmod failed\n");
+            return -1;
         }
 
-        if (CmdArgs.dumpRelocs) {
-            for (Elf64_Rela &rela: mod.relocs) {
-                printReloc(rela, mod, stderr);
-            }
+        if ( !patchPs4Lib(nativePath, dependencies)) {
+            return -1;
+        }
+        satisfied.insert(libName.filename());
+        for (auto &sat: satisfied) {
+            dependencies.erase(sat);
         }
     }
 
-    return 0;
-#endif
+    printf("hi from main\n");
 
-    pthread_t ps4Thread;
-    EntryPointWrapperArg arg;
-    arg.entryPointAddr = elfHdr.e_entry;
+    //setenv("LD_DEBUG", "all", 1);
 
-    Ps4EntryArg entryArg;
-    entryArg.argc = 1;
-    entryArg.argv[0] = "eboot.bin";
-    arg.entryArg = entryArg;
+    std::string firstLib = getNativeLibPath(CmdArgs.dlPath, CmdArgs.nativeElfOutputDir);
 
-    pthread_create(&ps4Thread, NULL, &ps4EntryWrapper, (void *) &arg);
-    pthread_join(ps4Thread, NULL);
+    dl = dlopen(firstLib.c_str(), RTLD_LAZY);
+    if (!dl) {
+        char *err;
+        while ((err = dlerror())) {
+            printf("%s\n", err);
+        }
+        return -1;
+    }
 
-    printf("main: done\n");
     return 0;
 }
