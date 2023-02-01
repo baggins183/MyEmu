@@ -32,12 +32,93 @@ namespace fs = std::filesystem;
 #include <libgen.h>
 #include <sqlite3.h>
 #include <set>
+#include <optional>
 
 const long PGSZ = sysconf(_SC_PAGE_SIZE);
 const std::string ebootPath = "eboot.bin";
 
 #define ROUND_DOWN(x, SZ) ((x) - (x) % (SZ))
 #define ROUND_UP(x, SZ) ( (x) % (SZ) ? (x) - ((x) % (SZ)) + (SZ) : (x))
+
+static fs::path getNativeLibPath(fs::path ps4LibName) {
+    assert(ps4LibName.has_filename());
+
+    auto ext = ps4LibName.extension();
+    assert(ext != ".native");
+    if (ext == ".sprx") {
+        ext = ".prx";
+    }
+    ext += ".native";
+
+    auto libStem = ps4LibName.stem();
+    libStem += ext;
+
+    return libStem;
+}
+
+static struct {
+    fs::path currentPs4Lib;
+} DebugContext;
+
+class LibSearcher {
+public:
+    struct PathElt {
+        fs::path path;
+        bool recurse;
+    };
+
+    LibSearcher() {}
+
+    LibSearcher(std::vector<fs::path> paths) {
+        for (auto &path: paths) {
+            m_paths.push_back({path, false});
+        }
+    }
+
+    LibSearcher(std::vector<PathElt> paths): m_paths(paths) {}    
+
+    std::optional<fs::path> findLibrary(fs::path name) {
+        for (PathElt &elt: m_paths) {
+            assert( !name.has_parent_path());
+            if (elt.recurse) {
+                fs::path filename = name.filename();
+                fs::recursive_directory_iterator it(elt.path);
+                for (const fs::directory_entry& dirent: it) {
+                    if (dirent.is_regular_file()) {
+                        auto entpath = dirent.path();
+                        if (entpath.filename() == filename) {
+                            return entpath;
+                        }
+                    }
+                }
+            } else {
+                fs::path match = elt.path;
+                match /= name;
+                struct stat buf;
+                if ( !stat(match.c_str(), &buf)) {
+                    return match;
+                }
+            }
+        }
+        return std::nullopt;
+    }
+
+    std::optional<fs::path> findLibrary(fs::path stem, std::vector<fs::path> validExts) {
+        for (auto &ext: validExts) {
+            fs::path f = stem;
+            f += ext;
+            if (auto ret = findLibrary(f)) {
+                return ret;
+            }
+        }
+        return std::nullopt;
+    }
+
+private:
+    std::vector<PathElt> m_paths;
+};
+
+static LibSearcher TheLibrarySearcher;
 
 struct CmdConfig {
     //std::string pkgDumpPath;
@@ -84,57 +165,9 @@ bool parseCmdArgs(int argc, char **argv) {
     return true;
 }
 
-static fs::path getNativeLibPath(fs::path ps4LibName, std::string &outdir) {
-    assert(ps4LibName.has_filename());
-
-    auto ext = ps4LibName.extension();
-    assert(ext != ".native");
-    if (ext == ".sprx") {
-        ext = ".prx";
-    }
-    ext += ".native";
-
-    auto libStem = ps4LibName.stem();
-    fs::path newPath = outdir;
-    newPath /= libStem;
-    newPath += ext;
-    return newPath;
-}
-
-static bool searchDir(fs::path dirPath, fs::path stem, std::vector<std::string> validExts, bool recurse, fs::path &foundAtpath) {
-    for (auto &ext: validExts) {
-        fs::path filename = stem;
-        filename += ext;
-        // For now, assume there is no directory in a DT_NEEDED entry, such as A/B.so
-        assert( !filename.has_parent_path());
-        if (!recurse) {
-            fs::path path(dirPath);
-            path /= filename;
-            struct stat buf;
-            if ( !stat(path.c_str(), &buf)) {
-                foundAtpath = path;
-                return true;
-            }
-        } else {
-            fs::recursive_directory_iterator it(dirPath);
-            for (const fs::directory_entry& dirent: it) {
-                if (dirent.is_regular_file()) {
-                    auto entpath = dirent.path();
-                    if (entpath.filename() == filename) {
-                        foundAtpath = entpath;
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    return false;
-}
-
-static bool findPathToLibName(fs::path ps4LibName, fs::path& libPath) {
+static std::optional<fs::path> findPathToLibName(fs::path ps4LibName) {
     if (ps4LibName == CmdArgs.dlPath) {
-        libPath = ps4LibName;
-        return true;
+        return ps4LibName;
     }
 
     if (!ps4LibName.has_extension()) {
@@ -142,7 +175,7 @@ static bool findPathToLibName(fs::path ps4LibName, fs::path& libPath) {
     }
 
     fs::path ext = ps4LibName.extension();
-    std::vector<std::string> validExts = { ext };
+    std::vector<fs::path> validExts = { ext };
     if (ext == ".prx") {
         validExts.push_back(".sprx");
     } else if (ext == ".sprx") {
@@ -151,15 +184,7 @@ static bool findPathToLibName(fs::path ps4LibName, fs::path& libPath) {
 
     fs::path libStem = ps4LibName.stem();
 
-    if ( !CmdArgs.pkgdumpPath.empty() && searchDir(CmdArgs.pkgdumpPath, libStem, validExts, true, libPath)) {
-        return true;
-    }
-
-    if ( !CmdArgs.ps4libsPath.empty() && searchDir(CmdArgs.ps4libsPath, libStem, validExts, false, libPath)) {
-        return true;
-    }    
-
-    return false;
+    return TheLibrarySearcher.findLibrary(libStem, validExts);
 }
 
 struct Section {
@@ -653,12 +678,15 @@ static bool fixDynlibData(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, DynamicT
 
     // Write needed libs and modules
     for (uint64_t libStrOff: dynInfo.neededLibs) {
-        std::string ps4Name = reinterpret_cast<char *>(&dynlibContents[dynInfo.strtabOff + libStrOff]);
-        fs::path pPs4Name = ps4Name;
-        dependencies.insert(ps4Name);
+        fs::path ps4Name = reinterpret_cast<char *>(&dynlibContents[dynInfo.strtabOff + libStrOff]);
+        if ( findPathToLibName(ps4Name)) {
+            dependencies.insert(ps4Name);
+        } else {
+            fprintf(stderr, "Warning: couldn't find dependency %s needed by %s. Skipping\n", ps4Name.c_str(), DebugContext.currentPs4Lib.c_str());
+            continue;
+        }
 
-        fs::path nativePath = getNativeLibPath(pPs4Name, CmdArgs.nativeElfOutputDir);
-        std::string nativeName = nativePath.filename();
+        fs::path nativeName = getNativeLibPath(ps4Name);
 
         uint64_t name = appendToStrtab(sections[sMap.dynstrIdx], nativeName.c_str());
         Elf64_Dyn needed;
@@ -667,6 +695,7 @@ static bool fixDynlibData(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, DynamicT
         newDynEnts.push_back(needed);
     }
 
+#if 0
     for (uint64_t modInfo: dynInfo.neededMods) {
         //uint64_t id = modInfo >> 48;
         // I think we should subtract 1 here.
@@ -685,9 +714,8 @@ static bool fixDynlibData(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, DynamicT
 
             printf("Module name for id %lu (idx %lu, version %lu.%lu) : %s\n", id, index, major, minor, name);
         }
-        //const char *name = reinterpret_cast<char *>(&dynlibContents[info.strtabOff + modStrOff]);
-        //fprintf(stderr, "Warning: unused module %s\n", name);
     }
+#endif
 
     // Create dynlibdata segment
     std::vector<uint> dynlibDataSections = {
@@ -866,21 +894,20 @@ static bool fixDynamicInfoForLinker(FILE *elf, std::vector<Elf64_Phdr> &progHdrs
             }
                 
 
+            // https://docs.oracle.com/cd/E23824_01/html/819-0690/chapter2-55859.html#chapter2-48195
             case DT_INIT:
-                // startup routine
-                // can probably leave as is
-                // https://docs.oracle.com/cd/E23824_01/html/819-0690/chapter2-55859.html#chapter2-48195
             case DT_FINI:
-                // ^
+            case DT_INIT_ARRAY:
+            case DT_FINI_ARRAY:
+            case DT_INIT_ARRAYSZ:
+            case DT_FINI_ARRAYSZ:
+                break;
+
             case DT_RPATH:
             case DT_SYMBOLIC:
             case DT_DEBUG:
             case DT_TEXTREL:
             case DT_BIND_NOW:
-            case DT_INIT_ARRAY:
-            case DT_FINI_ARRAY:
-            case DT_INIT_ARRAYSZ:
-            case DT_FINI_ARRAYSZ:
             case DT_RUNPATH:
             case DT_FLAGS:
                 //https://docs.oracle.com/cd/E23824_01/html/819-0690/chapter6-42444.html#chapter7-tbl-5            
@@ -1015,6 +1042,12 @@ static bool fixDynamicInfoForLinker(FILE *elf, std::vector<Elf64_Phdr> &progHdrs
             case DT_SCE_SYMTABSZ:
                 // write size of converted symtab (might be same sz)
                 dynInfo.symtabSz = dyn->d_un.d_val;
+                break;
+
+            case DT_SCE_EXPORT_LIB_ATTR:
+            case DT_SCE_EXPORT_LIB:
+            case DT_SCE_FINGERPRINT:
+            case DT_SCE_ORIGINAL_FILENAME:
                 break;
 
             default:
@@ -1229,6 +1262,8 @@ bool patchPs4Lib(std::string nativePath, std::set<std::string> &dependencies) {
     std::vector<Elf64_Dyn> newElfDynEnts;
     // index of the strtab in the shEntries
 
+    DebugContext.currentPs4Lib = nativePath;
+
     FILE *f = fopen(nativePath.c_str(), "r+");
     if (!f) {
         fprintf(stderr, "couldn't open %s\n", nativePath.c_str());
@@ -1338,6 +1373,13 @@ int main(int argc, char **argv) {
     
     parseCmdArgs(argc, argv);
 
+    TheLibrarySearcher = LibSearcher({{CmdArgs.pkgdumpPath, true}, {CmdArgs.ps4libsPath, false}});
+
+    if ( !getenv("LD_LIBRARY_PATH")) {
+        fprintf(stderr, "LD_LIBRARY_PATH unset\n");
+        return -1;
+    }
+
     std::error_code ec;
     fs::create_directory(CmdArgs.nativeElfOutputDir, ".", ec);
     if (ec) {
@@ -1353,14 +1395,17 @@ int main(int argc, char **argv) {
         fs::path libName = *it;
         dependencies.erase(it);
 
-        fs::path libPath;
-        if (!findPathToLibName(libName, libPath)) {
+        auto oLibPath = findPathToLibName(libName);
+        if ( !oLibPath) {
             fprintf(stderr, "Warning: unable to locate library %s\n", libName.c_str());
             continue;
         }
 
-        std::string nativePath = getNativeLibPath(libPath, CmdArgs.nativeElfOutputDir);
-        std::string cmd = "cp " + libPath.string() + " " + nativePath;
+        fs::path libPath = oLibPath.value();
+
+        fs::path nativePath = CmdArgs.nativeElfOutputDir; 
+        nativePath /= getNativeLibPath(libPath);
+        std::string cmd = "cp " + libPath.string() + " " + nativePath.string();
         system(cmd.c_str());
 
         if (chmod(nativePath.c_str(), S_IRWXU | (S_IRGRP | S_IXGRP) | (S_IROTH | S_IXOTH))) {
@@ -1377,20 +1422,36 @@ int main(int argc, char **argv) {
         }
     }
 
-    printf("hi from main\n");
+    printf("main: before dlopen\n");
 
     //setenv("LD_DEBUG", "all", 1);
 
-    std::string firstLib = getNativeLibPath(CmdArgs.dlPath, CmdArgs.nativeElfOutputDir);
+    fs::path firstLib = CmdArgs.nativeElfOutputDir;
+    firstLib /= getNativeLibPath(CmdArgs.dlPath);
 
     dl = dlopen(firstLib.c_str(), RTLD_LAZY);
     if (!dl) {
         char *err;
         while ((err = dlerror())) {
-            printf("%s\n", err);
+            printf("(dlopen) %s\n", err);
         }
         return -1;
     }
+
+
+    typedef float (*PFN_SIN)(float);
+
+    PFN_SIN __sqrt = (PFN_SIN) dlsym(dl, "sqrt");
+    assert(__sqrt);
+    printf("sin address: %p\n", __sqrt);
+
+    double x = 4.0;
+    double y = __sqrt(x);
+    printf("sqrt(%f) = %f\n", x, y);
+
+
+    dlclose(dl);
+    printf("main: done\n");
 
     return 0;
 }
