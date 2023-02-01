@@ -1439,16 +1439,31 @@ int main(int argc, char **argv) {
     }
 
 
-    typedef float (*PFN_SIN)(float);
+    typedef double (*PFN_SIN)(double);
+    PFN_SIN __sin = (PFN_SIN) dlsym(dl, "sin");
+    double u = 3.14 / 2.0;
+    double v = __sin(u);
+    printf("sin(%f) = %f\n", u, v);
 
-    PFN_SIN __sqrt = (PFN_SIN) dlsym(dl, "sqrt");
-    assert(__sqrt);
-    printf("sin address: %p\n", __sqrt);
-
+    typedef double (*PFN_SQRT)(double);
+    PFN_SQRT __sqrt = (PFN_SQRT) dlsym(dl, "sqrt");
     double x = 4.0;
     double y = __sqrt(x);
     printf("sqrt(%f) = %f\n", x, y);
 
+    typedef int32_t (*PFN_ATOI)(const char *);
+    PFN_ATOI __atoi = (PFN_ATOI) dlsym(dl, "atoi");
+    const char *_33_str = "33";
+    int32_t val = __atoi(_33_str);
+
+    typedef int8_t (*PFN_TOUPPER)(int8_t);
+    PFN_TOUPPER __toupper = (PFN_TOUPPER) dlsym(dl, "toupper");
+    const char a = 'a';
+    char A = __toupper(a);
+
+    printf("upper: %c\n", A);
+
+    printf("atoi val: %d\n", val);
 
     dlclose(dl);
     printf("main: done\n");
