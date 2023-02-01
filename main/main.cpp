@@ -650,12 +650,18 @@ static bool fixDynlibData(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, DynamicT
         // I think it's only relevant for static linking, when sections from multiple objects are being rearranged
         // and stitched into linked objects. In that case, providing the shndx is indirection that lets you keep the location
         // section_base + st_value consistent with the real location, because the section contents are moved by the static linker
+        //
+        // Even though it shouldn't affect dynamic linking, it seems to mess with the debugger
+        // Also 0 (SHT_NULL) does actually seem to mess with dlopen()
         if (ent.st_shndx >= SHN_LORESERVE && ent.st_shndx <= SHN_LORESERVE) {
             if (false) {
                 printf("Symbol has reserved symbol shndx\n");
             }
         } else if (ent.st_shndx != SHN_UNDEF) {
-            ent.st_shndx = 3; // TODO
+            // Using a random shdnx, e.g. 777, messes with the debugger
+            // For now, .dynsym has worked. Technically this should refer to the .text or .data section I think.
+            // LLDB has shown function names from the converted elf's in the disas and callstack
+            ent.st_shndx = sMap.dynsymIdx; // TODO
         }
         //ent.st_value; // TODO - ensure all pointer values are in LOAD segments that haven't been rebased or removed
         // For example, the got and plt
@@ -671,6 +677,7 @@ static bool fixDynlibData(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, DynamicT
     if (firstNonLocalIdx < 0) {
         firstNonLocalIdx = numSyms;
     }
+    // the sh_info field for .dynsym should contain the first symbol that doesn't have STB_LOCAL
     sections[sMap.dynsymIdx].setInfo(firstNonLocalIdx);
 
     // Create Hash table
@@ -895,13 +902,20 @@ static bool fixDynamicInfoForLinker(FILE *elf, std::vector<Elf64_Phdr> &progHdrs
                 
 
             // https://docs.oracle.com/cd/E23824_01/html/819-0690/chapter2-55859.html#chapter2-48195
-            case DT_INIT:
-            case DT_FINI:
+            //case DT_INIT:
+            //case DT_FINI:
             case DT_INIT_ARRAY:
             case DT_FINI_ARRAY:
             case DT_INIT_ARRAYSZ:
             case DT_FINI_ARRAYSZ:
                 break;
+
+            //case DT_INIT:
+            //case DT_FINI:
+            //case DT_INIT_ARRAY:
+            //case DT_FINI_ARRAY:
+            //case DT_INIT_ARRAYSZ:
+            //case DT_FINI_ARRAYSZ:
 
             case DT_RPATH:
             case DT_SYMBOLIC:
