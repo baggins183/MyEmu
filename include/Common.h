@@ -11,6 +11,7 @@
 #include <cstdint>
 #endif
 #include <stdint.h>
+#include "DebugContext.h"
 
 #define ARRLEN(arr) (sizeof(arr) / sizeof(arr[0]))
 

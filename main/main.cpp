@@ -1,3 +1,4 @@
+#define LOGGER_IMPL
 #include "Common.h"
 #include "Elf/elf-sce.h"
 #include "nid_hash/nid_hash.h"
@@ -56,16 +57,6 @@ static fs::path getNativeLibPath(fs::path ps4LibName) {
     return libStem;
 }
 
-static struct {
-    fs::path currentPs4Lib;
-    FILE *logfile;
-
-    void init(fs::path logfilePath) {
-        logfile = fopen(logfilePath.c_str(), "w+");
-        setvbuf(logfile, NULL, _IONBF, 0);    
-    }
-} g_DebugContext;
-
 // Store the names to compatibility libs to preload for each ps4 lib
 // This will work like LD_PRELOAD for the ps4 libs themselves.
 // Using LD_PRELOAD would cause ld-linux to lookup symbols in these compatibility libs
@@ -91,9 +82,6 @@ static struct {
         }
     }
 } g_Preloads;
-
-#define LOGFILE(fmt, ...) \
-    fprintf(g_DebugContext.logfile, fmt, ##__VA_ARGS__);
 
 class LibSearcher {
 public:
@@ -1430,7 +1418,7 @@ int main(int argc, char **argv) {
     parseCmdArgs(argc, argv);
 
     g_DebugContext.init("test.log");
-    LOGFILE("HI!!!!!!!!!!!!!!\n");
+    LOGFILE("main: start\n");
 
     if (!g_CmdArgs.preloadDirPath.empty()) {
         g_Preloads.init(g_CmdArgs.preloadDirPath);
@@ -1485,7 +1473,7 @@ int main(int argc, char **argv) {
         }
     }
 
-    printf("main: before dlopen\n");
+    LOGFILE("main: before dlopen\n");
 
     fs::path firstLib = g_CmdArgs.nativeElfOutputDir;
     firstLib /= getNativeLibPath(g_CmdArgs.dlPath);
