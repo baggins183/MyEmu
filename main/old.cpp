@@ -69,7 +69,7 @@ struct CmdConfig {
 
 };
 
-CmdConfig CmdArgs;
+CmdConfig g_CmdArgs;
 
 struct EntryPointWrapperArg {
     Elf64_Addr entryPointAddr;
@@ -515,9 +515,9 @@ FILE *openWithSearchPaths(std::string name, std::string mode,
     std::vector<std::string> paths;
 
     paths.push_back("./");
-    paths.push_back(CmdArgs.pkgDumpPath);
-    paths.push_back(CmdArgs.pkgDumpPath + "/sce_sys/");
-    paths.push_back(CmdArgs.pkgDumpPath + "/sce_module/");
+    paths.push_back(g_CmdArgs.pkgDumpPath);
+    paths.push_back(g_CmdArgs.pkgDumpPath + "/sce_sys/");
+    paths.push_back(g_CmdArgs.pkgDumpPath + "/sce_module/");
     paths.push_back("../../dynlibs/lib/");
     paths.push_back("../library_overloads/");
 
@@ -631,7 +631,7 @@ bool getModuleInfo(std::string basename, bool isNative, std::map<std::string, Mo
         return false;
     }
 
-    if (CmdArgs.dumpElfHeader) {
+    if (g_CmdArgs.dumpElfHeader) {
         dumpElfHdr(basename.c_str(), &elfHdr);
     }
 
@@ -855,20 +855,20 @@ bool parseCmdArgs(int argc, char **argv) {
 
     for (int i = 1; i < argc - 1; i++) {
         if (!strcmp(argv[i], "--dump_elf_header")) {
-            CmdArgs.dumpElfHeader = true;
+            g_CmdArgs.dumpElfHeader = true;
         } else if (!strcmp(argv[i], "--dump_relocs")) {
-            CmdArgs.dumpRelocs = true;
+            g_CmdArgs.dumpRelocs = true;
         } else if (!strcmp(argv[i], "--dump_module_info")) {
-            CmdArgs.dumpModuleInfo = true;
+            g_CmdArgs.dumpModuleInfo = true;
         }else if (!strcmp(argv[i], "--dump_symbols")) {
-            CmdArgs.dumpSymbols = true;
+            g_CmdArgs.dumpSymbols = true;
         } else {
             fprintf(stderr, "Unrecognized cmd arg: %s\n", argv[i]);
             return false;
         }
     }
 
-    CmdArgs.pkgDumpPath = argv[argc - 1];
+    g_CmdArgs.pkgDumpPath = argv[argc - 1];
     return true;
 }
 
@@ -914,18 +914,18 @@ int main(int argc, char **argv) {
         return a.baseVA < b.baseVA;
     });
     for (Module &mod: sortedModules) {
-        if (CmdArgs.dumpModuleInfo) {
+        if (g_CmdArgs.dumpModuleInfo) {
             printModuleInfo(mod);
         }
 
-        if (CmdArgs.dumpSymbols) {
+        if (g_CmdArgs.dumpSymbols) {
             for (Elf64_Sym &sym: mod.symbols) {
                 fprintf(stderr, "Module: %s\n", mod.name.c_str());
                 fprintf(stderr, "SYMBOL DUMP: %s\n", &mod.strtab[sym.st_name]);
             }
         }
 
-        if (CmdArgs.dumpRelocs) {
+        if (g_CmdArgs.dumpRelocs) {
             for (Elf64_Rela &rela: mod.relocs) {
                 printReloc(rela, mod, stderr);
             }

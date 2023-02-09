@@ -10,3 +10,4 @@ nid_hash/nid_hash
 .*
 build/
 elfdump/
+test.log

@@ -58,7 +58,42 @@ static fs::path getNativeLibPath(fs::path ps4LibName) {
 
 static struct {
     fs::path currentPs4Lib;
-} DebugContext;
+    FILE *logfile;
+
+    void init(fs::path logfilePath) {
+        logfile = fopen(logfilePath.c_str(), "w+");
+        setvbuf(logfile, NULL, _IONBF, 0);    
+    }
+} g_DebugContext;
+
+// Store the names to compatibility libs to preload for each ps4 lib
+// This will work like LD_PRELOAD for the ps4 libs themselves.
+// Using LD_PRELOAD would cause ld-linux to lookup symbols in these compatibility libs
+// when loading the emu executable itself, which we don't want
+//
+// These will be prepended to the list of DT_NEEDED for each patched ps4 libs
+// The dir given to init should be set in LD_LIBRARY_PATH as well so dlopen can locate
+// each DT_NEEDED entry
+//
+// Could also append to the DT_NEEDED's of the Emu executable
+static struct {
+    std::vector<std::string> soNames;
+
+    void init(fs::path preloadDir) {
+        std::string ldLibraryPath = getenv("LD_LIBRARY_PATH");
+        assert( ldLibraryPath.find(preloadDir) != ldLibraryPath.npos);
+
+        fs::directory_iterator it(preloadDir);
+        for (auto &dirent: it) {
+            if (dirent.is_regular_file() && dirent.path().extension() == ".so") {
+                soNames.push_back(dirent.path().filename());
+            }
+        }
+    }
+} g_Preloads;
+
+#define LOGFILE(fmt, ...) \
+    fprintf(g_DebugContext.logfile, fmt, ##__VA_ARGS__);
 
 class LibSearcher {
 public:
@@ -127,11 +162,12 @@ struct CmdConfig {
     std::string nativeElfOutputDir;
     std::string pkgdumpPath;
     std::string ps4libsPath;
+    std::string preloadDirPath;
 
     CmdConfig(): nativeElfOutputDir("./elfdump/") {}
 };
 
-CmdConfig CmdArgs;
+CmdConfig g_CmdArgs;
 
 bool parseCmdArgs(int argc, char **argv) {
     if (argc < 2) {
@@ -142,31 +178,33 @@ bool parseCmdArgs(int argc, char **argv) {
 
     for (int i = 1; i < argc - 1; i++) {
         if (!strcmp(argv[i], "--hashdb")) {
-            CmdArgs.hashdbPath = argv[++i];
+            g_CmdArgs.hashdbPath = argv[++i];
         } else if (!strcmp(argv[i], "--native_elf_output")) {
-            CmdArgs.nativeElfOutputDir = argv[++i];
+            g_CmdArgs.nativeElfOutputDir = argv[++i];
         } else if(!strcmp(argv[i], "--pkgdump")) {
-            CmdArgs.pkgdumpPath = argv[++i];
+            g_CmdArgs.pkgdumpPath = argv[++i];
         } else if(!strcmp(argv[i], "--ps4libs")) {
-            CmdArgs.ps4libsPath = argv[++i];
+            g_CmdArgs.ps4libsPath = argv[++i];
+        } else if (!strcmp(argv[i], "--preload_dir")) {
+            g_CmdArgs.preloadDirPath = argv[++i];
         } else {
             fprintf(stderr, "Unrecognized cmd arg: %s\n", argv[i]);
             return false;
         }
     }
 
-    if (CmdArgs.hashdbPath.empty()) {
+    if (g_CmdArgs.hashdbPath.empty()) {
         fprintf(stderr, "Warning: no symbol hash database given\n");
         exit(1); // For debugging
     }
 
     //CmdArgs.pkgDumpPath = argv[argc - 1];
-    CmdArgs.dlPath = argv[argc - 1];
+    g_CmdArgs.dlPath = argv[argc - 1];
     return true;
 }
 
 static std::optional<fs::path> findPathToLibName(fs::path ps4LibName) {
-    if (ps4LibName == CmdArgs.dlPath) {
+    if (ps4LibName == g_CmdArgs.dlPath) {
         return ps4LibName;
     }
 
@@ -441,7 +479,7 @@ static sqlite3 *openHashDb(const char *path) {
 }
 
 static bool reverseKnownHashes(std::vector<const char *> &oldStrings, std::vector<std::string> &newStrings) {
-    sqlite3 *db = openHashDb(CmdArgs.hashdbPath.c_str());
+    sqlite3 *db = openHashDb(g_CmdArgs.hashdbPath.c_str());
     if ( !db) {
         return false;
     }
@@ -628,7 +666,7 @@ static bool fixDynlibData(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, DynamicT
     }
 
     std::vector<std::string> newStrings;
-    if (!CmdArgs.hashdbPath.empty()) {
+    if (!g_CmdArgs.hashdbPath.empty()) {
         if ( !reverseKnownHashes(oldSymStrings, newStrings)) {
             return false;
         }
@@ -689,7 +727,7 @@ static bool fixDynlibData(FILE *elf, std::vector<Elf64_Phdr> &progHdrs, DynamicT
         if ( findPathToLibName(ps4Name)) {
             dependencies.insert(ps4Name);
         } else {
-            fprintf(stderr, "Warning: couldn't find dependency %s needed by %s. Skipping\n", ps4Name.c_str(), DebugContext.currentPs4Lib.c_str());
+            fprintf(stderr, "Warning: couldn't find dependency %s needed by %s. Skipping\n", ps4Name.c_str(), g_DebugContext.currentPs4Lib.c_str());
             continue;
         }
 
@@ -904,15 +942,15 @@ static bool fixDynamicInfoForLinker(FILE *elf, std::vector<Elf64_Phdr> &progHdrs
             // https://docs.oracle.com/cd/E23824_01/html/819-0690/chapter2-55859.html#chapter2-48195
             //case DT_INIT:
             //case DT_FINI:
-            case DT_INIT_ARRAY:
+            //case DT_INIT_ARRAY:
             case DT_FINI_ARRAY:
             case DT_INIT_ARRAYSZ:
             case DT_FINI_ARRAYSZ:
                 break;
 
-            //case DT_INIT:
+            case DT_INIT:
             //case DT_FINI:
-            //case DT_INIT_ARRAY:
+            case DT_INIT_ARRAY:
             //case DT_FINI_ARRAY:
             //case DT_INIT_ARRAYSZ:
             //case DT_FINI_ARRAYSZ:
@@ -1276,7 +1314,7 @@ bool patchPs4Lib(std::string nativePath, std::set<std::string> &dependencies) {
     std::vector<Elf64_Dyn> newElfDynEnts;
     // index of the strtab in the shEntries
 
-    DebugContext.currentPs4Lib = nativePath;
+    g_DebugContext.currentPs4Lib = nativePath;
 
     FILE *f = fopen(nativePath.c_str(), "r+");
     if (!f) {
@@ -1382,12 +1420,23 @@ bool patchPs4Lib(std::string nativePath, std::set<std::string> &dependencies) {
 }
 
 int main(int argc, char **argv) {
+    // Make stdout unbuffered so crashes don't hide writes when stdout is redirected to file
+    setvbuf(stdout, NULL, _IONBF, 0);    
+    setvbuf(stdout, NULL, _IONBF, 0);    
+
     //FILE *eboot;
     void *dl;
-    
+
     parseCmdArgs(argc, argv);
 
-    TheLibrarySearcher = LibSearcher({{CmdArgs.pkgdumpPath, true}, {CmdArgs.ps4libsPath, false}});
+    g_DebugContext.init("test.log");
+    LOGFILE("HI!!!!!!!!!!!!!!\n");
+
+    if (!g_CmdArgs.preloadDirPath.empty()) {
+        g_Preloads.init(g_CmdArgs.preloadDirPath);
+    }
+
+    TheLibrarySearcher = LibSearcher({{g_CmdArgs.pkgdumpPath, true}, {g_CmdArgs.ps4libsPath, false}});
 
     if ( !getenv("LD_LIBRARY_PATH")) {
         fprintf(stderr, "LD_LIBRARY_PATH unset\n");
@@ -1395,14 +1444,14 @@ int main(int argc, char **argv) {
     }
 
     std::error_code ec;
-    fs::create_directory(CmdArgs.nativeElfOutputDir, ".", ec);
+    fs::create_directory(g_CmdArgs.nativeElfOutputDir, ".", ec);
     if (ec) {
         std::string m = ec.message();
-        fprintf(stderr, "Failed to create directory %s: %s\n", CmdArgs.nativeElfOutputDir.c_str(), m.c_str());
+        fprintf(stderr, "Failed to create directory %s: %s\n", g_CmdArgs.nativeElfOutputDir.c_str(), m.c_str());
         return -1;
     }    
 
-    std::set<std::string> dependencies = { CmdArgs.dlPath };
+    std::set<std::string> dependencies = { g_CmdArgs.dlPath };
     std::set<std::string> satisfied;
     while (!dependencies.empty()) {
         auto it = dependencies.begin();
@@ -1417,7 +1466,7 @@ int main(int argc, char **argv) {
 
         fs::path libPath = oLibPath.value();
 
-        fs::path nativePath = CmdArgs.nativeElfOutputDir; 
+        fs::path nativePath = g_CmdArgs.nativeElfOutputDir; 
         nativePath /= getNativeLibPath(libPath);
         std::string cmd = "cp " + libPath.string() + " " + nativePath.string();
         system(cmd.c_str());
@@ -1438,11 +1487,25 @@ int main(int argc, char **argv) {
 
     printf("main: before dlopen\n");
 
-    //setenv("LD_DEBUG", "all", 1);
+    fs::path firstLib = g_CmdArgs.nativeElfOutputDir;
+    firstLib /= getNativeLibPath(g_CmdArgs.dlPath);
 
-    fs::path firstLib = CmdArgs.nativeElfOutputDir;
-    firstLib /= getNativeLibPath(CmdArgs.dlPath);
-
+    // hardcode for now
+    /*
+    std::vector<fs::path> preloads = {
+        "./build/ps4lib_overloads/libevery.so"
+    };
+    //void *firstPreloadHandle = dlmopen(LM_ID_BASE, preloads[0].c_str(), RTLD_NOW);
+    void *firstPreloadHandle = dlopen(preloads[0].c_str(), RTLD_NOW);
+    Lmid_t preloadNamespace;
+    // load compatability libraries, similar to LD_PRELOAD
+    dlinfo(firstPreloadHandle, RTLD_DI_LMID, &preloadNamespace);
+    for (uint i = 1; i < preloads.size(); i++) {
+        dlmopen(preloadNamespace, preloads[i].c_str(), RTLD_NOW);
+    }
+*/
+    // Load ps4 module
+   // dl = dlmopen(preloadNamespace, firstLib.c_str(), RTLD_LAZY);
     dl = dlopen(firstLib.c_str(), RTLD_LAZY);
     if (!dl) {
         char *err;
