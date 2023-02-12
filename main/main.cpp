@@ -56,7 +56,7 @@ struct CmdConfig {
     CmdConfig(): nativeElfOutputDir("./elfdump/"), purgeElfs(false) {}
 };
 
-CmdConfig g_CmdArgs;
+CmdConfig CmdArgs;
 
 bool parseCmdArgs(int argc, char **argv) {
     if (argc < 2) {
@@ -67,30 +67,30 @@ bool parseCmdArgs(int argc, char **argv) {
 
     for (int i = 1; i < argc - 1; i++) {
         if (!strcmp(argv[i], "--hashdb")) {
-            g_CmdArgs.hashdbPath = argv[++i];
+            CmdArgs.hashdbPath = argv[++i];
         } else if (!strcmp(argv[i], "--native_elf_output")) {
-            g_CmdArgs.nativeElfOutputDir = argv[++i];
+            CmdArgs.nativeElfOutputDir = argv[++i];
         } else if(!strcmp(argv[i], "--pkgdump")) {
-            g_CmdArgs.pkgdumpPath = argv[++i];
+            CmdArgs.pkgdumpPath = argv[++i];
         } else if(!strcmp(argv[i], "--ps4libs")) {
-            g_CmdArgs.ps4libsPath = argv[++i];
+            CmdArgs.ps4libsPath = argv[++i];
         } else if (!strcmp(argv[i], "--preload_dir")) {
-            g_CmdArgs.preloadDirPath = argv[++i];
+            CmdArgs.preloadDirPath = argv[++i];
         } else if (!strcmp(argv[i], "--purge_elfs")) {
-            g_CmdArgs.purgeElfs = true;
+            CmdArgs.purgeElfs = true;
         } else {
             fprintf(stderr, "Unrecognized cmd arg: %s\n", argv[i]);
             return false;
         }
     }
 
-    if (g_CmdArgs.hashdbPath.empty()) {
+    if (CmdArgs.hashdbPath.empty()) {
         fprintf(stderr, "Warning: no symbol hash database given\n");
         exit(1); // For debugging
     }
 
     //CmdArgs.pkgDumpPath = argv[argc - 1];
-    g_CmdArgs.dlPath = argv[argc - 1];
+    CmdArgs.dlPath = argv[argc - 1];
     return true;
 }
 
@@ -117,7 +117,7 @@ int main(int argc, char **argv) {
     void *dl;
 
     parseCmdArgs(argc, argv);
-    ElfPatcherContext Ctx(g_CmdArgs.ps4libsPath,g_CmdArgs.preloadDirPath, g_CmdArgs.hashdbPath, g_CmdArgs.nativeElfOutputDir, g_CmdArgs.pkgdumpPath, g_CmdArgs.purgeElfs);
+    ElfPatcherContext Ctx(CmdArgs.ps4libsPath,CmdArgs.preloadDirPath, CmdArgs.hashdbPath, CmdArgs.nativeElfOutputDir, CmdArgs.pkgdumpPath, CmdArgs.purgeElfs);
 
     if ( !getenv("LD_LIBRARY_PATH")) {
         fprintf(stderr, "LD_LIBRARY_PATH unset\n");
@@ -125,21 +125,21 @@ int main(int argc, char **argv) {
     }
 
     std::error_code ec;
-    fs::create_directory(g_CmdArgs.nativeElfOutputDir, ".", ec);
+    fs::create_directory(CmdArgs.nativeElfOutputDir, ".", ec);
     if (ec) {
         std::string m = ec.message();
-        fprintf(stderr, "Failed to create directory %s: %s\n", g_CmdArgs.nativeElfOutputDir.c_str(), m.c_str());
+        fprintf(stderr, "Failed to create directory %s: %s\n", CmdArgs.nativeElfOutputDir.c_str(), m.c_str());
         return -1;
     }    
 
-    std::set<std::string> dependencies = { g_CmdArgs.dlPath };
+    std::set<std::string> dependencies = { CmdArgs.dlPath };
     std::set<std::string> satisfied;
     while (!dependencies.empty()) {
         auto it = dependencies.begin();
         fs::path libName = *it;
         dependencies.erase(it);
 
-        auto oLibPath = findPathToLibName(libName, Ctx);
+        auto oLibPath = findPathToSceLib(libName, Ctx);
         if ( !oLibPath) {
             fprintf(stderr, "Warning: unable to locate library %s\n", libName.c_str());
             continue;
@@ -147,12 +147,12 @@ int main(int argc, char **argv) {
 
         fs::path libPath = oLibPath.value();
 
-        fs::path nativePath = g_CmdArgs.nativeElfOutputDir; 
+        fs::path nativePath = CmdArgs.nativeElfOutputDir; 
         nativePath /= getNativeLibName(libPath);
 
         struct stat buf;
         bool exists = !stat(nativePath.c_str(), &buf);
-        if (g_CmdArgs.purgeElfs || !exists) {
+        if (CmdArgs.purgeElfs || !exists) {
             std::string cmd = "cp " + libPath.string() + " " + nativePath.string();
             system(cmd.c_str());
 
@@ -171,17 +171,17 @@ int main(int argc, char **argv) {
         }
     }
 
-    fs::path firstLib = g_CmdArgs.nativeElfOutputDir;
-    firstLib /= getNativeLibName(g_CmdArgs.dlPath);
+    fs::path firstLib = CmdArgs.nativeElfOutputDir;
+    firstLib /= getNativeLibName(CmdArgs.dlPath);
 
-    fs::path entryModule = g_CmdArgs.nativeElfOutputDir;
+    fs::path entryModule = CmdArgs.nativeElfOutputDir;
     entryModule /= getNativeLibName("eboot.bin");
     //if ( !mapEntryModuleIntoMemory(entryModule)) {
     //    return -1;
     //}
 
     std::vector<void *> preloadHandles;
-    LibSearcher preloadSearcher({g_CmdArgs.preloadDirPath});
+    LibSearcher preloadSearcher({CmdArgs.preloadDirPath});
 
     // These may depend on ps4 libs (for wrapping sce functions by doing1 dlsym(RTLD_NEXT, ...))
     // So preload these only after patching dependencies
@@ -214,6 +214,10 @@ int main(int argc, char **argv) {
             printf("(dlopen) %s\n", err);
         }
         return -1;
+    }
+
+    for (auto handle: preloadHandles) {
+        dlclose(handle);
     }
 
     dlclose(dl);

@@ -56,7 +56,7 @@ fs::path getNativeLibName(fs::path ps4LibName) {
     return libStem;
 }
 
-std::optional<fs::path> findPathToLibName(fs::path libName, ElfPatcherContext &Ctx) {
+std::optional<fs::path> findPathToSceLib(fs::path libName, ElfPatcherContext &Ctx) {
     /*if (ps4LibName == Ctx.dlPath) {
         return ps4LibName;
     }*/
@@ -65,7 +65,6 @@ std::optional<fs::path> findPathToLibName(fs::path libName, ElfPatcherContext &C
     if (res) {
         return res;
     }
-
 
     if (!libName.has_extension()) {
         fprintf(stderr, "Warning, findPathToLibName: library %s has no extension\n", libName.c_str());
@@ -81,18 +80,13 @@ std::optional<fs::path> findPathToLibName(fs::path libName, ElfPatcherContext &C
 
     fs::path libStem = libName.stem();
 
-    return Ctx.libSearcher.findLibrary(libStem, validExts);
+    return Ctx.ps4LibSearcher.findLibrary(libStem, validExts);
 }
 
 struct {
     std::string currentPs4Lib;
 } TheDebugContext;
 
-
-
-
-
-/*****************************************************************************************/
 void printSegmentRanges(std::vector<Elf64_Phdr>& progHdrs) {
     for (auto p: progHdrs) {
         printf("[%lx, %lx), size=%lx\n", p.p_offset, p.p_offset + p.p_filesz, p.p_filesz);
@@ -480,7 +474,7 @@ static bool fixDynlibData(ElfPatcherContext &Ctx, FILE *elf, std::vector<Elf64_P
     // Write needed libs and modules
     for (uint64_t libStrOff: dynInfo.neededLibs) {
         fs::path ps4Name = reinterpret_cast<char *>(&dynlibContents[dynInfo.strtabOff + libStrOff]);
-        if ( findPathToLibName(ps4Name, Ctx)) {
+        if ( findPathToSceLib(ps4Name, Ctx)) {
             dependencies.insert(ps4Name);
         } else {
             fprintf(stderr, "Warning: couldn't find dependency %s needed by %s. Skipping\n", ps4Name.c_str(), TheDebugContext.currentPs4Lib.c_str());

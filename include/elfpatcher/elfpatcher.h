@@ -11,6 +11,8 @@ namespace fs = std::filesystem;
 #include <set>
 #include <map>
 
+/* FIND EXPORTED FUNCTIONS AT BOTTOM */
+
 class LibSearcher {
 public:
     struct PathElt {
@@ -149,7 +151,7 @@ struct Segment {
 
 struct ElfPatcherContext {
     fs::path pkgdumpPath;
-    LibSearcher libSearcher;
+    LibSearcher ps4LibSearcher;
     
     fs::path nativeElfOutputDir;
     LibSearcher nativeLibSearcher;
@@ -160,7 +162,7 @@ struct ElfPatcherContext {
 
     ElfPatcherContext(std::string ps4libsPath, std::string preloadDir, std::string hashdbPath, std::string nativeElfOutputDir, std::string pkgdumpPath, bool purgeElfs):
             pkgdumpPath(pkgdumpPath),
-            libSearcher({{pkgdumpPath, true}, {ps4libsPath, false}}),
+            ps4LibSearcher({{pkgdumpPath, true}, {ps4libsPath, false}}),
             nativeElfOutputDir(nativeElfOutputDir),
             nativeLibSearcher({nativeElfOutputDir}),
             hashdbPath(hashdbPath),
@@ -181,8 +183,22 @@ struct ElfPatcherContext {
 
 /* EXPORTS */
 
+// Get the canonical name to the patched ELF corresponding to name of the unpatched ELF given by ps4LibName
+// This handles .sprx and .prx extension confusion
+// The name of the patched ELF can be searched in the elfdump directory later when it needs to be loaded
+// It is also used ahead of time to rename dependencies to other shared libraries (in DT_NEEDED tags) while patching a given
+// ELF. This is done before the patched ELF of the dependency is necessarily created
+// For example:
+// libMod.(s)prx => libMod.prx.native
 fs::path getNativeLibName(fs::path ps4LibName);
-std::optional<fs::path> findPathToLibName(fs::path ps4LibName, ElfPatcherContext &Ctx);
+
+// Find the path to the given sce library, patched (native) or unpatched
+// Native ELF's are found in the elfdump directory, and correspond to Ctx.nativeLibSearcher
+// Unpatched ELF's are found in the pkg dump or the default system (ps4) libraries, and correspond
+// to Ctx.ps4LibSearcher
+// Given a name with the .prx or .sprx extension, this function looks for the best match
+std::optional<fs::path> findPathToSceLib(fs::path ps4LibName, ElfPatcherContext &Ctx);
+
 bool patchPs4Lib(ElfPatcherContext &Ctx, std::string nativePath, std::set<std::string> &dependencies);
 
 #endif // _ELF_PATCHER_H_
