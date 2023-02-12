@@ -1057,7 +1057,7 @@ static void finalizeProgramHeaders(std::vector<Elf64_Phdr> &progHdrs) {
     //}
 }
 
-bool patchPs4Lib(ElfPatcherContext &Ctx, std::string nativePath, std::set<std::string> &dependencies) {
+bool patchPs4Lib(ElfPatcherContext &Ctx, std::string elfPath, std::set<std::string> &dependencies) {
     std::vector<Elf64_Phdr> progHdrs;
     // in a Ps4 module, these Dyn Ents are in the DYNAMIC segment/.dynamic section,
     // and describe the DYNLIBDATA segment
@@ -1065,11 +1065,11 @@ bool patchPs4Lib(ElfPatcherContext &Ctx, std::string nativePath, std::set<std::s
     std::vector<Elf64_Dyn> newElfDynEnts;
     // index of the strtab in the shEntries
 
-    TheDebugContext.currentPs4Lib = nativePath;
+    TheDebugContext.currentPs4Lib = elfPath;
 
-    FILE *f = fopen(nativePath.c_str(), "r+");
+    FILE *f = fopen(elfPath.c_str(), "r+");
     if (!f) {
-        fprintf(stderr, "couldn't open %s\n", nativePath.c_str());
+        fprintf(stderr, "couldn't open %s\n", elfPath.c_str());
         return false;
     }
 

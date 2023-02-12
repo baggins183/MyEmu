@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <asm/unistd_64.h>
+#include "Logger.h"
 
 typedef struct
 {
@@ -15,9 +16,13 @@ typedef struct
 typedef pthread_mutexattr_t   ScePthreadMutexattr;
 
 int scePthreadMutexLock(sce_pthread_mutex_t **mutex) {
-    int err = pthread_mutex_lock(&(*mutex)->handle);
-    fprintf(stderr, "In scePthreadMutexLock\n");
+    LOG("In scePthreadMutexLock\n")
+    LOG("    sceMut: %llx\n", mutex)
+    LOG("    *sceMut: %llx\n", *mutex)
     exit(1);
+    int err = pthread_mutex_lock(&(*mutex)->handle);
+    //fprintf(stderr, "In scePthreadMutexLock\n");
+    //fprintf(stderr, "In scePthreadMutexLock\n");
     return err;
 }
 
@@ -25,7 +30,10 @@ typedef int (*PFN_SCEPTHREADMUTEXINIT)(sce_pthread_mutex_t **mutex, const ScePth
 //static PFN_SCEPTHREADMUTEXINIT scePthreadMutexInit_impl;
 
 int scePthreadMutexInit(sce_pthread_mutex_t **mutex, const ScePthreadMutexattr *attr, const char *name) {
-    printf("Warning: passthrough scePthreadMutexInit\n");
+    //printf("Warning: passthrough scePthreadMutexInit\n");
+    LOG("Warning: passthrough scePthreadMutexInit\n")
+    LOG("    sceMut: %llx\n", mutex)
+    LOG("    *sceMut: %llx\n", *mutex)    
     // TODO see if we can use RTLD_NEXT to search an entire namespace for a symbol, instead of search order being confined to dependecies of *this*
     // object (libevery.so)
     // Currently we have to add DT_NEEDED entry for libkernel.prx to libevery.so so dlsym can find the next definition

@@ -185,11 +185,13 @@ struct ElfPatcherContext {
 
 // Get the canonical name to the patched ELF corresponding to name of the unpatched ELF given by ps4LibName
 // This handles .sprx and .prx extension confusion
-// The name of the patched ELF can be searched in the elfdump directory later when it needs to be loaded
-// It is also used ahead of time to rename dependencies to other shared libraries (in DT_NEEDED tags) while patching a given
-// ELF. This is done before the patched ELF of the dependency is necessarily created
+//
+// This is used ahead of time, while patching a given ELF, to rename dependencies to other shared libraries (in DT_NEEDED tags).
+// This is done before the patched ELF of the dependency is necessarily created
+
 // For example:
-// libMod.(s)prx => libMod.prx.native
+// libA.sprx => libA.prx.native
+// libA.prx => libA.prx.native
 fs::path getNativeLibName(fs::path ps4LibName);
 
 // Find the path to the given sce library, patched (native) or unpatched
@@ -199,6 +201,13 @@ fs::path getNativeLibName(fs::path ps4LibName);
 // Given a name with the .prx or .sprx extension, this function looks for the best match
 std::optional<fs::path> findPathToSceLib(fs::path ps4LibName, ElfPatcherContext &Ctx);
 
-bool patchPs4Lib(ElfPatcherContext &Ctx, std::string nativePath, std::set<std::string> &dependencies);
+// Patch the ps4 ELF at "elfPath" to a legal ELF.
+// Insert readable symbols for any symbol found that is a known hash
+//
+// This doesn't patch any dependencies of "inputElfPath".
+// Instead it returns the names of dependencies in "dependencies"
+// These are the ps4/sce ELF names and not the canonical patched names.
+// To be able to dlopen() or exec() this, all the recursive dependencies should be patched beforehand 
+bool patchPs4Lib(ElfPatcherContext &Ctx, std::string elfPath, std::set<std::string> &dependencies);
 
 #endif // _ELF_PATCHER_H_
