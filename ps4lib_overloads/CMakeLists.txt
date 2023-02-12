@@ -6,8 +6,8 @@
 
 add_library(every SHARED every.c)
 target_link_libraries(every pthread)
-# temp solution: add dependency to libevery.so so it can find functions to wrap in base module
-#get_property(LIBNAME TARGET LIBRARY_OUTPUT_NAME every)
+# TODO get rid of "every" and do 1:1 compat lib to existing sys module
+# example libkernel.so : libkernel.prx
 add_custom_command(TARGET every POST_BUILD COMMAND
     ${PROJECT_SOURCE_DIR}/build_scripts/add_dt_neededs.sh $<TARGET_FILE:every> "libkernel.prx.native"
 )
