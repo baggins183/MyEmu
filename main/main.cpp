@@ -151,8 +151,9 @@ struct CmdConfig {
     std::string pkgdumpPath;
     std::string ps4libsPath;
     std::string preloadDirPath;
+    bool purgeElfs;
 
-    CmdConfig(): nativeElfOutputDir("./elfdump/") {}
+    CmdConfig(): nativeElfOutputDir("./elfdump/"), purgeElfs(false) {}
 };
 
 CmdConfig g_CmdArgs;
@@ -175,6 +176,8 @@ bool parseCmdArgs(int argc, char **argv) {
             g_CmdArgs.ps4libsPath = argv[++i];
         } else if (!strcmp(argv[i], "--preload_dir")) {
             g_CmdArgs.preloadDirPath = argv[++i];
+        } else if (!strcmp(argv[i], "--purge_elfs")) {
+            g_CmdArgs.purgeElfs = true;
         } else {
             fprintf(stderr, "Unrecognized cmd arg: %s\n", argv[i]);
             return false;
@@ -1407,6 +1410,20 @@ bool patchPs4Lib(std::string nativePath, std::set<std::string> &dependencies) {
     return true;
 }
 
+struct MappedRange {
+    uint64_t baseVA;
+    uint64_t nPages;
+};
+
+bool mapEntryModuleIntoMemory(fs::path nativeExecutablePath) {
+    FILE *elf = fopen(nativeExecutablePath.c_str(), "r+");
+    if ( !elf) {
+        return false;
+    }
+
+    return true;
+}
+
 int main(int argc, char **argv) {
     // Make stdout unbuffered so crashes don't hide writes when stdout is redirected to file
     setvbuf(stdout, NULL, _IONBF, 0);    
@@ -1456,16 +1473,21 @@ int main(int argc, char **argv) {
 
         fs::path nativePath = g_CmdArgs.nativeElfOutputDir; 
         nativePath /= getNativeLibPath(libPath);
-        std::string cmd = "cp " + libPath.string() + " " + nativePath.string();
-        system(cmd.c_str());
 
-        if (chmod(nativePath.c_str(), S_IRWXU | (S_IRGRP | S_IXGRP) | (S_IROTH | S_IXOTH))) {
-            fprintf(stderr, "chmod failed\n");
-            return -1;
-        }
+        struct stat buf;
+        bool exists = !stat(nativePath.c_str(), &buf);
+        if (g_CmdArgs.purgeElfs || !exists) {
+            std::string cmd = "cp " + libPath.string() + " " + nativePath.string();
+            system(cmd.c_str());
 
-        if ( !patchPs4Lib(nativePath, dependencies)) {
-            return -1;
+            if (chmod(nativePath.c_str(), S_IRWXU | (S_IRGRP | S_IXGRP) | (S_IROTH | S_IXOTH))) {
+                fprintf(stderr, "chmod failed\n");
+                return -1;
+            }
+
+            if ( !patchPs4Lib(nativePath, dependencies)) {
+                return -1;
+            }
         }
         satisfied.insert(libName.filename());
         for (auto &sat: satisfied) {
@@ -1478,20 +1500,12 @@ int main(int argc, char **argv) {
     fs::path firstLib = g_CmdArgs.nativeElfOutputDir;
     firstLib /= getNativeLibPath(g_CmdArgs.dlPath);
 
-    // hardcode for now
-    /*
-    std::vector<fs::path> preloads = {
-        "./build/ps4lib_overloads/libevery.so"
-    };
-    //void *firstPreloadHandle = dlmopen(LM_ID_BASE, preloads[0].c_str(), RTLD_NOW);
-    void *firstPreloadHandle = dlopen(preloads[0].c_str(), RTLD_NOW);
-    Lmid_t preloadNamespace;
-    // load compatability libraries, similar to LD_PRELOAD
-    dlinfo(firstPreloadHandle, RTLD_DI_LMID, &preloadNamespace);
-    for (uint i = 1; i < preloads.size(); i++) {
-        dlmopen(preloadNamespace, preloads[i].c_str(), RTLD_NOW);
-    }
-*/
+    fs::path entryModule = g_CmdArgs.nativeElfOutputDir;
+    entryModule /= getNativeLibPath("eboot.bin");
+    //if ( !mapEntryModuleIntoMemory(entryModule)) {
+    //    return -1;
+    //}
+
     // Load ps4 module
    // dl = dlmopen(preloadNamespace, firstLib.c_str(), RTLD_LAZY);
     dl = dlopen(firstLib.c_str(), RTLD_LAZY);
@@ -1502,33 +1516,6 @@ int main(int argc, char **argv) {
         }
         return -1;
     }
-
-
-    typedef double (*PFN_SIN)(double);
-    PFN_SIN __sin = (PFN_SIN) dlsym(dl, "sin");
-    double u = 3.14 / 2.0;
-    double v = __sin(u);
-    printf("sin(%f) = %f\n", u, v);
-
-    typedef double (*PFN_SQRT)(double);
-    PFN_SQRT __sqrt = (PFN_SQRT) dlsym(dl, "sqrt");
-    double x = 4.0;
-    double y = __sqrt(x);
-    printf("sqrt(%f) = %f\n", x, y);
-
-    typedef int32_t (*PFN_ATOI)(const char *);
-    PFN_ATOI __atoi = (PFN_ATOI) dlsym(dl, "atoi");
-    const char *_33_str = "33";
-    int32_t val = __atoi(_33_str);
-
-    typedef int8_t (*PFN_TOUPPER)(int8_t);
-    PFN_TOUPPER __toupper = (PFN_TOUPPER) dlsym(dl, "toupper");
-    const char a = 'a';
-    char A = __toupper(a);
-
-    printf("upper: %c\n", A);
-
-    printf("atoi val: %d\n", val);
 
     dlclose(dl);
     printf("main: done\n");

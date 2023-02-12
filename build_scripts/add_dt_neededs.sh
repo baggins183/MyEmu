@@ -5,8 +5,8 @@
 # the compatibility libs will take precedence over definitions in the ps4 elf's, but not over definitions in
 # the preexisting DT_NEEDEDs in the main exe, such as glibc
 
-if [ $# -lt 3 ]; then
-    echo "usage: $0 <elf to patch> [needed_1] [needed_n]"
+if [ $# -lt 2 ]; then
+    echo "usage: $0 <elf to patch> [needed_1] ... [needed_n]"
     exit -1
 fi
 
