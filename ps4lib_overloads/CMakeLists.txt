@@ -4,13 +4,21 @@
 #    message(STATUS "${basename}")
 #endforeach()
 
-add_library(every SHARED every.c)
+add_library(every SHARED every.cpp)
 target_link_libraries(every pthread)
 # TODO get rid of "every" and do 1:1 compat lib to existing sys module
 # example libkernel.so : libkernel.prx
 add_custom_command(TARGET every POST_BUILD COMMAND
     ${PROJECT_SOURCE_DIR}/build_scripts/add_dt_neededs.sh $<TARGET_FILE:every> "libkernel.prx.native"
 )
+
+#add_library(everyC SHARED every.c)
+#target_link_libraries(everyC pthread)
+## TODO get rid of "every" and do 1:1 compat lib to existing sys module
+## example libkernel.so : libkernel.prx
+#add_custom_command(TARGET everyC POST_BUILD COMMAND
+#    ${PROJECT_SOURCE_DIR}/build_scripts/add_dt_neededs.sh $<TARGET_FILE:everyC> "libkernel.prx.native"
+#)
 
 add_library(scepthread SHARED scepthread.c)
 target_link_libraries(scepthread pthread)
