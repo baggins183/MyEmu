@@ -1,5 +1,6 @@
 #include "sce_errors/sce_errors.h"
 #include "ps4lib_overrides/sce_kernel_scepthread.h"
+#include "Logger.h"
 
 #include <assert.h>
 #include <dlfcn.h>
@@ -11,9 +12,9 @@
 #include <asm/unistd_64.h>
 #include <map>
 #include <string>
-#include "errno.h"
-
-#include "Logger.h"
+#include <errno.h>
+#include <signal.h>
+#include <time.h>
 
 #define PS4API __attribute__((sysv_abi))
 
@@ -200,8 +201,6 @@ int scePthreadMutexUnlock(ScePthreadMutex *mutex) {
     return pthreadErrorToSceError(err);
 }
 
-//typedef int (*PFN_SCEPTHREADMUTEXINIT)(ScePthreadMutex *mutex, const ScePthreadMutexattr *attr, const char *name);
-
 int scePthreadMutexInit(ScePthreadMutex *mutex, const ScePthreadMutexattr *attr, const char *name) {
     //printf("Warning: passthrough scePthreadMutexInit\n");
     LOG("scePthreadMutexInit\n")
@@ -209,9 +208,6 @@ int scePthreadMutexInit(ScePthreadMutex *mutex, const ScePthreadMutexattr *attr,
 	if (name) {
     	LOG("    name: %s\n", name)
 	}
-
-    //PFN_SCEPTHREADMUTEXINIT scePthreadMutexInit_impl = (PFN_SCEPTHREADMUTEXINIT) dlsym(RTLD_NEXT, "scePthreadMutexInit");
-    //return scePthreadMutexInit_impl(mutex, attr, name);
 
     sce_pthread_mutex_t *object = (sce_pthread_mutex_t *) calloc(1, sizeof(sce_pthread_mutex_t));
     assert(object);
@@ -314,7 +310,35 @@ int PS4API scePthreadMutexattrSettype(ScePthreadMutexattr *attr, int type)
 	return pthreadErrorToSceError(err);
 }
 
+int PS4API scePthreadMutexGetprioceiling(ScePthreadMutex *mutex, int prioceiling, int *old_ceiling)
+{
+	LOG("scePthreadMutexGetprioceiling\n")
+	if (mutexHasName(mutex)) {
+		LOG("    name: %s\n", getMutexName(mutex));
+	}
+	int err = pthread_mutex_setprioceiling(&(*mutex)->handle, prioceiling, old_ceiling);
+	raise(SIGTRAP);
+	return pthreadErrorToSceError(err);
+}
 
+
+int PS4API scePthreadMutexTimedlock(ScePthreadMutex *mutex, const struct timespec * abs_timeout)
+{
+	LOG("scePthreadMutexTimedlock\n")
+	if (mutexHasName(mutex)) {
+		LOG("    name: %s\n", getMutexName(mutex));
+	}	
+	// TODO
+	raise(SIGTRAP);
+	int err = pthread_mutex_timedlock(&(*mutex)->handle, abs_timeout);
+	return pthreadErrorToSceError(err);
+}
+
+int PS4API scePthreadMutexTrylock(ScePthreadMutex *mutex)
+{
+	int err = pthread_mutex_trylock(&((*mutex)->handle));
+	return pthreadErrorToSceError(err);
+}
 
 
 
