@@ -19,81 +19,13 @@
 
 extern "C" {
 
-int scePthreadMutexattrInit(ScePthreadMutexattr *attr)
-{
-	int err = pthread_mutexattr_init(attr);
+int scePthreadAttrGet(ScePthread thread, ScePthreadAttr *attr) {
+	int err = pthread_getattr_np(thread, &(*attr)->handle);
 	if (err) {
 		raise(SIGTRAP);
 	}
 	return pthreadErrorToSceError(err);
 }
-
-
-int scePthreadMutexattrDestroy(ScePthreadMutexattr *attr)
-{
-	int err = pthread_mutexattr_destroy(attr);
-	if (err) {
-		raise(SIGTRAP);
-	}	
-	return pthreadErrorToSceError(err);
-}
-
-static int sceMutexAttrProtocolToPthreadType(int protocol)
-{
-	int pthreadType = 0;
-	switch (protocol)
-	{
-		case SCE_PTHREAD_PRIO_NONE: pthreadType = PTHREAD_PRIO_NONE; break;
-		case SCE_PTHREAD_PRIO_INHERIT: pthreadType = PTHREAD_PRIO_INHERIT; break;
-		case SCE_PTHREAD_PRIO_PROTECT: pthreadType = PTHREAD_PRIO_PROTECT; break;
-	}
-	return pthreadType;
-}
-
-int scePthreadMutexattrSetprotocol(ScePthreadMutexattr *attr, int protocol)
-{
-	int type = sceMutexAttrProtocolToPthreadType(protocol);
-	int err  = pthread_mutexattr_setprotocol(attr, type);
-	if (err) {
-		raise(SIGTRAP);
-	}	
-
-	return pthreadErrorToSceError(err);
-}
-
-static int sceMutexAttrTypeToPthreadType(int sceType)
-{
-	int pthreadType = -1;
-	switch (sceType)
-	{
-	case SCE_PTHREAD_MUTEX_ERRORCHECK:
-		pthreadType = PTHREAD_MUTEX_ERRORCHECK;
-		break;
-	case SCE_PTHREAD_MUTEX_RECURSIVE:
-		pthreadType = PTHREAD_MUTEX_RECURSIVE;
-		break;
-	case SCE_PTHREAD_MUTEX_NORMAL:
-		pthreadType = PTHREAD_MUTEX_NORMAL;
-		break;
-	case SCE_PTHREAD_MUTEX_ADAPTIVE_NP:
-		pthreadType = PTHREAD_MUTEX_ADAPTIVE_NP;
-		break;
-	default:
-		break;
-	}
-	return pthreadType;
-}
-
-int scePthreadMutexattrSettype(ScePthreadMutexattr *attr, int type)
-{
-	int ptype = sceMutexAttrTypeToPthreadType(type);
-	int err   = pthread_mutexattr_settype(attr, ptype);
-	return pthreadErrorToSceError(err);
-}
-
-
-/**********************************************************/
-// PTHREAD Attr
 
 int scePthreadAttrInit(ScePthreadAttr *attr) {
 	sce_pthread_attr_t *object = (sce_pthread_attr_t *) calloc(1, sizeof(sce_pthread_attr_t));
@@ -218,29 +150,31 @@ int scePthreadAttrSetaffinity(ScePthreadAttr *attr, SceKernelCpumask* mask) {
 	return pthreadErrorToSceError(err);
 }
 
-//int scePthreadAttrDestroy() {}
-//int scePthreadAttrGet() {}
-//int scePthreadAttrGetaffinity() {}
-//int scePthreadAttrGetdetachstate() {}
-//int scePthreadAttrGetguardsize() {}
-//int scePthreadAttrGetinheritsched() {}
-//int scePthreadAttrGetschedparam() {}
-//int scePthreadAttrGetschedpolicy() {}
-//int scePthreadAttrGetscope() {}
-//int scePthreadAttrGetstack() {}
-//int scePthreadAttrGetstackaddr() {}
-//int scePthreadAttrGetstacksize() {}
-//int scePthreadAttrInit() {}
-//int scePthreadAttrSetaffinity() {}
-//int scePthreadAttrSetcreatesuspend() {}
-//int scePthreadAttrSetdetachstate() {}
-//int scePthreadAttrSetguardsize() {}
-//int scePthreadAttrSetinheritsched() {}
-//int scePthreadAttrSetschedparam() {}
-//int scePthreadAttrSetschedpolicy() {}
-//int scePthreadAttrSetscope() {}
-//int scePthreadAttrSetstack() {}
-//int scePthreadAttrSetstackaddr() {}
-//int scePthreadAttrSetstacksize() {}
+#if 1
+//int scePthreadAttrDestroy(void) { raise(SIGTRAP); return SCE_OK; }
+//int scePthreadAttrGet(void) { raise(SIGTRAP); return SCE_OK; }
+//int scePthreadAttrGetaffinity(void) { raise(SIGTRAP); return SCE_OK; }
+int scePthreadAttrGetdetachstate(void) { raise(SIGTRAP); return SCE_OK; }
+int scePthreadAttrGetguardsize(void) { raise(SIGTRAP); return SCE_OK; }
+int scePthreadAttrGetinheritsched(void) { raise(SIGTRAP); return SCE_OK; }
+//int scePthreadAttrGetschedparam(void) { raise(SIGTRAP); return SCE_OK; }
+//int scePthreadAttrGetschedpolicy(void) { raise(SIGTRAP); return SCE_OK; }
+int scePthreadAttrGetscope(void) { raise(SIGTRAP); return SCE_OK; }
+int scePthreadAttrGetstack(void) { raise(SIGTRAP); return SCE_OK; }
+int scePthreadAttrGetstackaddr(void) { raise(SIGTRAP); return SCE_OK; }
+//int scePthreadAttrGetstacksize(void) { raise(SIGTRAP); return SCE_OK; }
+//int scePthreadAttrInit(void) { raise(SIGTRAP); return SCE_OK; }
+//int scePthreadAttrSetaffinity(void) { raise(SIGTRAP); return SCE_OK; }
+int scePthreadAttrSetcreatesuspend(void) { raise(SIGTRAP); return SCE_OK; }
+int scePthreadAttrSetdetachstate(void) { raise(SIGTRAP); return SCE_OK; }
+int scePthreadAttrSetguardsize(void) { raise(SIGTRAP); return SCE_OK; }
+int scePthreadAttrSetinheritsched(void) { raise(SIGTRAP); return SCE_OK; }
+//int scePthreadAttrSetschedparam(void) { raise(SIGTRAP); return SCE_OK; }
+//int scePthreadAttrSetschedpolicy(void) { raise(SIGTRAP); return SCE_OK; }
+int scePthreadAttrSetscope(void) { raise(SIGTRAP); return SCE_OK; }
+int scePthreadAttrSetstack(void) { raise(SIGTRAP); return SCE_OK; }
+int scePthreadAttrSetstackaddr(void) { raise(SIGTRAP); return SCE_OK; }
+//int scePthreadAttrSetstacksize(void) { raise(SIGTRAP); return SCE_OK; }
+#endif
 
 } // extern "C"

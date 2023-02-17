@@ -27,8 +27,82 @@ static void addMutexName(ScePthreadMutex *mutex, const char *name) {
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 extern "C" {
+
+int scePthreadMutexattrInit(ScePthreadMutexattr *attr)
+{
+	int err = pthread_mutexattr_init(attr);
+	if (err) {
+		raise(SIGTRAP);
+	}
+	return pthreadErrorToSceError(err);
+}
+
+
+int scePthreadMutexattrDestroy(ScePthreadMutexattr *attr)
+{
+	int err = pthread_mutexattr_destroy(attr);
+	if (err) {
+		raise(SIGTRAP);
+	}	
+	return pthreadErrorToSceError(err);
+}
+
+static int sceMutexAttrProtocolToPthreadType(int protocol)
+{
+	int pthreadType = 0;
+	switch (protocol)
+	{
+		case SCE_PTHREAD_PRIO_NONE: pthreadType = PTHREAD_PRIO_NONE; break;
+		case SCE_PTHREAD_PRIO_INHERIT: pthreadType = PTHREAD_PRIO_INHERIT; break;
+		case SCE_PTHREAD_PRIO_PROTECT: pthreadType = PTHREAD_PRIO_PROTECT; break;
+	}
+	return pthreadType;
+}
+
+int scePthreadMutexattrSetprotocol(ScePthreadMutexattr *attr, int protocol)
+{
+	int type = sceMutexAttrProtocolToPthreadType(protocol);
+	int err  = pthread_mutexattr_setprotocol(attr, type);
+	if (err) {
+		raise(SIGTRAP);
+	}	
+
+	return pthreadErrorToSceError(err);
+}
+
+static int sceMutexAttrTypeToPthreadType(int sceType)
+{
+	int pthreadType = -1;
+	switch (sceType)
+	{
+	case SCE_PTHREAD_MUTEX_ERRORCHECK:
+		pthreadType = PTHREAD_MUTEX_ERRORCHECK;
+		break;
+	case SCE_PTHREAD_MUTEX_RECURSIVE:
+		pthreadType = PTHREAD_MUTEX_RECURSIVE;
+		break;
+	case SCE_PTHREAD_MUTEX_NORMAL:
+		pthreadType = PTHREAD_MUTEX_NORMAL;
+		break;
+	case SCE_PTHREAD_MUTEX_ADAPTIVE_NP:
+		pthreadType = PTHREAD_MUTEX_ADAPTIVE_NP;
+		break;
+	default:
+		break;
+	}
+	return pthreadType;
+}
+
+int scePthreadMutexattrSettype(ScePthreadMutexattr *attr, int type)
+{
+	int ptype = sceMutexAttrTypeToPthreadType(type);
+	int err   = pthread_mutexattr_settype(attr, ptype);
+	return pthreadErrorToSceError(err);
+}
 
 int scePthreadMutexLock(ScePthreadMutex *mutex) {
     LOG("scePthreadMutexLock\n")
@@ -141,5 +215,35 @@ int scePthreadMutexTrylock(ScePthreadMutex *mutex)
 	int err = pthread_mutex_trylock(&((*mutex)->handle));
 	return pthreadErrorToSceError(err);
 }
+
+#if 1
+//int scePthreadMutexattrDestroy(void) { raise(SIGTRAP); return SCE_OK; }
+int scePthreadMutexattrGetkind(void) { raise(SIGTRAP); return SCE_OK; }
+int scePthreadMutexattrGetprioceiling(void) { raise(SIGTRAP); return SCE_OK; }
+int scePthreadMutexattrGetprotocol(void) { raise(SIGTRAP); return SCE_OK; }
+int scePthreadMutexattrGetpshared(void) { raise(SIGTRAP); return SCE_OK; }
+int scePthreadMutexattrGettype(void) { raise(SIGTRAP); return SCE_OK; }
+//int scePthreadMutexattrInit(void) { raise(SIGTRAP); return SCE_OK; }
+int scePthreadMutexattrInitForInternalLibc(void) { raise(SIGTRAP); return SCE_OK; }
+int scePthreadMutexattrSetkind(void) { raise(SIGTRAP); return SCE_OK; }
+int scePthreadMutexattrSetprioceiling(void) { raise(SIGTRAP); return SCE_OK; }
+//int scePthreadMutexattrSetprotocol(void) { raise(SIGTRAP); return SCE_OK; }
+int scePthreadMutexattrSetpshared(void) { raise(SIGTRAP); return SCE_OK; }
+//int scePthreadMutexattrSettype(void) { raise(SIGTRAP); return SCE_OK; }
+//int scePthreadMutexDestroy(void) { raise(SIGTRAP); return SCE_OK; }
+//int scePthreadMutexGetprioceiling(void) { raise(SIGTRAP); return SCE_OK; }
+int scePthreadMutexGetspinloops(void) { raise(SIGTRAP); return SCE_OK; }
+int scePthreadMutexGetyieldloops(void) { raise(SIGTRAP); return SCE_OK; }
+//int scePthreadMutexInit(void) { raise(SIGTRAP); return SCE_OK; }
+int scePthreadMutexInitForInternalLibc(void) { raise(SIGTRAP); return SCE_OK; }
+int scePthreadMutexIsowned(void) { raise(SIGTRAP); return SCE_OK; }
+//int scePthreadMutexLock(void) { raise(SIGTRAP); return SCE_OK; }
+int scePthreadMutexSetprioceiling(void) { raise(SIGTRAP); return SCE_OK; }
+int scePthreadMutexSetspinloops(void) { raise(SIGTRAP); return SCE_OK; }
+int scePthreadMutexSetyieldloops(void) { raise(SIGTRAP); return SCE_OK; }
+//int scePthreadMutexTimedlock(void) { raise(SIGTRAP); return SCE_OK; }
+//int scePthreadMutexTrylock(void) { raise(SIGTRAP); return SCE_OK; }
+//int scePthreadMutexUnlock(void) { raise(SIGTRAP); return SCE_OK; }
+#endif
 
 }
