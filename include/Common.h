@@ -26,4 +26,6 @@ static const long PGSZ = sysconf(_SC_PAGE_SIZE);
 #define ROUND_DOWN(x, SZ) ((x) - (x) % (SZ))
 #define ROUND_UP(x, SZ) ( (x) % (SZ) ? (x) - ((x) % (SZ)) + (SZ) : (x))
 
+#define PS4API __attribute__((sysv_abi))
+
 #endif

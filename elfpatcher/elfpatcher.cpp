@@ -693,17 +693,17 @@ static bool fixDynamicInfoForLinker(ElfPatcherContext &Ctx, FILE *elf, std::vect
             //case DT_INIT:
             //case DT_FINI:
             //case DT_INIT_ARRAY:
-            case DT_FINI_ARRAY:
-            case DT_INIT_ARRAYSZ:
-            case DT_FINI_ARRAYSZ:
-                break;
-
-            case DT_INIT:
-            //case DT_FINI:
-            case DT_INIT_ARRAY:
             //case DT_FINI_ARRAY:
             //case DT_INIT_ARRAYSZ:
             //case DT_FINI_ARRAYSZ:
+                //break;
+
+            case DT_INIT:
+            case DT_FINI:
+            case DT_INIT_ARRAY:
+            case DT_FINI_ARRAY:
+            case DT_INIT_ARRAYSZ:
+            case DT_FINI_ARRAYSZ:
 
             case DT_RPATH:
             case DT_SYMBOLIC:

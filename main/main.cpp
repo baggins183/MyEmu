@@ -181,7 +181,7 @@ int main(int argc, char **argv) {
     //}
 
     std::vector<void *> preloadHandles;
-    LibSearcher preloadSearcher({CmdArgs.preloadDirPath});
+    LibSearcher preloadSearcher({{CmdArgs.preloadDirPath, true}});
 
     // These may depend on ps4 libs (for wrapping sce functions by doing1 dlsym(RTLD_NEXT, ...))
     // So preload these only after patching dependencies
