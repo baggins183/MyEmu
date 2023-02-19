@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 
-#if 1
+#if 0
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-function"

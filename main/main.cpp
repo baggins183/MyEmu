@@ -30,6 +30,7 @@
 namespace fs = std::filesystem;
 #include <algorithm>
 #include <dlfcn.h>
+#include <link.h>
 #include <libgen.h>
 #include <sqlite3.h>
 #include <set>
@@ -108,6 +109,42 @@ bool mapEntryModuleIntoMemory(fs::path nativeExecutablePath) {
     return true;
 }
 
+static bool doInit(std::string libName, InitFiniInfo &initFiniInfo) {
+    void *dl = dlopen(libName.c_str(), RTLD_LAZY);
+    if ( !dl) {
+        goto error;
+    }
+    struct link_map *l;
+    if ( !dlinfo(dl, RTLD_DI_LINKMAP, &l)) {
+        goto error;
+    }
+
+    if ( !initFiniInfo.dt_preinit_array.empty()) {
+
+    }
+
+    if ( initFiniInfo.dt_init) {
+
+    }
+
+    if ( !initFiniInfo.dt_init_array.empty()) {
+        
+    }
+
+    return true;
+
+error:
+    char *err;
+    while ((err = dlerror())) {
+        printf("doInit: %s\n", err);
+    }
+
+    if (dl) {
+        dlclose(dl);
+    }
+    return false;
+}
+
 int main(int argc, char **argv) {
     // Make stdout unbuffered so crashes don't hide writes when stdout is redirected to file
     setvbuf(stdout, NULL, _IONBF, 0);    
@@ -132,13 +169,17 @@ int main(int argc, char **argv) {
         return -1;
     }    
 
-    std::set<std::string> dependencies = { CmdArgs.dlPath };
-    std::set<std::string> satisfied;
-    while (!dependencies.empty()) {
-        auto it = dependencies.begin();
-        fs::path libName = *it;
-        dependencies.erase(it);
+    std::vector<std::string> worklist = { CmdArgs.dlPath };
+    std::set<std::string> inWorklist;
+    inWorklist.insert(getNativeLibName(worklist[0]));
 
+    std::map<std::string, std::set<std::string>> depGraph;
+    std::map<std::string, InitFiniInfo> initFiniInfos;
+
+    uint i = 0; 
+    while (i < worklist.size()) {
+        fs::path libName = worklist[i];
+        ++i;
         auto oLibPath = findPathToSceLib(libName, Ctx);
         if ( !oLibPath) {
             fprintf(stderr, "Warning: unable to locate library %s\n", libName.c_str());
@@ -161,14 +202,25 @@ int main(int argc, char **argv) {
                 return -1;
             }
 
-            if ( !patchPs4Lib(Ctx, nativePath, dependencies)) {
+            if ( !patchPs4Lib(Ctx, nativePath)) {
                 return -1;
             }
         }
-        satisfied.insert(libName.filename());
-        for (auto &sat: satisfied) {
-            dependencies.erase(sat);
+        std::string nativeName = getNativeLibName(libName.filename());
+
+        initFiniInfos[nativeName] = Ctx.init_fini_info;
+        
+        for (auto &dep: Ctx.deps) {
+            depGraph[nativeName].insert(getNativeLibName(dep));
         }
+
+        for (auto &dep: Ctx.deps) {
+            if (inWorklist.find(getNativeLibName(dep)) == inWorklist.end()) {
+                worklist.push_back(dep);
+                inWorklist.insert(getNativeLibName(dep));
+            }
+        }
+        Ctx.reset();
     }
 
     fs::path firstLib = CmdArgs.nativeElfOutputDir;
@@ -214,6 +266,11 @@ int main(int argc, char **argv) {
             printf("(dlopen) %s\n", err);
         }
         return -1;
+    }
+
+    // do initialization for all libs, but not the entry module yet
+    for (uint i = worklist.size() - 1; i > 0; i++) {
+
     }
 
     for (auto handle: preloadHandles) {

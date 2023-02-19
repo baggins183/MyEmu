@@ -1,4 +1,6 @@
+#include "Elf/elf-sce.h"
 #include <algorithm>
+#include <elf.h>
 #include <elfpatcher/elfpatcher.h>
 #include <vector>
 #include <sys/stat.h>
@@ -367,7 +369,7 @@ static void createSymbolHashTable(DynamicTableInfo &info, std::vector<Section> &
 }
 
 // Build new dynamic sections from the PT_SCE_DYNLIBDATA segment
-static bool fixDynlibData(ElfPatcherContext &Ctx, FILE *elf, std::vector<Elf64_Phdr> &progHdrs, DynamicTableInfo &dynInfo, std::vector<Section> &sections, SectionMap &sMap, std::vector<Elf64_Dyn> &newDynEnts, std::set<std::string> &dependencies) {
+static bool fixDynlibData(ElfPatcherContext &Ctx, FILE *elf, std::vector<Elf64_Phdr> &progHdrs, DynamicTableInfo &dynInfo, std::vector<Section> &sections, SectionMap &sMap, std::vector<Elf64_Dyn> &newDynEnts) {
     uint phIdx = findPhdr(progHdrs, PT_SCE_DYNLIBDATA);
     std::vector<unsigned char> dynlibContents(progHdrs[phIdx].p_filesz);
 
@@ -475,7 +477,7 @@ static bool fixDynlibData(ElfPatcherContext &Ctx, FILE *elf, std::vector<Elf64_P
     for (uint64_t libStrOff: dynInfo.neededLibs) {
         fs::path ps4Name = reinterpret_cast<char *>(&dynlibContents[dynInfo.strtabOff + libStrOff]);
         if ( findPathToSceLib(ps4Name, Ctx)) {
-            dependencies.insert(ps4Name);
+            Ctx.deps.push_back(ps4Name);
         } else {
             fprintf(stderr, "Warning: couldn't find dependency %s needed by %s. Skipping\n", ps4Name.c_str(), TheDebugContext.currentPs4Lib.c_str());
             continue;
@@ -603,11 +605,28 @@ static bool fixDynlibData(ElfPatcherContext &Ctx, FILE *elf, std::vector<Elf64_P
     return true;
 }
 
+// Address should have corresponding contents in the ELF
+static Elf64_Off findFileOffForAddr(std::vector<Elf64_Phdr> &progHdrs, Elf64_Addr addr) {
+    Elf64_Phdr *containing = nullptr;
+    for (uint i = 0; i < progHdrs.size(); i++) {
+        Elf64_Phdr *phdr = &progHdrs[i];
+        if (phdr->p_vaddr <= addr 
+                    && addr < phdr->p_vaddr + phdr->p_filesz) {
+            containing = phdr;
+            break;
+        }
+    }
+
+    assert(containing);
+
+    return containing->p_offset + (addr - containing->p_vaddr);
+}
+
 // write new Segment for PT_DYNAMIC based on SCE dynamic entries
 // append to end of file
 // modify the progHdrs array
 // add new dynlibdata sections and update section map
-static bool fixDynamicInfoForLinker(ElfPatcherContext &Ctx, FILE *elf, std::vector<Elf64_Phdr> &progHdrs, std::vector<Section> &sections, SectionMap &sMap, std::set<std::string> &dependencies) {
+static bool fixDynamicInfoForLinker(ElfPatcherContext &Ctx, FILE *elf, std::vector<Elf64_Phdr> &progHdrs, std::vector<Section> &sections, SectionMap &sMap) {
     uint oldDynamicPIdx = findPhdr(progHdrs, PT_DYNAMIC);
     Elf64_Phdr DynPhdr = progHdrs[oldDynamicPIdx];
     Elf64_Shdr sHdr;
@@ -690,20 +709,31 @@ static bool fixDynamicInfoForLinker(ElfPatcherContext &Ctx, FILE *elf, std::vect
                 
 
             // https://docs.oracle.com/cd/E23824_01/html/819-0690/chapter2-55859.html#chapter2-48195
-            //case DT_INIT:
-            //case DT_FINI:
-            //case DT_INIT_ARRAY:
-            //case DT_FINI_ARRAY:
-            //case DT_INIT_ARRAYSZ:
-            //case DT_FINI_ARRAYSZ:
-                //break;
-
+            case DT_PREINIT_ARRAY:
+                Ctx.init_fini_info.preinit_array_base = dyn->d_un.d_ptr;
+                break;
+            case DT_PREINIT_ARRAYSZ:
+                Ctx.init_fini_info.dt_preinit_array.resize(dyn->d_un.d_val / sizeof(Elf64_Addr));
+                break;
             case DT_INIT:
-            case DT_FINI:
+                Ctx.init_fini_info.dt_init = dyn->d_un.d_ptr;
+                break;
             case DT_INIT_ARRAY:
-            case DT_FINI_ARRAY:
+                Ctx.init_fini_info.init_array_base = dyn->d_un.d_ptr;
+                break;
             case DT_INIT_ARRAYSZ:
+                Ctx.init_fini_info.dt_init_array.resize(dyn->d_un.d_val / sizeof(Elf64_Addr));
+                break;
+            case DT_FINI:
+                Ctx.init_fini_info.dt_fini = dyn->d_un.d_ptr;
+                break;
+            case DT_FINI_ARRAY:
+                Ctx.init_fini_info.fini_array_base = dyn->d_un.d_ptr;
+                break;
             case DT_FINI_ARRAYSZ:
+                Ctx.init_fini_info.dt_fini_array.resize(dyn->d_un.d_val / sizeof(Elf64_Addr));
+                break;
+            // Don't add dynents for these, since they take different parameters
 
             case DT_RPATH:
             case DT_SYMBOLIC:
@@ -714,8 +744,6 @@ static bool fixDynamicInfoForLinker(ElfPatcherContext &Ctx, FILE *elf, std::vect
             case DT_FLAGS:
                 //https://docs.oracle.com/cd/E23824_01/html/819-0690/chapter6-42444.html#chapter7-tbl-5            
                 // should be DF_TEXTREL
-            case DT_PREINIT_ARRAY:
-            case DT_PREINIT_ARRAYSZ:
             case DT_SYMTAB_SHNDX:
             case DT_RELRSZ:
             case DT_RELR:
@@ -860,6 +888,22 @@ static bool fixDynamicInfoForLinker(ElfPatcherContext &Ctx, FILE *elf, std::vect
             }
         }
     }
+
+    // Extract init, fini info from dynents
+    if ( !Ctx.init_fini_info.dt_preinit_array.empty()) {
+        fseek(elf, findFileOffForAddr(progHdrs, Ctx.init_fini_info.preinit_array_base.value()), SEEK_SET);
+        fread(Ctx.init_fini_info.dt_preinit_array.data(), sizeof(Elf64_Addr), Ctx.init_fini_info.dt_preinit_array.size(), elf);
+    }
+    if ( !Ctx.init_fini_info.dt_init_array.empty()) {
+        fseek(elf, findFileOffForAddr(progHdrs, Ctx.init_fini_info.init_array_base.value()), SEEK_SET);
+        fread(Ctx.init_fini_info.dt_init_array.data(), sizeof(Elf64_Addr), Ctx.init_fini_info.dt_init_array.size(), elf);
+    }
+    if ( !Ctx.init_fini_info.dt_fini_array.empty()) {
+        fseek(elf, findFileOffForAddr(progHdrs, Ctx.init_fini_info.fini_array_base.value()), SEEK_SET);
+        fread(Ctx.init_fini_info.dt_fini_array.data(), sizeof(Elf64_Addr), Ctx.init_fini_info.dt_fini_array.size(), elf);
+    }    
+
+    //
     
     Elf64_Phdr *relroHeader = &progHdrs[1];
     uint64_t relroVA = relroHeader->p_vaddr;
@@ -908,7 +952,7 @@ static bool fixDynamicInfoForLinker(ElfPatcherContext &Ctx, FILE *elf, std::vect
     };
     sections.emplace_back(sHdr);    
 
-    if ( !fixDynlibData(Ctx, elf, progHdrs, dynInfo, sections, sMap, newDynEnts, dependencies)) {
+    if ( !fixDynlibData(Ctx, elf, progHdrs, dynInfo, sections, sMap, newDynEnts)) {
         return false;
     };
 
@@ -954,7 +998,31 @@ static bool fixDynamicInfoForLinker(ElfPatcherContext &Ctx, FILE *elf, std::vect
     };
     sections.emplace_back(sHdr);
 
+    Elf64_Phdr textSegment = progHdrs[0];
+    Elf64_Phdr dataSegment = progHdrs[2];
+    // Add .text, .data sections so hopefully gdb doesnt bug out
+    // Probably not accurate, bigger than in actuality
+    sHdr = {
+        .sh_name = appendToStrtab(sections[sMap.shstrtabIdx], ".text"),
+        .sh_type = SHT_PROGBITS,
+        .sh_flags = SHF_ALLOC | SHF_EXECINSTR,
+        .sh_addr = textSegment.p_vaddr,
+        .sh_offset = textSegment.p_offset,
+        .sh_size = textSegment.p_filesz,
+        .sh_addralign = 16
+    };
+    sections.emplace_back(sHdr);
 
+    sHdr = {
+        .sh_name = appendToStrtab(sections[sMap.shstrtabIdx], ".data"),
+        .sh_type = SHT_PROGBITS,
+        .sh_flags = SHF_ALLOC | SHF_WRITE,
+        .sh_addr = dataSegment.p_vaddr,
+        .sh_offset = dataSegment.p_offset,
+        .sh_size = dataSegment.p_filesz,
+        .sh_addralign = 8
+    };
+    sections.emplace_back(sHdr);    
 
     // TODO add sections for gotplt, relro, other sections that aren't changing location but are needed
 
@@ -969,20 +1037,6 @@ static bool fixDynamicInfoForLinker(ElfPatcherContext &Ctx, FILE *elf, std::vect
 
 
     return true;
-}
-
-
-static bool isLoadableSegType(Elf64_Word p_type) {
-    switch (p_type) {
-        case PT_LOAD:
-        //case PT_GNU_RELRO:
-        //case PT_DYNAMIC:
-        //case PT_TLS:
-            return true;
-
-        default:
-            return false;
-    }
 }
 
 static void finalizeProgramHeaders(std::vector<Elf64_Phdr> &progHdrs) {
@@ -1006,12 +1060,6 @@ static void finalizeProgramHeaders(std::vector<Elf64_Phdr> &progHdrs) {
             case PT_SCE_LIBVERSION:
             case PT_SCE_RELA:	
             case PT_SCE_COMMENT:
-                /*
-                if (pHdr.p_memsz) {
-                    pHdr.p_type = PT_LOAD;
-                } else {
-                    pHdr.p_type = PT_NULL;
-                }*/
                 break;
             default:
                 break;
@@ -1041,23 +1089,13 @@ static void finalizeProgramHeaders(std::vector<Elf64_Phdr> &progHdrs) {
         pHdr.p_flags = PF_X | PF_W | PF_R;
     }
 
-    std::stable_sort(progHdrs.begin(), progHdrs.end(), [](const Elf64_Phdr& left, const Elf64_Phdr& right){
-        if (isLoadableSegType(left.p_type) && isLoadableSegType(right.p_type)) {
-            if (left.p_vaddr == right.p_vaddr) {
-                return left.p_memsz >= right.p_memsz;
-            }
-            return left.p_vaddr <= right.p_vaddr;
-        }
-        return isLoadableSegType(left.p_type);
-    });
-
     //printf("final headers:\n");
     //for (Elf64_Phdr &pHdr: progHdrs) {
         //printf("\t%s\n", to_string((ProgramSegmentType) pHdr.p_type).c_str());
     //}
 }
 
-bool patchPs4Lib(ElfPatcherContext &Ctx, std::string elfPath, std::set<std::string> &dependencies) {
+bool patchPs4Lib(ElfPatcherContext &Ctx, std::string elfPath) {
     std::vector<Elf64_Phdr> progHdrs;
     // in a Ps4 module, these Dyn Ents are in the DYNAMIC segment/.dynamic section,
     // and describe the DYNLIBDATA segment
@@ -1110,7 +1148,7 @@ bool patchPs4Lib(ElfPatcherContext &Ctx, std::string elfPath, std::set<std::stri
     // Copy parts of PT_SCE_DYNLIBDATA to new Segment, such as unhashed strings
     // Fix up syms, relas, strings
     // Crate relevant sections for dlopen
-    if ( !fixDynamicInfoForLinker(Ctx, f, progHdrs, sections, sMap, dependencies)) {
+    if ( !fixDynamicInfoForLinker(Ctx, f, progHdrs, sections, sMap)) {
         return false;
     }
     // Change OS specific type

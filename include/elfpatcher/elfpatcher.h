@@ -4,6 +4,7 @@
 #include "Common.h"
 
 #include <cstring>
+#include <elf.h>
 #include <filesystem>
 namespace fs = std::filesystem;
 #include <optional>
@@ -149,6 +150,21 @@ struct Segment {
     }    
 };
 
+struct InitFiniInfo {
+    std::optional<Elf64_Addr> preinit_array_base;
+    std::vector<Elf64_Addr> dt_preinit_array;
+
+    std::optional<Elf64_Addr> dt_init;
+
+    std::optional<Elf64_Addr> init_array_base;
+    std::vector<Elf64_Addr> dt_init_array;
+
+    std::optional<Elf64_Addr> dt_fini;
+
+    std::optional<Elf64_Addr> fini_array_base;
+    std::vector<Elf64_Addr> dt_fini_array;
+};
+
 struct ElfPatcherContext {
     fs::path pkgdumpPath;
     LibSearcher ps4LibSearcher;
@@ -160,6 +176,12 @@ struct ElfPatcherContext {
     fs::path hashdbPath;
     bool purgeElfs;
 
+    // Per-object state
+    // dependencies (DT_NEEDED) on the processed ELF. Uses original names (non-native)
+    std::vector<std::string> deps;
+    // info about initialization and finalization functions
+    InitFiniInfo init_fini_info;
+
     ElfPatcherContext(std::string ps4libsPath, std::string preloadDir, std::string hashdbPath, std::string nativeElfOutputDir, std::string pkgdumpPath, bool purgeElfs):
             pkgdumpPath(pkgdumpPath),
             ps4LibSearcher({{pkgdumpPath, true}, {ps4libsPath, false}}),
@@ -168,7 +190,6 @@ struct ElfPatcherContext {
             hashdbPath(hashdbPath),
             purgeElfs(purgeElfs)
     {
-
         std::string ldLibraryPath = getenv("LD_LIBRARY_PATH");
         assert( ldLibraryPath.find(preloadDir) != ldLibraryPath.npos);
 
@@ -178,6 +199,12 @@ struct ElfPatcherContext {
                 preloadNames.push_back(dirent.path().filename());
             }
         }
+    }
+
+    // Reset per-object state
+    void reset() {
+        init_fini_info = InitFiniInfo(); 
+        deps.clear();
     }
 };
 
@@ -208,6 +235,6 @@ std::optional<fs::path> findPathToSceLib(fs::path ps4LibName, ElfPatcherContext 
 // Instead it returns the names of dependencies in "dependencies"
 // These are the ps4/sce ELF names and not the canonical patched names.
 // To be able to dlopen() or exec() this, all the recursive dependencies should be patched beforehand 
-bool patchPs4Lib(ElfPatcherContext &Ctx, std::string elfPath, std::set<std::string> &dependencies);
+bool patchPs4Lib(ElfPatcherContext &Ctx, std::string elfPath);
 
 #endif // _ELF_PATCHER_H_
