@@ -38,6 +38,8 @@ namespace fs = std::filesystem;
 
 #include "elfpatcher/elfpatcher.h"
 
+#include <sys/prctl.h>
+
 const std::string ebootPath = "eboot.bin";
 
 struct {
