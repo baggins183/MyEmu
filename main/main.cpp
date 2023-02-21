@@ -39,6 +39,8 @@ namespace fs = std::filesystem;
 #include "elfpatcher/elfpatcher.h"
 
 #include <sys/prctl.h>
+// parsing the /proc/<pid>/map files
+#include <pmparser.h>
 
 const std::string ebootPath = "eboot.bin";
 

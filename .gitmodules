@@ -1,0 +1,3 @@
+[submodule "external/proc_maps_parser/proc_maps_parser"]
+	path = external/proc_maps_parser/proc_maps_parser
+	url = https://github.com/ouadev/proc_maps_parser.git
