@@ -8,9 +8,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <system_error>
-#ifdef __linux
 #include <cstdint>
-#endif
 #include <cstdlib>
 #include <cstring>
 #include <stdio.h>
@@ -25,6 +23,8 @@
 #include <map>
 #include <utility>
 #include <array>
+#include <limits.h>
+#include <atomic>
 
 #include <filesystem>
 namespace fs = std::filesystem;
@@ -38,11 +38,15 @@ namespace fs = std::filesystem;
 
 #include "elfpatcher/elfpatcher.h"
 
+#include <signal.h>
 #include <sys/prctl.h>
 // parsing the /proc/<pid>/map files
+extern "C" {
 #include <pmparser.h>
+}
 
 const std::string ebootPath = "eboot.bin";
+char syscall_dispatch_switch;
 
 struct {
     std::string currentPs4Lib;
@@ -140,7 +144,13 @@ static bool callInitFunctions(std::string ps4Name, InitFiniInfo &initFiniInfo) {
     if ( dlinfo(dl, RTLD_DI_LINKMAP, &l)) {
         success = false;
         goto error;
-    }  
+    }
+    dlclose(dl);
+    dl = nullptr;
+    // decrements ref count, but should stay loaded
+
+    syscall_dispatch_switch = SYSCALL_DISPATCH_FILTER_BLOCK;
+    std::atomic_thread_fence(std::memory_order_seq_cst);
 
     if ( !initFiniInfo.dt_preinit_array.empty()) {
         for (uint i = 0; i < initFiniInfo.dt_preinit_array.size(); i++) {
@@ -158,6 +168,9 @@ static bool callInitFunctions(std::string ps4Name, InitFiniInfo &initFiniInfo) {
         }
     }
 
+    syscall_dispatch_switch = SYSCALL_DISPATCH_FILTER_ALLOW;
+    std::atomic_thread_fence(std::memory_order_seq_cst);   
+
 error:
     char *err;
     while ((err = dlerror())) {
@@ -168,6 +181,59 @@ error:
         dlclose(dl);
     }
     return success;
+}
+
+void oob_syscall_handler(int signum) {
+    int a = 5;
+    int b = a * 10 + 6;
+    printf("in handler\n");
+}
+
+// Restrict syscalls to libc.so.x
+// Syscalls from other memory regions will be handled by a translation layer
+// This is to translate FreeBSD syscalls to linux, and handle differences in how the ps4 libs
+// interpret syscall errors
+static bool setupSyscallTrampoline() {
+    // parse /proc/self/map to get the start and end address of libc.so.x
+    procmaps_struct *pm;
+    // errno is 2 on entry here, should check why
+    procmaps_iterator *it = pmparser_parse(-1);
+
+    uint64_t addr_start = 0;
+    uint64_t addr_end = 0;
+    bool found = false;
+    while ((pm = pmparser_next(it))) {
+        fs::path soPath(pm->pathname);
+        if ((soPath.has_stem() && soPath.stem() == "libc.so")
+//                || (soPath.has_stem() && soPath.filename().stem() == "ld-linux-x86-64.so)"
+        ) {
+            if ( !found) {
+                addr_start = (uint64_t) pm->addr_start;
+                addr_end = (uint64_t) pm->addr_end;
+            } else {
+                addr_start = std::min(addr_start, (uint64_t) pm->addr_start);
+                addr_end = std::max(addr_end, (uint64_t) pm->addr_end);
+            }
+            found = true;
+        }
+    }
+
+    if ( !found) {
+        return false;
+    }
+
+    // TODO register exception handler
+    //signal(SIGSYS, oob_syscall_handler);
+    syscall_dispatch_switch = SYSCALL_DISPATCH_FILTER_BLOCK;
+    int err = prctl(PR_SET_SYSCALL_USER_DISPATCH, PR_SYS_DISPATCH_ON, addr_start, (addr_end - addr_start + 1), &syscall_dispatch_switch);
+    //int err = 0;
+
+    if (err) {
+        printf("prctl error: %s", strerror(errno));
+        return false;
+    }
+
+    return true;
 }
 
 int main(int argc, char **argv) {
@@ -263,6 +329,19 @@ int main(int argc, char **argv) {
     std::vector<void *> preloadHandles;
     LibSearcher preloadSearcher({{CmdArgs.preloadDirPath, true}});
 
+    printf("A\n");
+
+    setupSyscallTrampoline();
+    //syscall_dispatch_switch = SYSCALL_DISPATCH_FILTER_BLOCK;
+    // Leave syscall filter off for now because it seems to mess with dlopen, which must be making syscalls directly
+    syscall_dispatch_switch = SYSCALL_DISPATCH_FILTER_ALLOW;
+    // Don't think fence is necessary, but keep for now
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    // This below errors when signal handler not provided (good).
+    // Need to now place trampoline code in region with libc
+    //asm volatile ("movq $39, %%rax; syscall" ::: "rax");
+    //asm volatile ("movq $39, %%rax; syscall" ::: "rax", "memory");
+
     // These may depend on ps4 libs (for wrapping sce functions by doing1 dlsym(RTLD_NEXT, ...))
     // So preload these only after patching dependencies
     // Note RTLD_GLOBAL: these symbols will take precedence over ps4 symbols in lookups/relocs
@@ -281,6 +360,8 @@ int main(int argc, char **argv) {
         preloadHandles.push_back(handle);
     }
 
+    printf("B\n");
+
     // Load ps4 module
     dl = dlopen(firstLib.c_str(), RTLD_LAZY);
     if (!dl) {
@@ -290,6 +371,8 @@ int main(int argc, char **argv) {
         }
         return -1;
     }
+
+    // TODO need to actually topological sort the dependencies
 
     // Do initialization for all libs, but not the entry module yet
     // Do reverse order of deps
