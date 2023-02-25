@@ -24,7 +24,7 @@ extern "C" {
 // Note: I saw this crash on a code path through libSceSysModule's DT_INIT function
 // Implementing this leaves a crash in sceKernelGetModuleInfo
 sce_module_handle_t sceKernelGetExecutableModuleHandle(void) {
-    return { NULL };
+    return { 0 };
 }
 
 // Defintely takes 2 args, not more.

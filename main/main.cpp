@@ -45,16 +45,34 @@ extern "C" {
 #include <pmparser.h>
 }
 
+#include "libFreeBsdCompat/freebsd_compat.h"
+
+extern void (*_syscall_handler)(int signum);
+
 const std::string ebootPath = "eboot.bin";
-char syscall_dispatch_switch;
+
+////////////////////////////////////////////////////////////////
+
+char syscall_dispatch_switch = SYSCALL_DISPATCH_FILTER_ALLOW;
+
+void block_syscalls() {
+    syscall_dispatch_switch = SYSCALL_DISPATCH_FILTER_BLOCK;
+    std::atomic_thread_fence(std::memory_order_seq_cst);    
+}
+
+void allow_syscalls() {
+    syscall_dispatch_switch = SYSCALL_DISPATCH_FILTER_ALLOW;
+    std::atomic_thread_fence(std::memory_order_seq_cst);    
+}
+
+////////////////////////////////////////////////////////////////
 
 struct {
     std::string currentPs4Lib;
 } TheDebugContext;
 
 struct CmdConfig {
-    //std::string pkgDumpPath;
-    std::string dlPath;
+    std::string entryModule; // TODO remove, this implied pkgdumpPath/eboot.bin
     std::string hashdbPath;
     std::string nativeElfOutputDir;
     std::string pkgdumpPath;
@@ -99,13 +117,13 @@ bool parseCmdArgs(int argc, char **argv) {
     }
 
     //CmdArgs.pkgDumpPath = argv[argc - 1];
-    CmdArgs.dlPath = argv[argc - 1];
+    CmdArgs.entryModule = argv[argc - 1];
     return true;
 }
 
 struct MappedRange {
-    uint64_t baseVA;
-    uint64_t nPages;
+    uint64_t base_addr;
+    size_t n_pages;
 };
 
 bool mapEntryModuleIntoMemory(fs::path nativeExecutablePath) {
@@ -114,16 +132,11 @@ bool mapEntryModuleIntoMemory(fs::path nativeExecutablePath) {
         return false;
     }
 
+    // TODO
+
+    fclose(elf);
     return true;
 }
-
-typedef int (*PFN_PS4_INIT_FUNC) (int, const char **, char **);
-
-struct Ps4InitFuncArgs {
-    int argc;
-    char **argv;
-    char **environ;
-};
 
 static bool callInitFunctions(std::string ps4Name, InitFiniInfo &initFiniInfo) {
     bool success = true;
@@ -149,8 +162,7 @@ static bool callInitFunctions(std::string ps4Name, InitFiniInfo &initFiniInfo) {
     dl = nullptr;
     // decrements ref count, but should stay loaded
 
-    syscall_dispatch_switch = SYSCALL_DISPATCH_FILTER_BLOCK;
-    std::atomic_thread_fence(std::memory_order_seq_cst);
+    block_syscalls();
 
     if ( !initFiniInfo.dt_preinit_array.empty()) {
         for (uint i = 0; i < initFiniInfo.dt_preinit_array.size(); i++) {
@@ -168,8 +180,7 @@ static bool callInitFunctions(std::string ps4Name, InitFiniInfo &initFiniInfo) {
         }
     }
 
-    syscall_dispatch_switch = SYSCALL_DISPATCH_FILTER_ALLOW;
-    std::atomic_thread_fence(std::memory_order_seq_cst);   
+    allow_syscalls();
 
 error:
     char *err;
@@ -183,18 +194,20 @@ error:
     return success;
 }
 
-void oob_syscall_handler(int signum) {
-    int a = 5;
-    int b = a * 10 + 6;
-    printf("in handler\n");
-}
-
 // Restrict syscalls to libc.so.x
 // Syscalls from other memory regions will be handled by a translation layer
 // This is to translate FreeBSD syscalls to linux, and handle differences in how the ps4 libs
 // interpret syscall errors
 static bool setupSyscallTrampoline() {
-    // parse /proc/self/map to get the start and end address of libc.so.x
+    // parse /proc/self/map to find the ranges to give to the SYSCALL_USER_DISPATCH prctl call
+    int err;
+    
+    // Also record all the presently mapped pages
+    // We will also mmap the gaps so future libraries (ps4 elfs) can't occupy them
+    // We need to reserve a range that includes libc.so and the syscall trampoline code,
+    // where syscalls can execute without being blocked by the user dispatch filter
+    std::vector<MappedRange> occupiedRanges;
+
     procmaps_struct *pm;
     // errno is 2 on entry here, should check why
     procmaps_iterator *it = pmparser_parse(-1);
@@ -204,29 +217,86 @@ static bool setupSyscallTrampoline() {
     bool found = false;
     while ((pm = pmparser_next(it))) {
         fs::path soPath(pm->pathname);
-        if ((soPath.has_stem() && soPath.stem() == "libc.so")
-//                || (soPath.has_stem() && soPath.filename().stem() == "ld-linux-x86-64.so)"
-        ) {
-            if ( !found) {
-                addr_start = (uint64_t) pm->addr_start;
-                addr_end = (uint64_t) pm->addr_end;
-            } else {
-                addr_start = std::min(addr_start, (uint64_t) pm->addr_start);
-                addr_end = std::max(addr_end, (uint64_t) pm->addr_end);
+        if (soPath.has_filename()) {
+            if ((soPath.has_stem() && soPath.stem() == "libc.so") 
+                    ||  soPath.filename() == "libFreeBsdCompat.so") 
+            {
+                if ( !found) {
+                    addr_start = (uint64_t) pm->addr_start;
+                    addr_end = (uint64_t) pm->addr_end;
+                } else {
+                    addr_start = std::min(addr_start, (uint64_t) pm->addr_start);
+                    addr_end = std::max(addr_end, (uint64_t) pm->addr_end);
+                }
+                found = true;
             }
-            found = true;
         }
+
+        assert(( (uint64_t)pm->addr_end - (uint64_t)pm->addr_start ) % PGSZ == 0);
+        occupiedRanges.push_back({ (uint64_t) pm->addr_start, ((uint64_t)pm->addr_end - (uint64_t)pm->addr_start) / PGSZ});
     }
 
     if ( !found) {
         return false;
     }
 
-    // TODO register exception handler
-    //signal(SIGSYS, oob_syscall_handler);
-    syscall_dispatch_switch = SYSCALL_DISPATCH_FILTER_BLOCK;
-    int err = prctl(PR_SET_SYSCALL_USER_DISPATCH, PR_SYS_DISPATCH_ON, addr_start, (addr_end - addr_start + 1), &syscall_dispatch_switch);
-    //int err = 0;
+    std::sort(occupiedRanges.begin(), occupiedRanges.end(), [](const auto &a, const auto &b) {
+        return a.base_addr < b.base_addr;
+    });
+
+    uint pos = 0;
+    for (; pos < occupiedRanges.size(); pos++) {
+        if (occupiedRanges[pos].base_addr == addr_start) {
+            break;
+        }
+    }
+    assert(pos < occupiedRanges.size());
+
+    // mmap the gaps between libc and our trampoline so ps4 libs can't be loaded there
+    while (pos < occupiedRanges.size() - 1) {
+        MappedRange &first = occupiedRanges[pos];
+        MappedRange &snd = occupiedRanges[pos + 1];
+        
+        size_t page_gap = (snd.base_addr - first.base_addr) / PGSZ - first.n_pages;
+        if (page_gap > 0) {
+            uint64_t map_addr = first.base_addr + PGSZ * first.n_pages;
+            uint64_t map_size = PGSZ * page_gap;
+            assert(map_addr % PGSZ == 0);
+            void * mmap_result;
+            mmap_result = mmap((void *) map_addr, map_size, PROT_NONE, MAP_FIXED_NOREPLACE | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (mmap_result == MAP_FAILED) {
+                switch (errno) {
+                    case EEXIST:
+                        break;
+                    default:
+                        fprintf(stderr, "mmap failed: %s", strerror(errno));
+                        return false;
+                }
+            }
+        }
+        // We've filled between libc and the trampoline, break
+        if (snd.base_addr + PGSZ * snd.n_pages == addr_end) {
+            break;   
+        }
+
+        ++pos;
+    }
+
+	struct sigaction action;
+    (void)memset(&action, 0, sizeof action);
+	action.sa_sigaction = freebsd_syscall_handler;
+	(void)sigemptyset(&action.sa_mask);
+	(void)sigfillset(&action.sa_mask);
+	(void)sigdelset(&action.sa_mask, SIGSYS);
+	action.sa_flags = SA_SIGINFO;
+
+	err = sigaction(SIGSYS, &action, NULL);
+    if (err) {
+        printf("sigaction error: %s", strerror(errno));
+    }
+
+    err = prctl(PR_SET_SYSCALL_USER_DISPATCH, PR_SYS_DISPATCH_ON, addr_start, (addr_end - addr_start), &syscall_dispatch_switch);
+    allow_syscalls();
 
     if (err) {
         printf("prctl error: %s", strerror(errno));
@@ -234,6 +304,11 @@ static bool setupSyscallTrampoline() {
     }
 
     return true;
+}
+
+std::vector<std::string> findTopologicalLibOrder(std::vector<std::string> &libs, std::map<std::string, std::set<std::string>> &dependsOn) {
+    // TODO
+    return {};
 }
 
 int main(int argc, char **argv) {
@@ -260,11 +335,11 @@ int main(int argc, char **argv) {
         return -1;
     }    
 
-    std::vector<std::string> worklist = { CmdArgs.dlPath };
+    std::vector<std::string> worklist = { CmdArgs.entryModule };
     std::set<std::string> inWorklist;
     inWorklist.insert(getNativeLibName(worklist[0]));
 
-    std::map<std::string, std::set<std::string>> depGraph;
+    std::map<std::string, std::set<std::string>> dependsOn;
     std::map<std::string, InitFiniInfo> initFiniInfos;
 
     uint i = 0; 
@@ -278,13 +353,13 @@ int main(int argc, char **argv) {
         }
 
         fs::path libPath = oLibPath.value();
-
         fs::path nativePath = CmdArgs.nativeElfOutputDir; 
         nativePath /= getNativeLibName(libPath);
 
         struct stat buf;
         bool exists = !stat(nativePath.c_str(), &buf);
         if (CmdArgs.purgeElfs || !exists) {
+            // TODO use C++
             std::string cmd = "cp " + libPath.string() + " " + nativePath.string();
             system(cmd.c_str());
 
@@ -305,7 +380,7 @@ int main(int argc, char **argv) {
         initFiniInfos[nativeName] = Ctx.init_fini_info;
         
         for (auto &dep: Ctx.deps) {
-            depGraph[nativeName].insert(getNativeLibName(dep));
+            dependsOn[nativeName].insert(getNativeLibName(dep));
         }
 
         for (auto &dep: Ctx.deps) {
@@ -317,38 +392,13 @@ int main(int argc, char **argv) {
         Ctx.reset();
     }
 
-    fs::path firstLib = CmdArgs.nativeElfOutputDir;
-    firstLib /= getNativeLibName(CmdArgs.dlPath);
-
-    fs::path entryModule = CmdArgs.nativeElfOutputDir;
-    entryModule /= getNativeLibName("eboot.bin");
-    //if ( !mapEntryModuleIntoMemory(entryModule)) {
-    //    return -1;
-    //}
-
+    // Preload compatability libs that override sce functions in symbol order
     std::vector<void *> preloadHandles;
     LibSearcher preloadSearcher({{CmdArgs.preloadDirPath, true}});
-
-    printf("A\n");
-
-    setupSyscallTrampoline();
-    //syscall_dispatch_switch = SYSCALL_DISPATCH_FILTER_BLOCK;
-    // Leave syscall filter off for now because it seems to mess with dlopen, which must be making syscalls directly
-    syscall_dispatch_switch = SYSCALL_DISPATCH_FILTER_ALLOW;
-    // Don't think fence is necessary, but keep for now
-    std::atomic_thread_fence(std::memory_order_seq_cst);
-    // This below errors when signal handler not provided (good).
-    // Need to now place trampoline code in region with libc
-    //asm volatile ("movq $39, %%rax; syscall" ::: "rax");
-    //asm volatile ("movq $39, %%rax; syscall" ::: "rax", "memory");
-
-    // These may depend on ps4 libs (for wrapping sce functions by doing1 dlsym(RTLD_NEXT, ...))
-    // So preload these only after patching dependencies
-    // Note RTLD_GLOBAL: these symbols will take precedence over ps4 symbols in lookups/relocs
     for (std::string preload: Ctx.preloadNames) {
         auto preloadPath = preloadSearcher.findLibrary(preload);
         assert(preloadPath);
-
+        // Note RTLD_GLOBAL: these symbols will take precedence over ps4 symbols in lookups/relocs
         void *handle = dlopen(preloadPath->c_str(), RTLD_LAZY | RTLD_GLOBAL);
         if (!handle) {
             char *err;
@@ -360,28 +410,41 @@ int main(int argc, char **argv) {
         preloadHandles.push_back(handle);
     }
 
-    printf("B\n");
-
     // Load ps4 module
+    fs::path firstLib = CmdArgs.nativeElfOutputDir;
+    firstLib /= getNativeLibName(CmdArgs.entryModule);
     dl = dlopen(firstLib.c_str(), RTLD_LAZY);
     if (!dl) {
         char *err;
         while ((err = dlerror())) {
-            printf("(dlopen) %s\n", err);
+            fprintf(stderr, "(dlopen) %s\n", err);
         }
         return -1;
     }
 
-    // TODO need to actually topological sort the dependencies
+    // Setup handler trampoline to handle syscalls inside sce code
+    // Only syscalls from libc and the handler itself will execute unfiltered
+    setupSyscallTrampoline();    
 
-    // Do initialization for all libs, but not the entry module yet
-    // Do reverse order of deps
+    // Call initialization functions for all sce libraries.
+    // Do independent libs first, then those that depend on them, etc
+    // Some cycles exist though
     // TODO does preinit go in forward order?
-    //for (uint i = worklist.size() - 1; i > 0; i--) {
-    for (uint i = 1; i >= 0; i--) {
-        fs::path nativeLibName = getNativeLibName(worklist[i]);
-        callInitFunctions(worklist[i], initFiniInfos[nativeLibName]);
+    // Skip entry module in topological order (eboot.bin)
+    std::vector<std::string> sceLibs(worklist.begin() + 1, worklist.end());
+    std::vector<std::string> topologicalLibOrder = findTopologicalLibOrder(sceLibs, dependsOn);
+    for (uint i = 0; i < topologicalLibOrder.size(); i++) {
+        fs::path nativeLibName = getNativeLibName(topologicalLibOrder[i]);
+        callInitFunctions(topologicalLibOrder[i], initFiniInfos[nativeLibName]);
     }
+
+    fs::path entryModule = CmdArgs.nativeElfOutputDir;
+    entryModule /= getNativeLibName("eboot.bin");
+    if ( !mapEntryModuleIntoMemory(entryModule)) {
+        return -1;
+    }
+
+    // TODO launch ps4 entry point thread
 
     for (auto handle: preloadHandles) {
         dlclose(handle);

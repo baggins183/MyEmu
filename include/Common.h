@@ -21,6 +21,15 @@ typedef struct {
     const char *argv[1];
 } Ps4EntryArg;
 
+// functions in DT_PREINIT, DT_INIT, DT_INIT_ARRAY
+typedef int (*PFN_PS4_INIT_FUNC) (int, const char **, char **);
+
+struct Ps4InitFuncArgs {
+    int argc;
+    char **argv;
+    char **environ;
+};
+
 static const long PGSZ = sysconf(_SC_PAGE_SIZE);
 
 #define ROUND_DOWN(x, SZ) ((x) - (x) % (SZ))

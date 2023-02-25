@@ -11,7 +11,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 
-project(MyEmu)
+project(MyEmu C CXX ASM)
 
 include_directories("include/")
 include_directories("external/proc_maps_parser/proc_maps_parser/include/")
