@@ -4,7 +4,7 @@
 extern "C" {
 
 void freebsd_syscall_handler(int num, siginfo_t *info, void *ucontext) {
-    printf("In Syscall Handler !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
+    fprintf(stderr, "In Syscall Handler !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
 }
 
 }

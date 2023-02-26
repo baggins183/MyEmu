@@ -1,1 +1,0 @@
-add_subdirectory(proc_maps_parser)

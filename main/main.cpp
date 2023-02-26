@@ -42,7 +42,7 @@
 #include <sys/prctl.h>
 // parsing the /proc/<pid>/map files
 extern "C" {
-#include <pmparser.h>
+#include "pmparser.h"
 }
 
 #include "libFreeBsdCompat/freebsd_compat.h"
@@ -481,6 +481,22 @@ int main(int argc, char **argv) {
         preloadHandles.push_back(handle);
     }
 
+    // Setup trampoline to handle syscalls coming from inside sce code
+    // Only syscalls from libc and the handler itself will execute unfiltered
+    // Needs to be before dlopen is called on any sce lib, because we need to
+    // reserve the range between libc and the handler function, with mmap, so sce libs
+    // don't sneak in
+    setupSyscallTrampoline();   
+
+    // Test trampoline: 
+    //block_syscalls();
+    //asm volatile (
+        //"mov $39, %%rax\n"
+        //"syscall\n"
+        //::: "rax"
+    //);
+    //allow_syscalls();
+
     // Load ps4 module
     fs::path firstLib = CmdArgs.nativeElfOutputDir;
     firstLib /= getNativeLibName(CmdArgs.entryModule);
@@ -493,18 +509,17 @@ int main(int argc, char **argv) {
         return -1;
     }
 
-    // Setup handler trampoline to handle syscalls inside sce code
-    // Only syscalls from libc and the handler itself will execute unfiltered
-    setupSyscallTrampoline();    
-
     // Call initialization functions for all sce libraries.
     // Do independent libs first, then those that depend on them, etc
     // Some cycles exist though
     // TODO does preinit go in forward order?
     // Skip entry module in topological order (eboot.bin)
-    std::vector<std::string> topologicalLibOrder = findTopologicalLibOrder(allSceLibs, dependsOn);
+    std::vector<std::string> topologicalLibOrder;
+    //topologicalLibOrder = findTopologicalLibOrder(allSceLibs, dependsOn);
+    topologicalLibOrder = allSceLibs;
     assert(topologicalLibOrder.size() == allSceLibs.size());
-    for (uint i = 0; i < topologicalLibOrder.size(); i++) {
+    //for (uint i = 0; i < topologicalLibOrder.size(); i++) {
+    for (int i = 1; i >= 0; i--) {
         fs::path nativeLibName = getNativeLibName(topologicalLibOrder[i]);
         callInitFunctions(topologicalLibOrder[i], initFiniInfos[nativeLibName]);
     }

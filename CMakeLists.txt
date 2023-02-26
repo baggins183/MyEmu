@@ -14,9 +14,7 @@ message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 project(MyEmu C CXX ASM)
 
 include_directories("include/")
-include_directories("external/proc_maps_parser/proc_maps_parser/include/")
 
-add_subdirectory(external)
 add_subdirectory(ps4lib_overloads)
 add_subdirectory(nid_hash)
 add_subdirectory(elfpatcher)

@@ -10,6 +10,6 @@
 
 add_subdirectory(libFreeBsdCompat)
 
-add_executable(main main.cpp)
-set_property(TARGET main PROPERTY POSITION_INDEPENDENT_CODE OFF)
-target_link_libraries(main elfpatcher pthread dl nid_hash sqlite3 proc_maps_parser FreeBsdCompat)
+add_executable(main main.cpp pmparser.c)
+set_property(TARGET main PROPERTY POSITION_INDEPENDENT_CODE ON)
+target_link_libraries(main elfpatcher pthread dl nid_hash sqlite3 FreeBsdCompat)
