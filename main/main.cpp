@@ -1,3 +1,4 @@
+#include <iterator>
 #define LOGGER_IMPL
 #include "Common.h"
 #include "Elf/elf-sce.h"
@@ -27,7 +28,6 @@
 #include <atomic>
 
 #include <filesystem>
-namespace fs = std::filesystem;
 #include <algorithm>
 #include <dlfcn.h>
 #include <link.h>
@@ -46,6 +46,8 @@ extern "C" {
 }
 
 #include "libFreeBsdCompat/freebsd_compat.h"
+
+namespace fs = std::filesystem;
 
 extern void (*_syscall_handler)(int signum);
 
@@ -306,16 +308,68 @@ static bool setupSyscallTrampoline() {
     return true;
 }
 
-std::vector<std::string> findTopologicalLibOrder(std::vector<std::string> &libs, std::map<std::string, std::set<std::string>> &dependsOn) {
-    // TODO
-    return {};
+//
+static bool findCyclicDependency(const std::string &curLib, const std::string &origLib, std::set<std::string> &transitiveDeps, std::map<std::string, std::set<std::string>> &dependsOn) {
+    if (curLib == origLib) {
+        return true;
+    }
+
+    if (transitiveDeps.find(curLib) != transitiveDeps.end()) {
+        return false;
+    }
+
+    transitiveDeps.insert(curLib);
+
+    auto &deps = dependsOn[curLib];
+    for (auto &dep: deps) {
+        if (findCyclicDependency(dep, origLib, transitiveDeps, dependsOn)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void visitToBuildTopoOrder(const std::string &lib, const std::map<std::string, std::set<std::string>> &dependsOnOneWay, std::vector<std::string> &sorted, std::set<std::string> &visited) {
+    if (visited.find(lib) != visited.end()) {
+        return;
+    }
+    sorted.push_back(lib);
+    visited.insert(lib);
+    auto pair = dependsOnOneWay.find(lib);
+    for (const auto &dep: pair->second) {
+        visitToBuildTopoOrder(dep, dependsOnOneWay, sorted, visited);
+    }
+}
+
+// The sce libs can have cyclic dependencies, so return an order s.t. libA comes before libB if libA is a transitive dependency of libB but
+// libB is not a transitive dependency of libA
+static std::vector<std::string> findTopologicalLibOrder(const std::vector<std::string> &libs, std::map<std::string, std::set<std::string>> &dependsOn) {
+    // Only direct dependencies, not transitive
+    std::map<std::string, std::set<std::string>> dependsOnOneWay;
+
+    for (const auto &lib: libs) {
+        auto &deps = dependsOn[lib];
+        std::set<std::string> totalDeps;
+        for (auto &dep: deps) {
+            std::set<std::string> transitiveDeps;
+            if ( !findCyclicDependency(dep, lib, transitiveDeps, dependsOn)) {
+                std::copy(transitiveDeps.begin(), transitiveDeps.end(), std::inserter(totalDeps, totalDeps.begin()));
+            }
+        }
+        dependsOnOneWay[lib] = std::move(totalDeps);
+    }
+
+    std::vector<std::string> sorted;
+    std::set<std::string> visited;
+    for (const auto &lib: libs) {
+        visitToBuildTopoOrder(lib, dependsOnOneWay, sorted, visited);
+    }
+
+    std::reverse(sorted.begin(), sorted.end());
+    return sorted;
 }
 
 int main(int argc, char **argv) {
-    // Make stdout unbuffered so crashes don't hide writes when stdout is redirected to file
-    setvbuf(stdout, NULL, _IONBF, 0);    
-    setvbuf(stdout, NULL, _IONBF, 0);    
-
     //FILE *eboot;
     void *dl;
 
@@ -335,33 +389,54 @@ int main(int argc, char **argv) {
         return -1;
     }    
 
-    std::vector<std::string> worklist = { CmdArgs.entryModule };
-    std::set<std::string> inWorklist;
-    inWorklist.insert(getNativeLibName(worklist[0]));
 
     std::map<std::string, std::set<std::string>> dependsOn;
     std::map<std::string, InitFiniInfo> initFiniInfos;
 
-    uint i = 0; 
-    while (i < worklist.size()) {
-        fs::path libName = worklist[i];
-        ++i;
-        auto oLibPath = findPathToSceLib(libName, Ctx);
-        if ( !oLibPath) {
-            fprintf(stderr, "Warning: unable to locate library %s\n", libName.c_str());
-            continue;
-        }
+    std::vector<std::string> allSceLibs;
 
-        fs::path libPath = oLibPath.value();
-        fs::path nativePath = CmdArgs.nativeElfOutputDir; 
-        nativePath /= getNativeLibName(libPath);
+    std::vector<std::string> worklist = { CmdArgs.entryModule };
+    std::set<std::string> inWorklist;
+    inWorklist.insert(getNativeLibName(worklist[0]));
 
-        struct stat buf;
-        bool exists = !stat(nativePath.c_str(), &buf);
-        if (CmdArgs.purgeElfs || !exists) {
-            // TODO use C++
-            std::string cmd = "cp " + libPath.string() + " " + nativePath.string();
-            system(cmd.c_str());
+    bool needToPatch = true;
+//    if (!CmdArgs.purgeElfs) {
+//        uint i = 0;
+//        while (i < worklist.size()) {
+//            if (false) {
+//                // TODO
+//                worklist.resize(1);
+//                break;
+//            }
+//        }
+//
+//        needToPatch = false;
+//    }
+
+    if (needToPatch) {
+
+        // Patch ps4 modules, starting with the entry module (eboot.bin) and working through
+        // the dependencies.
+        // Convert these to native ELF files (libs openable with dlopen)        
+        uint i = 0;
+        while (i < worklist.size()) {
+            fs::path libName = worklist[i];
+            allSceLibs.push_back(getNativeLibName(libName));
+            ++i;
+            auto oLibPath = findPathToSceLib(libName, Ctx);
+            if ( !oLibPath) {
+                fprintf(stderr, "Warning: unable to locate library %s\n", libName.c_str());
+                continue;
+            }
+
+            fs::path libPath = oLibPath.value();
+            fs::path nativePath = CmdArgs.nativeElfOutputDir; 
+            nativePath /= getNativeLibName(libPath);
+
+            if ( !fs::copy_file(libPath, nativePath, fs::copy_options::overwrite_existing)) {
+                fprintf(stderr, "Couldn't copy %s to %s\n", libPath.c_str(), nativePath.c_str());
+                return -1;
+            }
 
             if (chmod(nativePath.c_str(), S_IRWXU | (S_IRGRP | S_IXGRP) | (S_IROTH | S_IXOTH))) {
                 fprintf(stderr, "chmod failed\n");
@@ -371,25 +446,21 @@ int main(int argc, char **argv) {
             if ( !patchPs4Lib(Ctx, nativePath)) {
                 return -1;
             }
-        } else {
-            // TODO read DT_NEEDED ents to build topological order of deps
-            // So we can call DT_INIT-like functions in correct order
-        }
-        std::string nativeName = getNativeLibName(libName.filename());
 
-        initFiniInfos[nativeName] = Ctx.init_fini_info;
-        
-        for (auto &dep: Ctx.deps) {
-            dependsOn[nativeName].insert(getNativeLibName(dep));
-        }
-
-        for (auto &dep: Ctx.deps) {
-            if (inWorklist.find(getNativeLibName(dep)) == inWorklist.end()) {
-                worklist.push_back(dep);
-                inWorklist.insert(getNativeLibName(dep));
+            std::string nativeName = nativePath.filename();
+            initFiniInfos[nativeName] = Ctx.initFiniInfo;
+            for (auto &dep: Ctx.deps) {
+                dependsOn[nativeName].insert(getNativeLibName(dep));
             }
+
+            for (auto &dep: Ctx.deps) {
+                if (inWorklist.find(getNativeLibName(dep)) == inWorklist.end()) {
+                    worklist.push_back(dep);
+                    inWorklist.insert(getNativeLibName(dep));
+                }
+            }
+            Ctx.reset();
         }
-        Ctx.reset();
     }
 
     // Preload compatability libs that override sce functions in symbol order
@@ -431,8 +502,8 @@ int main(int argc, char **argv) {
     // Some cycles exist though
     // TODO does preinit go in forward order?
     // Skip entry module in topological order (eboot.bin)
-    std::vector<std::string> sceLibs(worklist.begin() + 1, worklist.end());
-    std::vector<std::string> topologicalLibOrder = findTopologicalLibOrder(sceLibs, dependsOn);
+    std::vector<std::string> topologicalLibOrder = findTopologicalLibOrder(allSceLibs, dependsOn);
+    assert(topologicalLibOrder.size() == allSceLibs.size());
     for (uint i = 0; i < topologicalLibOrder.size(); i++) {
         fs::path nativeLibName = getNativeLibName(topologicalLibOrder[i]);
         callInitFunctions(topologicalLibOrder[i], initFiniInfos[nativeLibName]);

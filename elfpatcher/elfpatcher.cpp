@@ -46,11 +46,13 @@ fs::path getNativeLibName(fs::path ps4LibName) {
     assert(ps4LibName.has_filename());
 
     auto ext = ps4LibName.extension();
-    assert(ext != ".native");
     if (ext == ".sprx") {
         ext = ".prx";
     }
-    ext += ".native";
+    
+    if (ext != ".native") {
+        ext += ".native";
+    }
 
     auto libStem = ps4LibName.stem();
     libStem += ext;
@@ -710,28 +712,28 @@ static bool fixDynamicInfoForLinker(ElfPatcherContext &Ctx, FILE *elf, std::vect
 
             // https://docs.oracle.com/cd/E23824_01/html/819-0690/chapter2-55859.html#chapter2-48195
             case DT_PREINIT_ARRAY:
-                Ctx.init_fini_info.preinit_array_base = dyn->d_un.d_ptr;
+                Ctx.initFiniInfo.preinit_array_base = dyn->d_un.d_ptr;
                 break;
             case DT_PREINIT_ARRAYSZ:
-                Ctx.init_fini_info.dt_preinit_array.resize(dyn->d_un.d_val / sizeof(Elf64_Addr));
+                Ctx.initFiniInfo.dt_preinit_array.resize(dyn->d_un.d_val / sizeof(Elf64_Addr));
                 break;
             case DT_INIT:
-                Ctx.init_fini_info.dt_init = dyn->d_un.d_ptr;
+                Ctx.initFiniInfo.dt_init = dyn->d_un.d_ptr;
                 break;
             case DT_INIT_ARRAY:
-                Ctx.init_fini_info.init_array_base = dyn->d_un.d_ptr;
+                Ctx.initFiniInfo.init_array_base = dyn->d_un.d_ptr;
                 break;
             case DT_INIT_ARRAYSZ:
-                Ctx.init_fini_info.dt_init_array.resize(dyn->d_un.d_val / sizeof(Elf64_Addr));
+                Ctx.initFiniInfo.dt_init_array.resize(dyn->d_un.d_val / sizeof(Elf64_Addr));
                 break;
             case DT_FINI:
-                Ctx.init_fini_info.dt_fini = dyn->d_un.d_ptr;
+                Ctx.initFiniInfo.dt_fini = dyn->d_un.d_ptr;
                 break;
             case DT_FINI_ARRAY:
-                Ctx.init_fini_info.fini_array_base = dyn->d_un.d_ptr;
+                Ctx.initFiniInfo.fini_array_base = dyn->d_un.d_ptr;
                 break;
             case DT_FINI_ARRAYSZ:
-                Ctx.init_fini_info.dt_fini_array.resize(dyn->d_un.d_val / sizeof(Elf64_Addr));
+                Ctx.initFiniInfo.dt_fini_array.resize(dyn->d_un.d_val / sizeof(Elf64_Addr));
                 break;
             // Don't add dynents for these, since they take different parameters
 
@@ -890,17 +892,17 @@ static bool fixDynamicInfoForLinker(ElfPatcherContext &Ctx, FILE *elf, std::vect
     }
 
     // Extract init, fini info from dynents
-    if ( !Ctx.init_fini_info.dt_preinit_array.empty()) {
-        fseek(elf, findFileOffForAddr(progHdrs, Ctx.init_fini_info.preinit_array_base.value()), SEEK_SET);
-        fread(Ctx.init_fini_info.dt_preinit_array.data(), sizeof(Elf64_Addr), Ctx.init_fini_info.dt_preinit_array.size(), elf);
+    if ( !Ctx.initFiniInfo.dt_preinit_array.empty()) {
+        fseek(elf, findFileOffForAddr(progHdrs, Ctx.initFiniInfo.preinit_array_base.value()), SEEK_SET);
+        fread(Ctx.initFiniInfo.dt_preinit_array.data(), sizeof(Elf64_Addr), Ctx.initFiniInfo.dt_preinit_array.size(), elf);
     }
-    if ( !Ctx.init_fini_info.dt_init_array.empty()) {
-        fseek(elf, findFileOffForAddr(progHdrs, Ctx.init_fini_info.init_array_base.value()), SEEK_SET);
-        fread(Ctx.init_fini_info.dt_init_array.data(), sizeof(Elf64_Addr), Ctx.init_fini_info.dt_init_array.size(), elf);
+    if ( !Ctx.initFiniInfo.dt_init_array.empty()) {
+        fseek(elf, findFileOffForAddr(progHdrs, Ctx.initFiniInfo.init_array_base.value()), SEEK_SET);
+        fread(Ctx.initFiniInfo.dt_init_array.data(), sizeof(Elf64_Addr), Ctx.initFiniInfo.dt_init_array.size(), elf);
     }
-    if ( !Ctx.init_fini_info.dt_fini_array.empty()) {
-        fseek(elf, findFileOffForAddr(progHdrs, Ctx.init_fini_info.fini_array_base.value()), SEEK_SET);
-        fread(Ctx.init_fini_info.dt_fini_array.data(), sizeof(Elf64_Addr), Ctx.init_fini_info.dt_fini_array.size(), elf);
+    if ( !Ctx.initFiniInfo.dt_fini_array.empty()) {
+        fseek(elf, findFileOffForAddr(progHdrs, Ctx.initFiniInfo.fini_array_base.value()), SEEK_SET);
+        fread(Ctx.initFiniInfo.dt_fini_array.data(), sizeof(Elf64_Addr), Ctx.initFiniInfo.dt_fini_array.size(), elf);
     }    
 
     //

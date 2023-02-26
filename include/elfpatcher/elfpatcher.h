@@ -180,7 +180,7 @@ struct ElfPatcherContext {
     // dependencies (DT_NEEDED) on the processed ELF. Uses original names (non-native)
     std::vector<std::string> deps;
     // info about initialization and finalization functions
-    InitFiniInfo init_fini_info;
+    InitFiniInfo initFiniInfo;
 
     ElfPatcherContext(std::string ps4libsPath, std::string preloadDir, std::string hashdbPath, std::string nativeElfOutputDir, std::string pkgdumpPath, bool purgeElfs):
             pkgdumpPath(pkgdumpPath),
@@ -203,7 +203,7 @@ struct ElfPatcherContext {
 
     // Reset per-object state
     void reset() {
-        init_fini_info = InitFiniInfo(); 
+        initFiniInfo = InitFiniInfo(); 
         deps.clear();
     }
 };
