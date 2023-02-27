@@ -10,6 +10,20 @@
 #define DIRECT_SYSCALL_MAP(OP) \
     OP(SYS_getpid, __NR_getpid, ZERO_ARGS)
 
+//"system-call is done via the syscall instruction. The kernel destroys
+// registers %rcx and %r11." - https://refspecs.linuxfoundation.org/elf/x86_64-abi-0.99.pdf
+// ^ need to mark %rcx and %r11 as clobbered
+
+// "User-level applications use as integer registers for passing the sequence
+// %rdi, %rsi, %rdx, %rcx, %r8 and %r9. The kernel interface uses %rdi,
+// %rsi, %rdx, %r10, %r8 and %r9"
+// Judging by sysctl, the ps4 uses this convention also, moving %rcx to %r10 before
+// the syscall instruction
+
+// ZERO_ARGS ... SIX_ARGS
+// Macros to invoke the native (linux) syscall, with the arguments directly mapped
+// from the mcontext registers
+// Puts the result in output_param
 #define ZERO_ARGS(native_syscall_nr, mcontext, output_param) \
     asm volatile( \
         "mov %1, %%rax\n" \
@@ -62,7 +76,65 @@
         : "rcx", "r11", "rax", "rdi", "rsi", "rdx" \
     );
 
-// TODO figure out if the ps4 passes %rdi, %rsi, %rdx, %r10, %r8, %r9 like amd64 linux
+#define FOUR_ARGS(native_syscall_nr, mcontext, output_param) \
+    asm volatile( \
+        "mov %1, %%rax\n" \
+        "mov %2, %%rdi\n" \
+        "mov %3, %%rsi\n" \
+        "mov %4, %%rdx\n" \
+        "mov %5, %%r10\n" \
+        "syscall\n" \
+        "mov %%rax, %0\n" \
+        : "=r" (output_param) \
+        : "i" (native_syscall_nr), \
+            "g" (mcontext->gregs[REG_RDI]), \
+            "g" (mcontext->gregs[REG_RSI]) \
+            "g" (mcontext->gregs[REG_RDX]) \
+            "g" (mcontext->gregs[REG_R10]) \
+        : "rcx", "r11", "rax", "rdi", "rsi", "rdx", "r10" \
+    );
+
+#define FIVE_ARGS(native_syscall_nr, mcontext, output_param) \
+    asm volatile( \
+        "mov %1, %%rax\n" \
+        "mov %2, %%rdi\n" \
+        "mov %3, %%rsi\n" \
+        "mov %4, %%rdx\n" \
+        "mov %5, %%r10\n" \
+        "mov %6, %%r8\n" \
+        "syscall\n" \
+        "mov %%rax, %0\n" \
+        : "=r" (output_param) \
+        : "i" (native_syscall_nr), \
+            "g" (mcontext->gregs[REG_RDI]), \
+            "g" (mcontext->gregs[REG_RSI]) \
+            "g" (mcontext->gregs[REG_RDX]) \
+            "g" (mcontext->gregs[REG_R10]) \
+            "g" (mcontext->gregs[REG_R8]) \
+        : "rcx", "r11", "rax", "rdi", "rsi", "rdx", "r10", "r8" \
+    );
+
+#define SIX_ARGS(native_syscall_nr, mcontext, output_param) \
+    asm volatile( \
+        "mov %1, %%rax\n" \
+        "mov %2, %%rdi\n" \
+        "mov %3, %%rsi\n" \
+        "mov %4, %%rdx\n" \
+        "mov %5, %%r10\n" \
+        "mov %6, %%r8\n" \
+        "mov %6, %%r9\n" \
+        "syscall\n" \
+        "mov %%rax, %0\n" \
+        : "=r" (output_param) \
+        : "i" (native_syscall_nr), \
+            "g" (mcontext->gregs[REG_RDI]), \
+            "g" (mcontext->gregs[REG_RSI]) \
+            "g" (mcontext->gregs[REG_RDX]) \
+            "g" (mcontext->gregs[REG_R10]) \
+            "g" (mcontext->gregs[REG_R8]) \
+            "g" (mcontext->gregs[REG_R9]) \
+        : "rcx", "r11", "rax", "rdi", "rsi", "rdx", "r10", "r8", "r9" \
+    );
 
 extern "C" {
 
@@ -75,6 +147,9 @@ void freebsd_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
     greg_t bsd_syscall_nr = mcontext->gregs[REG_RAX];
 
     switch (bsd_syscall_nr) {
+// For some syscall that is 1:1 freebsd to native (linux), create a case statement
+// for freebsd number bsd_nr, that invokes the native syscall with number native_nr.
+// Pass N-Args directly from the mcontext to the native syscall.
 #define DIRECT_SYSCALL_CASE(bsd_nr, native_nr, NUM_ARG_FUNCTION) \
         case bsd_nr: \
         { \
@@ -84,6 +159,8 @@ void freebsd_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
             break; \
         }
 
+        // Declare case statements for each bsd -> native syscall mapping
+        // Only do this for the syscalls that map 1:1 with no intervention needed
         DIRECT_SYSCALL_MAP(DIRECT_SYSCALL_CASE)
 
 #undef DIRECT_SYSCALL_CASE
