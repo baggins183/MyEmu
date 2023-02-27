@@ -6,13 +6,6 @@
 
 // define some enums for debugging convenience
 
-// Common macros
-#define STRING_OP(name, value) \
-    { name, #name },
-
-#define ENUM_OP(name, value) \
-    name = value,    
-
 #undef ET_NONE
 #undef ET_REL
 #undef ET_EXEC
@@ -45,13 +38,17 @@
     OP(ET_SCE_DYNAMIC,	0xFE18)
 
 enum EtType {
+#define ENUM_OP(name, value) name = value,
     ET_TABLE(ENUM_OP)
     ET_SCE_TABLE(ENUM_OP)
+#undef ENUM_OP
 };
 
 static std::map<EtType, const char *> et_strings_map = {
+#define STRING_OP(name, value) { name, #name },
     ET_TABLE(STRING_OP)
     ET_SCE_TABLE(STRING_OP)
+#undef STRING_OP
 };
 
 
@@ -113,13 +110,17 @@ static std::map<EtType, const char *> et_strings_map = {
     OP(PT_SCE_LIBVERSION,	0X6FFFFF01)
 
 enum ProgramSegmentType {
+#define ENUM_OP(name, value) name = value,
     PT_TABLE(ENUM_OP)
     PT_SCE_TABLE(ENUM_OP)
+#undef ENUM_OP
 };
 
 static std::map<ProgramSegmentType, const char *> pt_strings_map = {
+#define STRING_OP(name, value) { name, #name },
     PT_TABLE(STRING_OP)
     PT_SCE_TABLE(STRING_OP)
+#undef STRING_OP
 };
 
 #undef SHT_NULL
@@ -201,12 +202,16 @@ static std::map<ProgramSegmentType, const char *> pt_strings_map = {
     OP(SHT_HIUSER,	  0x8fffffff)
 
 enum ShtType {
+#define ENUM_OP(name, value) name = value,
     SHT_TABLE(ENUM_OP)
+#undef ENUM_OP
 };
 
 static std::map<ShtType, const char *> sht_strings_map = {
+#define STRING_OP(name, value) { name, #name },
     SHT_TABLE(STRING_OP)
     SHT_TABLE(STRING_OP)
+#undef STRING_OP
 };
 
 #undef DT_NULL
@@ -330,13 +335,17 @@ static std::map<ShtType, const char *> sht_strings_map = {
     OP(DT_SCE_HIOS,		0X6FFFF000)
 
 enum DynamicTag {
+#define ENUM_OP(name, value) name = value,
     DT_TABLE(ENUM_OP)
     DT_SCE_TABLE(ENUM_OP)
+#undef ENUM_OP
 };
 
 static std::map<DynamicTag, const char *> dt_strings_map = {
+#define STRING_OP(name, value) { name, #name },
     DT_TABLE(STRING_OP)
     DT_SCE_TABLE(STRING_OP)
+#undef STRING_OP
 };
 
 #pragma GCC diagnostic push
