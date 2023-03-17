@@ -15,8 +15,8 @@
 // ^ need to mark %rcx and %r11 as clobbered
 
 // "User-level applications use as integer registers for passing the sequence
-// %rdi, %rsi, %rdx, %rcx, %r8 and %r9. The kernel interface uses %rdi,
-// %rsi, %rdx, %r10, %r8 and %r9"
+// %rdi, %rsi, %rdx, %rcx, %r8 and %r9. The kernel interface uses 
+// %rdi, %rsi, %rdx, %r10, %r8 and %r9"
 // Judging by sysctl, the ps4 uses this convention also, moving %rcx to %r10 before
 // the syscall instruction
 
@@ -164,6 +164,27 @@ void freebsd_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
         DIRECT_SYSCALL_MAP(DIRECT_SYSCALL_CASE)
 
 #undef DIRECT_SYSCALL_CASE
+
+        case SYS___sysctl:
+        {
+            // ??? = 1.37.64 (length 2)
+            // "kern.proc.ptc" = 0.3
+            // ??? = 1.14.35.59262
+
+            std::string bsdName = to_string((BsdSyscallNr) bsd_syscall_nr);
+            fprintf(stderr, "freebsd_syscall_handler: handling %s\n", bsdName.c_str());
+            uint namelen = mcontext->gregs[REG_RSI];
+            int *name = (int *) mcontext->gregs[REG_RDI];
+            void *newp = (void *) mcontext->gregs[REG_R8];
+            fprintf(stderr, "name: %d.%d.%d.%d\n"
+                "namelen: %d\n"
+                "write? : %s\n",
+                name[0], name[1], name[2], name[3],
+                namelen,
+                newp ? "yes" : "no"
+            );
+            break;
+        }
 
         default:
         {
