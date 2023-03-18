@@ -1,11 +1,16 @@
 #include <asm-generic/errno-base.h>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <unistd.h>
 #include <asm/unistd_64.h>
 #include <stdio.h>
 #include "freebsd_compat.h"
 #include "orbis/freebsd_9.0_syscalls.hpp"
 #include <sys/ucontext.h>
+#include "ps4_sysctl.h"
+#include <cassert>
+#include <fcntl.h>
 
 #define DIRECT_SYSCALL_MAP(OP) \
     OP(SYS_getpid, __NR_getpid, ZERO_ARGS)
@@ -136,6 +141,73 @@
         : "rcx", "r11", "rax", "rdi", "rsi", "rdx", "r10", "r8", "r9" \
     );
 
+static greg_t handle_open(mcontext_t *mcontext) {
+    char *name = *reinterpret_cast<char **>(&mcontext->gregs[REG_RDI]);
+    int flags = *reinterpret_cast<int *>(&mcontext->gregs[REG_RSI]);
+    mode_t mode = *reinterpret_cast<mode_t *>(&mcontext->gregs[REG_RDX]);
+
+    fprintf(stderr, "\tname: %s\n"
+        "\tflags: %d\n",
+        name,
+        flags
+    );
+    return -ENOENT;
+}
+
+static greg_t handle_sysctl(mcontext_t *mcontext) {
+    int *name = *reinterpret_cast<int **>(&mcontext->gregs[REG_RDI]);
+    uint namelen = *reinterpret_cast<uint *>(&mcontext->gregs[REG_RSI]);
+    void *oldp = *reinterpret_cast<void **>(&mcontext->gregs[REG_RDX]);
+    size_t *oldlenp = *reinterpret_cast<size_t **>(&mcontext->gregs[REG_R10]);
+    void *newp = *reinterpret_cast<void **>(&mcontext->gregs[REG_R8]);
+    bool is_write = newp != NULL;
+
+    fprintf(stderr, "\tname: %d.%d.%d.%d\n"
+        "\tnamelen: %d\n"
+        "\toldlenp: %zu\n"
+        "\twrite? : %s\n",
+        name[0], name[1], name[2], name[3],
+        namelen,
+        *oldlenp,
+        newp ? "yes" : "no"
+    );
+
+    greg_t rv = ENOENT;
+    switch(name[0]) {
+        case CTL_KERN:
+        {
+            switch(name[1]) {
+                case KERN_PROC:
+                {
+                    switch(name[2]) {
+                        case KERN_PROC_APPINFO:
+                        default:
+                            break;
+                    }
+                    break;
+                }
+                case KERN_ARND:
+                    assert(!is_write);
+                    assert(oldlenp);
+                    arc4random_buf(oldp, *oldlenp);
+                    rv = 0;
+                    break;
+                default:
+                    break;
+            }
+            break;
+        }
+        default:
+            break;
+    }
+
+    if (rv) {
+        fprintf(stderr, "sysctl: error %s\n", strerror(rv));
+        rv = -rv;
+    }
+    return rv;
+}
+
 extern "C" {
 
 void freebsd_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
@@ -146,6 +218,16 @@ void freebsd_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
 
     greg_t bsd_syscall_nr = mcontext->gregs[REG_RAX];
 
+    greg_t arg1 = mcontext->gregs[REG_RDI];
+    greg_t arg2 = mcontext->gregs[REG_RSI];
+    greg_t arg3 = mcontext->gregs[REG_RDX];
+    greg_t arg4 = mcontext->gregs[REG_R10];
+    greg_t arg5 = mcontext->gregs[REG_R8];
+    greg_t arg6 = mcontext->gregs[REG_R9];
+
+    std::string bsdName = to_string((BsdSyscallNr) bsd_syscall_nr);
+    fprintf(stderr, "freebsd_syscall_handler: handling %s\n", bsdName.c_str());
+
     switch (bsd_syscall_nr) {
 // For some syscall that is 1:1 freebsd to native (linux), create a case statement
 // for freebsd number bsd_nr, that invokes the native syscall with number native_nr.
@@ -153,8 +235,6 @@ void freebsd_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
 #define DIRECT_SYSCALL_CASE(bsd_nr, native_nr, NUM_ARG_FUNCTION) \
         case bsd_nr: \
         { \
-            std::string bsdName = to_string(bsd_nr); \
-            fprintf(stderr, "freebsd_syscall_handler: handling %s\n", bsdName.c_str()); \
             NUM_ARG_FUNCTION(native_nr, mcontext, rv) \
             break; \
         }
@@ -165,26 +245,29 @@ void freebsd_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
 
 #undef DIRECT_SYSCALL_CASE
 
-        case SYS___sysctl:
+        case SYS_open:
         {
-            // ??? = 1.37.64 (length 2)
-            // "kern.proc.ptc" = 0.3
-            // ??? = 1.14.35.59262
-
-            std::string bsdName = to_string((BsdSyscallNr) bsd_syscall_nr);
-            fprintf(stderr, "freebsd_syscall_handler: handling %s\n", bsdName.c_str());
-            uint namelen = mcontext->gregs[REG_RSI];
-            int *name = (int *) mcontext->gregs[REG_RDI];
-            void *newp = (void *) mcontext->gregs[REG_R8];
-            fprintf(stderr, "name: %d.%d.%d.%d\n"
-                "namelen: %d\n"
-                "write? : %s\n",
-                name[0], name[1], name[2], name[3],
-                namelen,
-                newp ? "yes" : "no"
-            );
+            rv = handle_open(mcontext);
             break;
         }
+
+        case SYS___sysctl:
+        {
+            // ??? = 1.37.64 (length 2)    - CTL_KERN.KERN_ARND
+            // "kern.proc.ptc" = 0.3       - CTL_UNSPEC.?
+            // ??? = 1.14.35.59262         - CTL_KERN.KERN_PROC.?.?
+            //                fppcs4 says 1.14.35 is KERN_PROC_APPINFO
+            rv = handle_sysctl(mcontext);
+            break;
+        }
+        case 587:
+            // get_authinfo
+            rv = EINVAL;
+            break;
+        case 612:
+            // nG-FYqFutUo
+            rv = EINVAL;
+            break;
 
         default:
         {

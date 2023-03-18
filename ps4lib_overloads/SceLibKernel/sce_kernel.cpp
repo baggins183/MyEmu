@@ -1,6 +1,7 @@
 #include "sce_errors/sce_errors.h"
 #include "Common.h"
 
+#include <dlfcn.h>
 #include <signal.h>
 
 struct  sce_module_handle_t {
@@ -58,6 +59,17 @@ int sceKernelGetModuleInfo2(void) {
 
 int sceKernelGetCompiledSdkVersion(void) {
     return 0;
+}
+
+int
+sysctlbyname(const	char *name, void *oldp,	size_t *oldlenp,
+	 const void *newp, size_t newlen)
+{
+    raise(SIGTRAP);
+    typedef int (*PFN_SYSCTLBYNAME) (const	char *, void *,	size_t *,
+	 const void *, size_t);
+    PFN_SYSCTLBYNAME impl = (PFN_SYSCTLBYNAME) dlsym(RTLD_NEXT, "sysctlbyname");
+    return impl(name, oldp, oldlenp, newp, newlen);
 }
 
 }
