@@ -35,8 +35,10 @@
 #include <sqlite3.h>
 #include <set>
 #include <optional>
+#include <sys/capability.h>
 
 #include "elfpatcher/elfpatcher.h"
+#include "chroot.h"
 
 #include <signal.h>
 #include <sys/prctl.h>
@@ -149,6 +151,8 @@ static bool callInitFunctions(std::string ps4Name, InitFiniInfo &initFiniInfo) {
     int argc = 1;
 
     std::string nativeName = getNativeLibName(fs::path(ps4Name).filename());
+    fprintf(stderr, "callInitFunctions: %s start\n", nativeName.c_str());
+
 
     void *dl = dlopen(nativeName.c_str(), RTLD_LAZY);
     if ( !dl) {
@@ -193,6 +197,7 @@ error:
     if (dl) {
         dlclose(dl);
     }
+    fprintf(stderr, "callInitFunctions: %s done\n", nativeName.c_str());
     return success;
 }
 
@@ -369,6 +374,62 @@ static std::vector<std::string> findTopologicalLibOrder(const std::vector<std::s
     return sorted;
 }
 
+static bool create_dir_structure(fs::path &chroot_path) {
+    std::error_code ec;
+    fs::create_directories(chroot_path, ec);
+    if (ec) {
+        std::string msg = ec.message();
+        fprintf(stderr, "create_filesystem: %s\n", msg.c_str());
+        return false;
+    }
+
+    static const char *dirs[] = {
+        "/dev",
+        "/dev/dipsw",
+        "/mnt",
+        "/mnt/test",
+    };
+
+    for (const char *dir: dirs) {
+        fs::path dir_path = chroot_path;
+        dir_path += fs::path(dir);
+        fs::create_directories(dir_path, ec);
+        if (ec) {
+            std::string msg = ec.message();
+            fprintf(stderr, "create_filesystem: %s\n", msg.c_str());
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static bool init_filesystem() {
+    int err;
+
+    const char *home_dir = getenv("HOME");
+    if ( !home_dir) {
+        return false;
+    }
+    fs::path chroot_path = home_dir;
+    chroot_path /= fs::path(".local/share/MyEmu/chroot");
+
+    if ( !create_dir_structure(chroot_path)) {
+        return false;
+    }
+
+    set_chroot_path(chroot_path.c_str());
+
+    fs::path working_dir = chroot_path;
+    working_dir /= "mnt/test";
+    err = chdir(working_dir.c_str());
+    if (err) {
+        fprintf(stderr, "chdir: %s\n", strerror(errno));
+        return false;
+    }
+    return true;
+}
+
 int main(int argc, char **argv) {
     //FILE *eboot;
     void *dl;
@@ -414,7 +475,6 @@ int main(int argc, char **argv) {
 //    }
 
     if (needToPatch) {
-
         // Patch ps4 modules, starting with the entry module (eboot.bin) and working through
         // the dependencies.
         // Convert these to native ELF files (libs openable with dlopen)        
@@ -488,15 +548,6 @@ int main(int argc, char **argv) {
     // don't sneak in
     setupSyscallTrampoline();   
 
-    // Test trampoline: 
-    //block_syscalls();
-    //asm volatile (
-        //"mov $39, %%rax\n"
-        //"syscall\n"
-        //::: "rax"
-    //);
-    //allow_syscalls();
-
     // Load ps4 module
     fs::path firstLib = CmdArgs.nativeElfOutputDir;
     firstLib /= getNativeLibName(CmdArgs.entryModule);
@@ -518,11 +569,17 @@ int main(int argc, char **argv) {
     //topologicalLibOrder = findTopologicalLibOrder(allSceLibs, dependsOn);
     topologicalLibOrder = allSceLibs;
     assert(topologicalLibOrder.size() == allSceLibs.size());
+
+    if ( !init_filesystem()) {
+        return 1;
+    }
+    enable_chroot();
     //for (uint i = 0; i < topologicalLibOrder.size(); i++) {
     for (int i = 1; i >= 0; i--) {
         fs::path nativeLibName = getNativeLibName(topologicalLibOrder[i]);
         callInitFunctions(topologicalLibOrder[i], initFiniInfos[nativeLibName]);
     }
+    disable_chroot();
 
     fs::path entryModule = CmdArgs.nativeElfOutputDir;
     entryModule /= getNativeLibName("eboot.bin");
@@ -530,7 +587,9 @@ int main(int argc, char **argv) {
         return -1;
     }
 
+    enable_chroot();
     // TODO launch ps4 entry point thread
+    disable_chroot();
 
     for (auto handle: preloadHandles) {
         dlclose(handle);

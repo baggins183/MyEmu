@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <optional>
 #include <unistd.h>
 #include <asm/unistd_64.h>
 #include <stdio.h>
@@ -11,6 +12,9 @@
 #include "ps4_sysctl.h"
 #include <cassert>
 #include <fcntl.h>
+#include <filesystem>
+namespace fs = std::filesystem;
+#include "../chroot.h"
 
 #define DIRECT_SYSCALL_MAP(OP) \
     OP(SYS_getpid, __NR_getpid, ZERO_ARGS)
@@ -141,8 +145,12 @@
         : "rcx", "r11", "rax", "rdi", "rsi", "rdx", "r10", "r8", "r9" \
     );
 
-static greg_t handle_open(mcontext_t *mcontext) {
-    char *name = *reinterpret_cast<char **>(&mcontext->gregs[REG_RDI]);
+
+static inline greg_t handle_open(mcontext_t *mcontext) {
+    int rv;
+    fs::path modded_path;
+
+    const char *name = *reinterpret_cast<char **>(&mcontext->gregs[REG_RDI]);
     int flags = *reinterpret_cast<int *>(&mcontext->gregs[REG_RSI]);
     mode_t mode = *reinterpret_cast<mode_t *>(&mcontext->gregs[REG_RDX]);
 
@@ -151,10 +159,95 @@ static greg_t handle_open(mcontext_t *mcontext) {
         name,
         flags
     );
-    return -ENOENT;
+
+    fs::path orig_path = name;
+    if (orig_path.is_absolute() && is_chrooted()) {
+        modded_path = get_chroot_path();
+        modded_path += orig_path;
+        name = modded_path.c_str();
+    };
+
+    fprintf(stderr, "\tmodded_name: %s\n", name);
+
+    rv = open(name, flags, mode);
+    if (rv < 0) {
+        rv = -errno;
+    }
+    return rv;
 }
 
-static greg_t handle_sysctl(mcontext_t *mcontext) {
+static inline greg_t handle_close(mcontext_t *mcontext) {
+    int rv;
+
+    int fd = *reinterpret_cast<int *>(&mcontext->gregs[REG_RDI]);
+    rv = close(fd);
+    if (rv) {
+        rv = -errno;
+    }
+    return rv;
+}
+
+#define PS4_IOCPARM_SHIFT   13              /* number of bits for ioctl size */
+#define PS4_IOCPARM_MASK    ((1 << PS4_IOCPARM_SHIFT) - 1) /* parameter length mask */
+#define PS4_IOCPARM_LEN(x)  (((x) >> 16) & PS4_IOCPARM_MASK)
+#define PS4_IOCBASECMD(x)   ((x) & ~(PS4_IOCPARM_MASK << 16))
+#define PS4_IOCGROUP(x)     (((x) >> 8) & 0xff)
+
+#define PS4_IOCPARM_MAX     (1 << PS4_IOCPARM_SHIFT) /* max size of ioctl */
+#define PS4_IOC_VOID        0x20000000      /* no parameters */
+#define PS4_IOC_OUT         0x40000000      /* copy out parameters */
+#define PS4_IOC_IN          0x80000000      /* copy in parameters */
+#define PS4_IOC_INOUT       (PS4_IOC_IN|PS4_IOC_OUT)
+#define PS4_IOC_DIRMASK     (PS4_IOC_VOID|PS4_IOC_OUT|PS4_IOC_IN)
+
+static inline greg_t handle_ioctl(mcontext_t *mcontext) {
+    int rv;
+
+    int fd = *reinterpret_cast<int *>(&mcontext->gregs[REG_RDI]);
+    uint32_t request = *reinterpret_cast<uint32_t *>(&mcontext->gregs[REG_RSI]);
+    void *argp = *reinterpret_cast<void **>(&mcontext->gregs[REG_RDX]);
+
+    uint32_t group = PS4_IOCGROUP(request);
+    uint32_t num = request & 0xff;
+    uint32_t len = PS4_IOCPARM_LEN(request);
+    uint32_t basecmd = PS4_IOCBASECMD(request);
+
+    fprintf(stderr,
+        "\t%s\n"
+        "\tgroup: %c (%d)\n"
+        "\tnum: %d\n"
+        "\tlen: %d\n",
+        PS4_IOC_INOUT == (request & PS4_IOC_INOUT) ? "inout" 
+            : (request & PS4_IOC_IN ? "in (write)"
+                : (request & PS4_IOC_OUT ? "out (read)" : "void")),
+        group, group,
+        num,
+        len
+    );
+
+    rv = -EINVAL;
+
+    switch(group) {
+        case 136:
+        {
+            switch(num) {
+                case 6:
+                {
+                    memset(argp, 0, len);
+                    rv = 0;
+                }
+                default:
+                    break;
+            }
+        }
+        default:
+            break;
+    }
+
+    return rv;
+}
+
+static inline greg_t handle_sysctl(mcontext_t *mcontext) {
     int *name = *reinterpret_cast<int **>(&mcontext->gregs[REG_RDI]);
     uint namelen = *reinterpret_cast<uint *>(&mcontext->gregs[REG_RSI]);
     void *oldp = *reinterpret_cast<void **>(&mcontext->gregs[REG_RDX]);
@@ -172,7 +265,12 @@ static greg_t handle_sysctl(mcontext_t *mcontext) {
         newp ? "yes" : "no"
     );
 
-    greg_t rv = ENOENT;
+    // ??? = 1.37.64 (length 2)    - CTL_KERN.KERN_ARND
+    // "kern.proc.ptc" = 0.3       - CTL_UNSPEC.?
+    // ??? = 1.14.35.59262         - CTL_KERN.KERN_PROC.?.?
+    //                fppcs4 says 1.14.35 is KERN_PROC_APPINFO
+
+    greg_t rv = -ENOENT;
     switch(name[0]) {
         case CTL_KERN:
         {
@@ -202,8 +300,7 @@ static greg_t handle_sysctl(mcontext_t *mcontext) {
     }
 
     if (rv) {
-        fprintf(stderr, "sysctl: error %s\n", strerror(rv));
-        rv = -rv;
+        fprintf(stderr, "sysctl: error: %s\n", strerror(-rv));
     }
     return rv;
 }
@@ -214,7 +311,7 @@ void freebsd_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
     ucontext_t *ucontext = (ucontext_t *) ucontext_arg;
     mcontext_t *mcontext = &ucontext->uc_mcontext;
 
-    int64_t rv = EINVAL;
+    int64_t rv = -EINVAL;
 
     greg_t bsd_syscall_nr = mcontext->gregs[REG_RAX];
 
@@ -251,12 +348,20 @@ void freebsd_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
             break;
         }
 
+        case SYS_close:
+        {
+            rv = handle_close(mcontext);
+            break;
+        }
+
+        case SYS_ioctl:
+        {
+            rv = handle_ioctl(mcontext);
+            break;
+        }
+
         case SYS___sysctl:
         {
-            // ??? = 1.37.64 (length 2)    - CTL_KERN.KERN_ARND
-            // "kern.proc.ptc" = 0.3       - CTL_UNSPEC.?
-            // ??? = 1.14.35.59262         - CTL_KERN.KERN_PROC.?.?
-            //                fppcs4 says 1.14.35 is KERN_PROC_APPINFO
             rv = handle_sysctl(mcontext);
             break;
         }
@@ -277,6 +382,8 @@ void freebsd_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
         }
     }
 
+    // before this point, rv should be -errno if there was an error
+    // change to bsd conventions here (rax = positive errno, CF means error)
     if (rv < 0) {
         rv = -rv;
         // Set carry flag, ps4 and freebsd expects this

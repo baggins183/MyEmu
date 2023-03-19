@@ -414,7 +414,7 @@ static std::map<BsdSyscallNr, const char *> bsd_syscall_strings_map = {
 static std::string to_string(BsdSyscallNr nr) {
 	const auto &it = bsd_syscall_strings_map.find(nr);
 	if (it == bsd_syscall_strings_map.end()) {
-		return "UNKNOWN_SYSCALL";
+		return std::string("UNKNOWN_SYSCALL ") + "(" + std::to_string((uint) nr) + ")";
 	} else {
 		return it->second;
 	}
