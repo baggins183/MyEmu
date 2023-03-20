@@ -566,16 +566,17 @@ int main(int argc, char **argv) {
     // TODO does preinit go in forward order?
     // Skip entry module in topological order (eboot.bin)
     std::vector<std::string> topologicalLibOrder;
-    //topologicalLibOrder = findTopologicalLibOrder(allSceLibs, dependsOn);
-    topologicalLibOrder = allSceLibs;
+    topologicalLibOrder = findTopologicalLibOrder(allSceLibs, dependsOn);
+    auto it = std::find(topologicalLibOrder.begin(), topologicalLibOrder.end(), "libkernel.prx.native");
+    topologicalLibOrder.erase(it);
+    topologicalLibOrder.insert(topologicalLibOrder.begin(), "libkernel.prx.native");
     assert(topologicalLibOrder.size() == allSceLibs.size());
-
     if ( !init_filesystem()) {
         return 1;
     }
     enable_chroot();
-    //for (uint i = 0; i < topologicalLibOrder.size(); i++) {
-    for (int i = 1; i >= 0; i--) {
+    for (uint i = 0; i < topologicalLibOrder.size(); i++) {
+    //for (int i = 1; i >= 0; i--) {
         fs::path nativeLibName = getNativeLibName(topologicalLibOrder[i]);
         callInitFunctions(topologicalLibOrder[i], initFiniInfos[nativeLibName]);
     }

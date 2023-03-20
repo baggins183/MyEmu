@@ -22,26 +22,4 @@
 
 extern "C" {
 
-pid_t getpid(void) {
-    return syscall(__NR_getpid);
-}
-
-struct tls_index
-{
-	unsigned long ti_module;
-	unsigned long ti_offset;
-};
-
-void*  __tls_get_addr(tls_index *ti) {
-	LOG("IN __tls_get_addr!!!!!!!!!!!!!!!!!!!!!!!!!!");
-	raise(SIGTRAP);
-
-	return nullptr;
-}
-
-void _Times(void) {
-	LOG("IN _Times!!!!!!!!!!!!!!!!!!!!!!!!!!");
-	raise(SIGTRAP);	
-}
-
 } // extern "C"

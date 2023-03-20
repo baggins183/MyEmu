@@ -17,7 +17,8 @@ namespace fs = std::filesystem;
 #include "../chroot.h"
 
 #define DIRECT_SYSCALL_MAP(OP) \
-    OP(SYS_getpid, __NR_getpid, ZERO_ARGS)
+    OP(SYS_getpid, __NR_getpid, ZERO_ARGS) \
+    OP(SYS_write, __NR_write, THREE_ARGS)
 
 //"system-call is done via the syscall instruction. The kernel destroys
 // registers %rcx and %r11." - https://refspecs.linuxfoundation.org/elf/x86_64-abi-0.99.pdf
@@ -80,7 +81,7 @@ namespace fs = std::filesystem;
         : "=r" (output_param) \
         : "i" (native_syscall_nr), \
             "g" (mcontext->gregs[REG_RDI]), \
-            "g" (mcontext->gregs[REG_RSI]) \
+            "g" (mcontext->gregs[REG_RSI]), \
             "g" (mcontext->gregs[REG_RDX]) \
         : "rcx", "r11", "rax", "rdi", "rsi", "rdx" \
     );
@@ -97,8 +98,8 @@ namespace fs = std::filesystem;
         : "=r" (output_param) \
         : "i" (native_syscall_nr), \
             "g" (mcontext->gregs[REG_RDI]), \
-            "g" (mcontext->gregs[REG_RSI]) \
-            "g" (mcontext->gregs[REG_RDX]) \
+            "g" (mcontext->gregs[REG_RSI]), \
+            "g" (mcontext->gregs[REG_RDX]), \
             "g" (mcontext->gregs[REG_R10]) \
         : "rcx", "r11", "rax", "rdi", "rsi", "rdx", "r10" \
     );
@@ -116,9 +117,9 @@ namespace fs = std::filesystem;
         : "=r" (output_param) \
         : "i" (native_syscall_nr), \
             "g" (mcontext->gregs[REG_RDI]), \
-            "g" (mcontext->gregs[REG_RSI]) \
-            "g" (mcontext->gregs[REG_RDX]) \
-            "g" (mcontext->gregs[REG_R10]) \
+            "g" (mcontext->gregs[REG_RSI]), \
+            "g" (mcontext->gregs[REG_RDX]), \
+            "g" (mcontext->gregs[REG_R10]), \
             "g" (mcontext->gregs[REG_R8]) \
         : "rcx", "r11", "rax", "rdi", "rsi", "rdx", "r10", "r8" \
     );
@@ -137,10 +138,10 @@ namespace fs = std::filesystem;
         : "=r" (output_param) \
         : "i" (native_syscall_nr), \
             "g" (mcontext->gregs[REG_RDI]), \
-            "g" (mcontext->gregs[REG_RSI]) \
-            "g" (mcontext->gregs[REG_RDX]) \
-            "g" (mcontext->gregs[REG_R10]) \
-            "g" (mcontext->gregs[REG_R8]) \
+            "g" (mcontext->gregs[REG_RSI]), \
+            "g" (mcontext->gregs[REG_RDX]), \
+            "g" (mcontext->gregs[REG_R10]), \
+            "g" (mcontext->gregs[REG_R8]), \
             "g" (mcontext->gregs[REG_R9]) \
         : "rcx", "r11", "rax", "rdi", "rsi", "rdx", "r10", "r8", "r9" \
     );
@@ -160,10 +161,9 @@ static inline greg_t handle_open(mcontext_t *mcontext) {
         flags
     );
 
-    fs::path orig_path = name;
-    if (orig_path.is_absolute() && is_chrooted()) {
+    if (name[0] == '/' && is_chrooted()) {
         modded_path = get_chroot_path();
-        modded_path += orig_path;
+        modded_path += name;
         name = modded_path.c_str();
     };
 
@@ -210,7 +210,6 @@ static inline greg_t handle_ioctl(mcontext_t *mcontext) {
     uint32_t group = PS4_IOCGROUP(request);
     uint32_t num = request & 0xff;
     uint32_t len = PS4_IOCPARM_LEN(request);
-    uint32_t basecmd = PS4_IOCBASECMD(request);
 
     fprintf(stderr,
         "\t%s\n"
@@ -269,6 +268,8 @@ static inline greg_t handle_sysctl(mcontext_t *mcontext) {
     // "kern.proc.ptc" = 0.3       - CTL_UNSPEC.?
     // ??? = 1.14.35.59262         - CTL_KERN.KERN_PROC.?.?
     //                fppcs4 says 1.14.35 is KERN_PROC_APPINFO
+    // 1.33                        - CTL_KERN.KERN_USRSTACK
+    //                from gnmdriver
 
     greg_t rv = -ENOENT;
     switch(name[0]) {
@@ -313,7 +314,10 @@ void freebsd_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
 
     int64_t rv = -EINVAL;
 
-    greg_t bsd_syscall_nr = mcontext->gregs[REG_RAX];
+    greg_t ps4_syscall_nr = mcontext->gregs[REG_RAX];
+
+    std::string bsdName = to_string((BsdSyscallNr) ps4_syscall_nr);
+    fprintf(stderr, "freebsd_syscall_handler: handling %s\n", bsdName.c_str());
 
     greg_t arg1 = mcontext->gregs[REG_RDI];
     greg_t arg2 = mcontext->gregs[REG_RSI];
@@ -322,15 +326,12 @@ void freebsd_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
     greg_t arg5 = mcontext->gregs[REG_R8];
     greg_t arg6 = mcontext->gregs[REG_R9];
 
-    std::string bsdName = to_string((BsdSyscallNr) bsd_syscall_nr);
-    fprintf(stderr, "freebsd_syscall_handler: handling %s\n", bsdName.c_str());
-
-    switch (bsd_syscall_nr) {
+    switch (ps4_syscall_nr) {
 // For some syscall that is 1:1 freebsd to native (linux), create a case statement
 // for freebsd number bsd_nr, that invokes the native syscall with number native_nr.
 // Pass N-Args directly from the mcontext to the native syscall.
-#define DIRECT_SYSCALL_CASE(bsd_nr, native_nr, NUM_ARG_FUNCTION) \
-        case bsd_nr: \
+#define DIRECT_SYSCALL_CASE(ps4_nr, native_nr, NUM_ARG_FUNCTION) \
+        case ps4_nr: \
         { \
             NUM_ARG_FUNCTION(native_nr, mcontext, rv) \
             break; \
@@ -376,17 +377,17 @@ void freebsd_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
 
         default:
         {
-            std::string bsdName = to_string((BsdSyscallNr) bsd_syscall_nr);
-            fprintf(stderr, "Unhandled syscall : %lli (%s)\n", bsd_syscall_nr, bsdName.c_str());
+            std::string bsdName = to_string((BsdSyscallNr) ps4_syscall_nr);
+            fprintf(stderr, "Unhandled syscall : %lli (%s)\n", ps4_syscall_nr, bsdName.c_str());
             break;
         }
     }
 
     // before this point, rv should be -errno if there was an error
-    // change to bsd conventions here (rax = positive errno, CF means error)
+    // change to bsd conventions here (rax holds result or positive errno, CF means error)
     if (rv < 0) {
         rv = -rv;
-        // Set carry flag, ps4 and freebsd expects this
+        // Set carry flag. ps4 libs and freebsd expect this
         mcontext->gregs[REG_EFL] |= 1;
     }
     mcontext->gregs[REG_RAX] = rv;
