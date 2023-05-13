@@ -3,11 +3,11 @@
 bool gChrootBit = false;
 std::string gChrootPath;
 
-void enable_chroot() {
+void enter_chroot() {
     gChrootBit = true;
 }
 
-void disable_chroot() {
+void leave_chroot() {
     gChrootBit = false;
 }
 

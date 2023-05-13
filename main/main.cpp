@@ -69,6 +69,16 @@ void allow_syscalls() {
     std::atomic_thread_fence(std::memory_order_seq_cst);    
 }
 
+void enter_ps4_region() {
+    block_syscalls();
+    enter_chroot();
+}
+
+void leave_ps4_region() {
+    leave_chroot();
+    allow_syscalls();
+}
+
 ////////////////////////////////////////////////////////////////
 
 struct {
@@ -133,6 +143,7 @@ struct MappedRange {
 bool mapEntryModuleIntoMemory(fs::path nativeExecutablePath) {
     FILE *elf = fopen(nativeExecutablePath.c_str(), "r+");
     if ( !elf) {
+        fprintf(stderr, "Couldn't open entry module: error %s\n", strerror(errno));
         return false;
     }
 
@@ -153,7 +164,6 @@ static bool callInitFunctions(std::string ps4Name, InitFiniInfo &initFiniInfo) {
     std::string nativeName = getNativeLibName(fs::path(ps4Name).filename());
     fprintf(stderr, "callInitFunctions: %s start\n", nativeName.c_str());
 
-
     void *dl = dlopen(nativeName.c_str(), RTLD_LAZY);
     if ( !dl) {
         success = false;
@@ -168,7 +178,7 @@ static bool callInitFunctions(std::string ps4Name, InitFiniInfo &initFiniInfo) {
     dl = nullptr;
     // decrements ref count, but should stay loaded
 
-    block_syscalls();
+    enter_ps4_region();
 
     if ( !initFiniInfo.dt_preinit_array.empty()) {
         for (uint i = 0; i < initFiniInfo.dt_preinit_array.size(); i++) {
@@ -186,7 +196,7 @@ static bool callInitFunctions(std::string ps4Name, InitFiniInfo &initFiniInfo) {
         }
     }
 
-    allow_syscalls();
+    leave_ps4_region();
 
 error:
     char *err;
@@ -420,14 +430,45 @@ static bool init_filesystem() {
 
     set_chroot_path(chroot_path.c_str());
 
-    fs::path working_dir = chroot_path;
-    working_dir /= "mnt/test";
-    err = chdir(working_dir.c_str());
-    if (err) {
-        fprintf(stderr, "chdir: %s\n", strerror(errno));
-        return false;
-    }
     return true;
+}
+
+struct Ps4EntryThreadArgs {
+    std::map<std::string, InitFiniInfo> initFiniInfos;
+    std::vector<std::string> initLibOrder;
+
+    // eboot.bin entry point arguments
+    PFUNC_GameTheadEntry game_entry;
+    void *game_arg;
+    PFUNC_ExitFunction game_exit;
+};
+
+void *ps4_entry_thread(void *entry_thread_arg) {
+    // setup sysctl values (or in main thread)
+    // Call init functions
+    //
+    Ps4EntryThreadArgs *entryThreadArgs = (Ps4EntryThreadArgs *) entry_thread_arg;
+
+    for (uint i = 0; i < entryThreadArgs->initLibOrder.size(); i++) {
+        fs::path nativeLibName = getNativeLibName(entryThreadArgs->initLibOrder[i]);
+        callInitFunctions(entryThreadArgs->initLibOrder[i], entryThreadArgs->initFiniInfos[nativeLibName]);
+    }
+
+    return NULL;
+}
+
+static void runPs4Thread(Ps4EntryThreadArgs &entryThreadArgs) {
+    pthread_t ps4Thread;
+    pthread_attr_t attr;
+    void *stackAddr;
+    size_t stackSize;
+
+    pthread_attr_init(&attr);
+    pthread_attr_getstack(&attr, &stackAddr, &stackSize);
+    pthread_create(&ps4Thread, &attr, ps4_entry_thread, (void *) &entryThreadArgs);
+    pthread_attr_getstack(&attr, &stackAddr, &stackSize);
+
+    pthread_join(ps4Thread, NULL);
 }
 
 int main(int argc, char **argv) {
@@ -574,13 +615,6 @@ int main(int argc, char **argv) {
     if ( !init_filesystem()) {
         return 1;
     }
-    enable_chroot();
-    for (uint i = 0; i < topologicalLibOrder.size(); i++) {
-    //for (int i = 1; i >= 0; i--) {
-        fs::path nativeLibName = getNativeLibName(topologicalLibOrder[i]);
-        callInitFunctions(topologicalLibOrder[i], initFiniInfos[nativeLibName]);
-    }
-    disable_chroot();
 
     fs::path entryModule = CmdArgs.nativeElfOutputDir;
     entryModule /= getNativeLibName("eboot.bin");
@@ -588,10 +622,13 @@ int main(int argc, char **argv) {
         return -1;
     }
 
-    enable_chroot();
-    // TODO launch ps4 entry point thread
-    disable_chroot();
+    // TODO game thread
+    Ps4EntryThreadArgs args;
+    args.initFiniInfos = initFiniInfos;
+    args.initLibOrder = topologicalLibOrder;
+    runPs4Thread(args);
 
+    // Shutdown
     for (auto handle: preloadHandles) {
         dlclose(handle);
     }

@@ -1,8 +1,8 @@
 #include <string>
 
-void enable_chroot();
+void enter_chroot();
 
-void disable_chroot();
+void leave_chroot();
 
 bool is_chrooted();
 

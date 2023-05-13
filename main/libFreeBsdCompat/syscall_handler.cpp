@@ -317,7 +317,7 @@ void freebsd_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
     greg_t ps4_syscall_nr = mcontext->gregs[REG_RAX];
 
     std::string bsdName = to_string((BsdSyscallNr) ps4_syscall_nr);
-    fprintf(stderr, "freebsd_syscall_handler: handling %s\n", bsdName.c_str());
+    //fprintf(stderr, "freebsd_syscall_handler: handling %s\n", bsdName.c_str());
 
     greg_t arg1 = mcontext->gregs[REG_RDI];
     greg_t arg2 = mcontext->gregs[REG_RSI];

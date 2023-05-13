@@ -15,7 +15,6 @@ namespace fs = std::filesystem;
         impl = (PFN_##fn) dlsym(RTLD_NEXT, #fn); \
     } \
     if (filearg[0] == '/' && is_chrooted()) { \
-        raise(SIGTRAP); \
         modded_path = get_chroot_path(); \
         modded_path += filearg; \
         filearg = modded_path.c_str(); \

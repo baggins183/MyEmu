@@ -796,7 +796,7 @@ static bool fixDynamicInfoForLinker(ElfPatcherContext &Ctx, FILE *elf, std::vect
                 uint64_t upp = dyn->d_un.d_val >> 32;
                 uint64_t low = dyn->d_un.d_val & 0xffffffff;
                 assert(upp % 0x10000 == 0);
-                assert(low == 0x9);
+                //assert(low == 0x9);
                 break;
             }
             case DT_SCE_HASH:
