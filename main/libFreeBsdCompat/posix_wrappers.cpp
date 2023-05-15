@@ -36,7 +36,7 @@ int open(const char *pathname, int flags, mode_t mode) {
     CHROOT_WRAPPER(open, pathname)
     int res = impl(pathname, flags, mode);
     if (res < 0) {
-        fprintf(stderr, "open failed: %s\n", strerror(errno));
+        fprintf(stderr, "open failed for %s: %s\n", pathname, strerror(errno));
     }
     return res;
 }
@@ -57,7 +57,8 @@ int openat2(int dirfd, const char *pathname, const struct open_how *how, size_t 
 }
 
 int fprintf (FILE *__restrict __stream, const char *__restrict __format, ...) {
-    if ((uint64_t) __stream == 0x00007ffff7108f50) {
+    if ((uint64_t) __stream == 0x00007ffff7108f50
+        || (uint64_t) __stream == 0x00007ffff7104f50) {
         __stream = stderr;
     }
 

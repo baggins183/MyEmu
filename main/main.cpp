@@ -28,6 +28,7 @@
 #include <atomic>
 
 #include <filesystem>
+#include <fstream>
 #include <algorithm>
 #include <dlfcn.h>
 #include <link.h>
@@ -397,7 +398,12 @@ static bool create_dir_structure(fs::path &chroot_path) {
         "/dev",
         "/dev/dipsw",
         "/mnt",
-        "/mnt/test",
+    };
+
+    static const char *files[] {
+        // graphics card?
+        // libSceGnmDriver.prx.native opens this with O_RDWR
+        "/dev/gc"
     };
 
     for (const char *dir: dirs) {
@@ -411,12 +417,17 @@ static bool create_dir_structure(fs::path &chroot_path) {
         }
     }
 
+    for (const char *file: files) {
+        fs::path file_path = chroot_path;
+        file_path += fs::path(file);
+        std::ofstream ofs(file_path);
+        ofs.close();
+    }
+
     return true;
 }
 
 static bool init_filesystem() {
-    int err;
-
     const char *home_dir = getenv("HOME");
     if ( !home_dir) {
         return false;
@@ -449,6 +460,8 @@ void *ps4_entry_thread(void *entry_thread_arg) {
     //
     Ps4EntryThreadArgs *entryThreadArgs = (Ps4EntryThreadArgs *) entry_thread_arg;
 
+    assert(setupSyscallTrampoline());
+
     for (uint i = 0; i < entryThreadArgs->initLibOrder.size(); i++) {
         fs::path nativeLibName = getNativeLibName(entryThreadArgs->initLibOrder[i]);
         callInitFunctions(entryThreadArgs->initLibOrder[i], entryThreadArgs->initFiniInfos[nativeLibName]);
@@ -457,18 +470,28 @@ void *ps4_entry_thread(void *entry_thread_arg) {
     return NULL;
 }
 
-static void runPs4Thread(Ps4EntryThreadArgs &entryThreadArgs) {
+static bool runPs4Thread(Ps4EntryThreadArgs &entryThreadArgs) {
     pthread_t ps4Thread;
     pthread_attr_t attr;
-    void *stackAddr;
-    size_t stackSize;
 
     pthread_attr_init(&attr);
-    pthread_attr_getstack(&attr, &stackAddr, &stackSize);
-    pthread_create(&ps4Thread, &attr, ps4_entry_thread, (void *) &entryThreadArgs);
-    pthread_attr_getstack(&attr, &stackAddr, &stackSize);
 
+    constexpr size_t stack_size = 2048 * 1024;
+    assert(stack_size > __sysconf (__SC_THREAD_STACK_MIN_VALUE));
+    void *stack = malloc(stack_size);
+
+    if (!stack_size) {
+        return false;
+    }
+
+    pthread_attr_setstack(&attr, stack, stack_size);
+
+    block_syscalls();
+    pthread_create(&ps4Thread, &attr, ps4_entry_thread, (void *) &entryThreadArgs);
     pthread_join(ps4Thread, NULL);
+    allow_syscalls();
+
+    return true;
 }
 
 int main(int argc, char **argv) {
@@ -570,6 +593,7 @@ int main(int argc, char **argv) {
     for (std::string preload: Ctx.preloadNames) {
         auto preloadPath = preloadSearcher.findLibrary(preload);
         assert(preloadPath);
+        fprintf(stderr, "main: preloading %s\n", preloadPath->c_str());
         // Note RTLD_GLOBAL: these symbols will take precedence over ps4 symbols in lookups/relocs
         void *handle = dlopen(preloadPath->c_str(), RTLD_LAZY | RTLD_GLOBAL);
         if (!handle) {
@@ -578,7 +602,7 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "(dlopen) %s\n", err);
             }
             return -1;
-        }        
+        }
         preloadHandles.push_back(handle);
     }
 
@@ -587,7 +611,7 @@ int main(int argc, char **argv) {
     // Needs to be before dlopen is called on any sce lib, because we need to
     // reserve the range between libc and the handler function, with mmap, so sce libs
     // don't sneak in
-    setupSyscallTrampoline();   
+    setupSyscallTrampoline();
 
     // Load ps4 module
     fs::path firstLib = CmdArgs.nativeElfOutputDir;
@@ -616,11 +640,16 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    fs::path entryModule = CmdArgs.nativeElfOutputDir;
-    entryModule /= getNativeLibName("eboot.bin");
-    if ( !mapEntryModuleIntoMemory(entryModule)) {
-        return -1;
-    }
+//    fs::path entryModule = CmdArgs.nativeElfOutputDir;
+//    entryModule /= getNativeLibName("eboot.bin");
+//    if ( !mapEntryModuleIntoMemory(entryModule)) {
+//        return -1;
+//    }
+
+//    for (uint i = 0; i < topologicalLibOrder.size(); i++) {
+//        fs::path nativeLibName = getNativeLibName(topologicalLibOrder[i]);
+//        callInitFunctions(topologicalLibOrder[i], initFiniInfos[nativeLibName]);
+//    }
 
     // TODO game thread
     Ps4EntryThreadArgs args;
