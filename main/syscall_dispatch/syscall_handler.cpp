@@ -17,7 +17,7 @@
 #include <fcntl.h>
 #include <filesystem>
 namespace fs = std::filesystem;
-#include "../chroot.h"
+#include "chroot/chroot.h"
 
 #define DIRECT_SYSCALL_MAP(OP) \
     OP(SYS_getpid, __NR_getpid, ZERO_ARGS) \
@@ -418,9 +418,9 @@ void freebsd_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
             break; \
         }
 
-        // Declare case statements for each bsd -> native syscall mapping
-        // Only do this for the syscalls that map 1:1 with no intervention needed
-        DIRECT_SYSCALL_MAP(DIRECT_SYSCALL_CASE)
+// Declare case statements for each bsd -> native syscall mapping
+// Only do this for the syscalls that map 1:1 with no intervention needed
+DIRECT_SYSCALL_MAP(DIRECT_SYSCALL_CASE)
 
 #undef DIRECT_SYSCALL_CASE
 
