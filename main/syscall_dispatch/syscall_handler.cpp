@@ -9,7 +9,7 @@
 #include <unistd.h>
 #include <asm/unistd_64.h>
 #include <stdio.h>
-#include "freebsd_compat.h"
+#include "syscall_dispatch.h"
 #include "orbis/freebsd_9.0_syscalls.hpp"
 #include <sys/ucontext.h>
 #include "ps4_sysctl.h"
