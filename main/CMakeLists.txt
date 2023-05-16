@@ -10,6 +10,6 @@
 
 add_subdirectory(syscall_dispatch)
 
-add_executable(main main.cpp pmparser.c)
+add_executable(main main.cpp pmparser.c chroot.cpp)
 set_property(TARGET main PROPERTY POSITION_INDEPENDENT_CODE ON)
-target_link_libraries(main elfpatcher pthread dl nid_hash sqlite3 syscall_dispatch ps4_chroot)
+target_link_libraries(main elfpatcher pthread dl nid_hash sqlite3 syscall_dispatch)

@@ -4,7 +4,7 @@
 #include <filesystem>
 #include <csignal>
 namespace fs = std::filesystem;
-#include "chroot/chroot.h"
+#include "../chroot.h"
 #include <cstdarg>
 
 #define CHROOT_WRAPPER(fn, filearg) \

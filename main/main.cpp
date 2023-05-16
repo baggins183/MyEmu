@@ -39,7 +39,7 @@
 #include <sys/capability.h>
 
 #include "elfpatcher/elfpatcher.h"
-#include "chroot/chroot.h"
+#include "chroot.h"
 
 #include <signal.h>
 #include <sys/prctl.h>
@@ -467,8 +467,6 @@ void *ps4_entry_thread(void *entry_thread_arg) {
         callInitFunctions(entryThreadArgs->initLibOrder[i], entryThreadArgs->initFiniInfos[nativeLibName]);
     }
 
-    enter_ps4_region();
-    // TODO
     return NULL;
 }
 
@@ -515,6 +513,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Failed to create directory %s: %s\n", CmdArgs.nativeElfOutputDir.c_str(), m.c_str());
         return -1;
     }    
+
 
     std::map<std::string, std::set<std::string>> dependsOn;
     std::map<std::string, InitFiniInfo> initFiniInfos;

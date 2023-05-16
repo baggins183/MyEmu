@@ -2,8 +2,6 @@
 
 bool gChrootBit = false;
 std::string gChrootPath;
-//thread_local bool gChrootBit = false;
-//thread_local std::string gChrootPath;
 
 void enter_chroot() {
     gChrootBit = true;
