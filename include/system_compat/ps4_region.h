@@ -28,10 +28,10 @@ enum CodeRegionType {
 // Basically works like a push and pop.
 class CodeRegionScope {
 public:
-    CodeRegionScope(CodeRegionType entering_region_type) {
+    CodeRegionScope(CodeRegionType new_region_type) {
         m_lastRegionType = in_ps4_region() ? PS4_REGION : HOST_REGION;
-        if (entering_region_type != m_lastRegionType) {
-            switch (entering_region_type) {
+        if (new_region_type != m_lastRegionType) {
+            switch (new_region_type) {
                 case PS4_REGION:
                     enter_ps4_region();
                     break;

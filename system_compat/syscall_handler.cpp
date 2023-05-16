@@ -152,17 +152,18 @@ namespace fs = std::filesystem;
 
 static greg_t handle_open(mcontext_t *mcontext) {
     int rv;
-    fs::path modded_path;
 
     const char *name = *reinterpret_cast<char **>(&mcontext->gregs[REG_RDI]);
     int flags = *reinterpret_cast<int *>(&mcontext->gregs[REG_RSI]);
     mode_t mode = *reinterpret_cast<mode_t *>(&mcontext->gregs[REG_RDX]);
 
-    // call open libc wrapper
-    raise(SIGTRAP);
-    enter_ps4_region();
-    rv = open(name, flags, mode);
-    leave_ps4_region();
+    {
+        // Call open wrapper that chroots calls coming from ps4 code
+        // TODO verify this calls the wrapper and not libc
+        CodeRegionScope scope(PS4_REGION);
+        raise(SIGTRAP);
+        rv = open(name, flags, mode);
+    }
     if (rv < 0) {
         rv = -errno;
     }
@@ -382,22 +383,16 @@ extern "C" {
 void freebsd_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
     ucontext_t *ucontext = (ucontext_t *) ucontext_arg;
     mcontext_t *mcontext = &ucontext->uc_mcontext;
-
-    leave_ps4_region();
-
     int64_t rv = -EINVAL;
+
+    // Enter host code
+    CodeRegionScope __scope(HOST_REGION);
+    assert(__scope.lastScopeWasPs4());
 
     greg_t ps4_syscall_nr = mcontext->gregs[REG_RAX];
 
     std::string bsdName = to_string((BsdSyscallNr) ps4_syscall_nr);
     printf("freebsd_syscall_handler: handling %s\n", bsdName.c_str());
-
-    //greg_t arg1 = mcontext->gregs[REG_RDI];
-    //greg_t arg2 = mcontext->gregs[REG_RSI];
-    //greg_t arg3 = mcontext->gregs[REG_RDX];
-    //greg_t arg4 = mcontext->gregs[REG_R10];
-    //greg_t arg5 = mcontext->gregs[REG_R8];
-    //greg_t arg6 = mcontext->gregs[REG_R9];
 
     switch (ps4_syscall_nr) {
 // For some syscall that is 1:1 freebsd to native (linux), create a case statement
@@ -477,8 +472,6 @@ void freebsd_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
         mcontext->gregs[REG_EFL] &= (~1llu);
     }
     mcontext->gregs[REG_RAX] = rv;
-
-    enter_ps4_region();
 }
 
 }

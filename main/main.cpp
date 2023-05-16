@@ -137,25 +137,26 @@ static bool callInitFunctions(std::string ps4Name, InitFiniInfo &initFiniInfo) {
     dl = nullptr;
     // decrements ref count, but should stay loaded
 
-    enter_ps4_region();
+    {
+        CodeRegionScope __scope(PS4_REGION);
 
-    if ( !initFiniInfo.dt_preinit_array.empty()) {
-        for (uint i = 0; i < initFiniInfo.dt_preinit_array.size(); i++) {
-            ((PFN_PS4_INIT_FUNC) (l->l_addr + initFiniInfo.dt_preinit_array[i])) (argc, argv, NULL);
+        if ( !initFiniInfo.dt_preinit_array.empty()) {
+            for (uint i = 0; i < initFiniInfo.dt_preinit_array.size(); i++) {
+                ((PFN_PS4_INIT_FUNC) (l->l_addr + initFiniInfo.dt_preinit_array[i])) (argc, argv, NULL);
+            }
         }
-    }
 
-    if ( initFiniInfo.dt_init) {
-        ((PFN_PS4_INIT_FUNC) (l->l_addr + initFiniInfo.dt_init.value())) (argc, argv, NULL);
-    }
-
-    if ( !initFiniInfo.dt_init_array.empty()) {
-        for (uint i = 0; i < initFiniInfo.dt_init_array.size(); i++) {
-            ((PFN_PS4_INIT_FUNC) (l->l_addr + initFiniInfo.dt_init_array[i])) (argc, argv, NULL);
+        if ( initFiniInfo.dt_init) {
+            ((PFN_PS4_INIT_FUNC) (l->l_addr + initFiniInfo.dt_init.value())) (argc, argv, NULL);
         }
-    }
 
-    leave_ps4_region();
+        if ( !initFiniInfo.dt_init_array.empty()) {
+            for (uint i = 0; i < initFiniInfo.dt_init_array.size(); i++) {
+                ((PFN_PS4_INIT_FUNC) (l->l_addr + initFiniInfo.dt_init_array[i])) (argc, argv, NULL);
+            }
+        }
+
+    }
 
 error:
     char *err;
