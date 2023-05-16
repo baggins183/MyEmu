@@ -15,6 +15,7 @@ project(MyEmu C CXX ASM)
 
 include_directories("include/")
 
+add_subdirectory(system_compat)
 add_subdirectory(ps4lib_overloads)
 add_subdirectory(nid_hash)
 add_subdirectory(elfpatcher)

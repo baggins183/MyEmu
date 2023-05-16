@@ -9,7 +9,7 @@
 #include <unistd.h>
 #include <asm/unistd_64.h>
 #include <stdio.h>
-#include "syscall_dispatch.h"
+#include "system_compat/syscall_dispatch.h"
 #include "orbis/freebsd_9.0_syscalls.hpp"
 #include <sys/ucontext.h>
 #include "ps4_sysctl.h"
@@ -17,7 +17,7 @@
 #include <fcntl.h>
 #include <filesystem>
 namespace fs = std::filesystem;
-#include "../chroot.h"
+#include "system_compat/chroot.h"
 
 #define DIRECT_SYSCALL_MAP(OP) \
     OP(SYS_getpid, __NR_getpid, ZERO_ARGS) \

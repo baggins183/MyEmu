@@ -39,7 +39,7 @@
 #include <sys/capability.h>
 
 #include "elfpatcher/elfpatcher.h"
-#include "chroot.h"
+#include "system_compat/chroot.h"
 
 #include <signal.h>
 #include <sys/prctl.h>
@@ -48,7 +48,7 @@ extern "C" {
 #include "pmparser.h"
 }
 
-#include "syscall_dispatch/syscall_dispatch.h"
+#include "system_compat/syscall_dispatch.h"
 
 namespace fs = std::filesystem;
 
@@ -237,7 +237,7 @@ static bool setupSyscallTrampoline() {
         fs::path soPath(pm->pathname);
         if (soPath.has_filename()) {
             if ((soPath.has_stem() && soPath.stem() == "libc.so") 
-                    ||  soPath.filename() == "libsyscall_dispatch.so") 
+                    ||  soPath.filename() == "libsystem_compat.so")
             {
                 if ( !found) {
                     addr_start = (uint64_t) pm->addr_start;

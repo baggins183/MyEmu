@@ -8,8 +8,6 @@
 #target_link_libraries(old pthread nid_hash)
 #target_link_options(old PRIVATE "${LINKER_ARGS}")
 
-add_subdirectory(syscall_dispatch)
-
-add_executable(main main.cpp pmparser.c chroot.cpp)
+add_executable(main main.cpp pmparser.c)
 set_property(TARGET main PROPERTY POSITION_INDEPENDENT_CODE ON)
-target_link_libraries(main elfpatcher pthread dl nid_hash sqlite3 syscall_dispatch)
+target_link_libraries(main elfpatcher pthread dl nid_hash sqlite3 system_compat)
