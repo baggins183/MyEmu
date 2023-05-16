@@ -9,7 +9,7 @@
 #include <unistd.h>
 #include <asm/unistd_64.h>
 #include <stdio.h>
-#include "system_compat/syscall_dispatch.h"
+#include "syscall_handler.h"
 #include "orbis/freebsd_9.0_syscalls.hpp"
 #include <sys/ucontext.h>
 #include "ps4_sysctl.h"
@@ -17,7 +17,7 @@
 #include <fcntl.h>
 #include <filesystem>
 namespace fs = std::filesystem;
-#include "system_compat/chroot.h"
+#include "system_compat/ps4_region.h"
 
 #define DIRECT_SYSCALL_MAP(OP) \
     OP(SYS_getpid, __NR_getpid, ZERO_ARGS) \
@@ -164,11 +164,10 @@ static greg_t handle_open(mcontext_t *mcontext) {
         flags
     );
 
-    if (name[0] == '/' && is_chrooted()) {
-        modded_path = get_chroot_path();
-        modded_path += name;
-        name = modded_path.c_str();
-    };
+    modded_path = get_chroot_path();
+    assert(!modded_path.empty());
+    modded_path += name;
+    name = modded_path.c_str();
 
     fprintf(stderr, "\tmodded_name: %s\n", name);
 

@@ -39,48 +39,11 @@
 #include <sys/capability.h>
 
 #include "elfpatcher/elfpatcher.h"
-#include "system_compat/chroot.h"
-
-#include <signal.h>
-#include <sys/prctl.h>
-// parsing the /proc/<pid>/map files
-extern "C" {
-#include "pmparser.h"
-}
-
-#include "system_compat/syscall_dispatch.h"
+#include "system_compat/ps4_region.h"
 
 namespace fs = std::filesystem;
 
-extern void (*_syscall_handler)(int signum);
-
 const std::string ebootPath = "eboot.bin";
-
-////////////////////////////////////////////////////////////////
-
-char syscall_dispatch_switch = SYSCALL_DISPATCH_FILTER_ALLOW;
-
-void block_syscalls() {
-    syscall_dispatch_switch = SYSCALL_DISPATCH_FILTER_BLOCK;
-    std::atomic_thread_fence(std::memory_order_seq_cst);    
-}
-
-void allow_syscalls() {
-    syscall_dispatch_switch = SYSCALL_DISPATCH_FILTER_ALLOW;
-    std::atomic_thread_fence(std::memory_order_seq_cst);    
-}
-
-void enter_ps4_region() {
-    block_syscalls();
-    enter_chroot();
-}
-
-void leave_ps4_region() {
-    leave_chroot();
-    allow_syscalls();
-}
-
-////////////////////////////////////////////////////////////////
 
 struct {
     std::string currentPs4Lib;
@@ -135,11 +98,6 @@ bool parseCmdArgs(int argc, char **argv) {
     CmdArgs.entryModule = argv[argc - 1];
     return true;
 }
-
-struct MappedRange {
-    uint64_t base_addr;
-    size_t n_pages;
-};
 
 bool mapEntryModuleIntoMemory(fs::path nativeExecutablePath) {
     FILE *elf = fopen(nativeExecutablePath.c_str(), "r+");
@@ -212,119 +170,6 @@ error:
     return success;
 }
 
-// Restrict syscalls to libc.so.x
-// Syscalls from other memory regions will be handled by a translation layer
-// This is to translate FreeBSD syscalls to linux, and handle differences in how the ps4 libs
-// interpret syscall errors
-static bool setupSyscallTrampoline() {
-    // parse /proc/self/map to find the ranges to give to the SYSCALL_USER_DISPATCH prctl call
-    int err;
-    
-    // Also record all the presently mapped pages
-    // We will also mmap the gaps so future libraries (ps4 elfs) can't occupy them
-    // We need to reserve a range that includes libc.so and the syscall trampoline code,
-    // where syscalls can execute without being blocked by the user dispatch filter
-    std::vector<MappedRange> occupiedRanges;
-
-    procmaps_struct *pm;
-    // errno is 2 on entry here, should check why
-    procmaps_iterator *it = pmparser_parse(-1);
-
-    uint64_t addr_start = 0;
-    uint64_t addr_end = 0;
-    bool found = false;
-    while ((pm = pmparser_next(it))) {
-        fs::path soPath(pm->pathname);
-        if (soPath.has_filename()) {
-            if ((soPath.has_stem() && soPath.stem() == "libc.so") 
-                    ||  soPath.filename() == "libsystem_compat.so")
-            {
-                if ( !found) {
-                    addr_start = (uint64_t) pm->addr_start;
-                    addr_end = (uint64_t) pm->addr_end;
-                } else {
-                    addr_start = std::min(addr_start, (uint64_t) pm->addr_start);
-                    addr_end = std::max(addr_end, (uint64_t) pm->addr_end);
-                }
-                found = true;
-            }
-        }
-
-        assert(( (uint64_t)pm->addr_end - (uint64_t)pm->addr_start ) % PGSZ == 0);
-        occupiedRanges.push_back({ (uint64_t) pm->addr_start, ((uint64_t)pm->addr_end - (uint64_t)pm->addr_start) / PGSZ});
-    }
-
-    if ( !found) {
-        return false;
-    }
-
-    std::sort(occupiedRanges.begin(), occupiedRanges.end(), [](const auto &a, const auto &b) {
-        return a.base_addr < b.base_addr;
-    });
-
-    uint pos = 0;
-    for (; pos < occupiedRanges.size(); pos++) {
-        if (occupiedRanges[pos].base_addr == addr_start) {
-            break;
-        }
-    }
-    assert(pos < occupiedRanges.size());
-
-    // mmap the gaps between libc and our trampoline so ps4 libs can't be loaded there
-    while (pos < occupiedRanges.size() - 1) {
-        MappedRange &first = occupiedRanges[pos];
-        MappedRange &snd = occupiedRanges[pos + 1];
-        
-        size_t page_gap = (snd.base_addr - first.base_addr) / PGSZ - first.n_pages;
-        if (page_gap > 0) {
-            uint64_t map_addr = first.base_addr + PGSZ * first.n_pages;
-            uint64_t map_size = PGSZ * page_gap;
-            assert(map_addr % PGSZ == 0);
-            void * mmap_result;
-            mmap_result = mmap((void *) map_addr, map_size, PROT_NONE, MAP_FIXED_NOREPLACE | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-            if (mmap_result == MAP_FAILED) {
-                switch (errno) {
-                    case EEXIST:
-                        break;
-                    default:
-                        fprintf(stderr, "mmap failed: %s", strerror(errno));
-                        return false;
-                }
-            }
-        }
-        // We've filled between libc and the trampoline, break
-        if (snd.base_addr + PGSZ * snd.n_pages == addr_end) {
-            break;   
-        }
-
-        ++pos;
-    }
-
-	struct sigaction action;
-    (void)memset(&action, 0, sizeof action);
-	action.sa_sigaction = freebsd_syscall_handler;
-	(void)sigemptyset(&action.sa_mask);
-	(void)sigfillset(&action.sa_mask);
-	(void)sigdelset(&action.sa_mask, SIGSYS);
-	action.sa_flags = SA_SIGINFO;
-
-	err = sigaction(SIGSYS, &action, NULL);
-    if (err) {
-        printf("sigaction error: %s", strerror(errno));
-    }
-
-    err = prctl(PR_SET_SYSCALL_USER_DISPATCH, PR_SYS_DISPATCH_ON, addr_start, (addr_end - addr_start), &syscall_dispatch_switch);
-    allow_syscalls();
-
-    if (err) {
-        printf("prctl error: %s", strerror(errno));
-        return false;
-    }
-
-    return true;
-}
-
-//
 static bool findCyclicDependency(const std::string &curLib, const std::string &origLib, std::set<std::string> &transitiveDeps, std::map<std::string, std::set<std::string>> &dependsOn) {
     if (curLib == origLib) {
         return true;
@@ -460,7 +305,7 @@ void *ps4_entry_thread(void *entry_thread_arg) {
     //
     Ps4EntryThreadArgs *entryThreadArgs = (Ps4EntryThreadArgs *) entry_thread_arg;
 
-    assert(setupSyscallTrampoline());
+    assert(thread_init_syscall_user_dispatch());
 
     for (uint i = 0; i < entryThreadArgs->initLibOrder.size(); i++) {
         fs::path nativeLibName = getNativeLibName(entryThreadArgs->initLibOrder[i]);
@@ -486,10 +331,8 @@ static bool runPs4Thread(Ps4EntryThreadArgs &entryThreadArgs) {
 
     pthread_attr_setstack(&attr, stack, stack_size);
 
-    block_syscalls();
     pthread_create(&ps4Thread, &attr, ps4_entry_thread, (void *) &entryThreadArgs);
     pthread_join(ps4Thread, NULL);
-    allow_syscalls();
 
     return true;
 }
@@ -587,6 +430,13 @@ int main(int argc, char **argv) {
         }
     }
 
+    // Setup trampoline to handle syscalls coming from inside sce code
+    // Only syscalls from libc and the handler itself will execute unfiltered
+    // Needs to be before dlopen is called on any sce lib, because we need to
+    // reserve the range between libc and the handler function, with mmap, so sce libs
+    // don't sneak in
+    assert(thread_init_syscall_user_dispatch());
+
     // Preload compatability libs that override sce functions in symbol order
     std::vector<void *> preloadHandles;
     LibSearcher preloadSearcher({{CmdArgs.preloadDirPath, true}});
@@ -605,13 +455,6 @@ int main(int argc, char **argv) {
         }
         preloadHandles.push_back(handle);
     }
-
-    // Setup trampoline to handle syscalls coming from inside sce code
-    // Only syscalls from libc and the handler itself will execute unfiltered
-    // Needs to be before dlopen is called on any sce lib, because we need to
-    // reserve the range between libc and the handler function, with mmap, so sce libs
-    // don't sneak in
-    setupSyscallTrampoline();
 
     // Load ps4 module
     fs::path firstLib = CmdArgs.nativeElfOutputDir;

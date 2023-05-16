@@ -4,7 +4,7 @@
 #include <filesystem>
 #include <csignal>
 namespace fs = std::filesystem;
-#include "system_compat/chroot.h"
+#include "system_compat/ps4_region.h"
 #include <cstdarg>
 
 #define CHROOT_WRAPPER(fn, filearg) \
@@ -14,7 +14,7 @@ namespace fs = std::filesystem;
     if (!impl) { \
         impl = (PFN_##fn) dlsym(RTLD_NEXT, #fn); \
     } \
-    if (filearg[0] == '/' && is_chrooted()) { \
+    if (filearg[0] == '/' && in_ps4_region()) { \
         modded_path = get_chroot_path(); \
         modded_path += filearg; \
         filearg = modded_path.c_str(); \
