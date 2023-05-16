@@ -154,6 +154,7 @@ bool thread_init_syscall_user_dispatch() {
         _has_set_sigsys_handler = true;
     }
 
+    // Does &_syscall_dispatch_switch (thread_local) ) work?
     int err = prctl(PR_SET_SYSCALL_USER_DISPATCH, PR_SYS_DISPATCH_ON, _addr_start, (_addr_end - _addr_start), &_syscall_dispatch_switch);
     leave_ps4_region();
 

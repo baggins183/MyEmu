@@ -1,6 +1,15 @@
 #include <cstdio>
 #include <dlfcn.h>
 #include <sys/mman.h>
+#include <cstring>
+#include <stdio.h>
+#include <dlfcn.h>
+#include <filesystem>
+#include <csignal>
+#include "system_compat/ps4_region.h"
+#include <cstdarg>
+
+#include "wrappers.h"
 
 extern "C" {
 
@@ -76,5 +85,28 @@ extern "C" {
 //
 //    return impl(addr, length, prot, linux_flags, fd, offset);
 //}
+
+int fprintf (FILE *__restrict __stream, const char *__restrict __format, ...) {
+    bool was_in_ps4 = in_ps4_region();
+    if (in_ps4_region()) {
+        if ((uint64_t) __stream == 0x00007ffff7108f50
+            || (uint64_t) __stream == 0x00007ffff7104f50
+            || (uint64_t) __stream == 0x00007ffff70c8f50) {
+            __stream = stderr;
+        }
+    }
+
+    leave_ps4_region();
+    va_list ap;
+
+    va_start(ap, __format);
+    int rv = vfprintf(__stream, __format, ap);
+    va_end(ap);
+
+    if (was_in_ps4) { // TODO make a push/pop system
+        enter_ps4_region();
+    }
+    return rv;
+}
 
 } // extern "C"

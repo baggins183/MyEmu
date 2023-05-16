@@ -7,68 +7,78 @@ namespace fs = std::filesystem;
 #include "system_compat/ps4_region.h"
 #include <cstdarg>
 
-#define CHROOT_WRAPPER(fn, filearg) \
-    fs::path modded_path; \
-    typedef decltype(fn)* PFN_##fn; \
-    static PFN_##fn impl = nullptr; \
-    if (!impl) { \
-        impl = (PFN_##fn) dlsym(RTLD_NEXT, #fn); \
-    } \
-    if (filearg[0] == '/' && in_ps4_region()) { \
-        modded_path = get_chroot_path(); \
-        modded_path += filearg; \
-        filearg = modded_path.c_str(); \
+#include "wrappers.h"
+
+static fs::path modPathForChroot(const char *path) {
+    if (path[0] == '/') {
+        fs::path moddedPath = get_chroot_path();
+        moddedPath += path;
+        return moddedPath;
+    } else {
+        return path;
     }
+}
 
 extern "C" {
 
 FILE *fopen( const char * filename, const char * mode) {
-    CHROOT_WRAPPER(fopen, filename)
-    return impl(filename, mode);
-}
+    SYSTEM_LIB_WRAPPER(fopen, filename, mode)
 
-FILE *fopen64(const char *__restrict filename, const char *__restrict modes) {
-    CHROOT_WRAPPER(fopen64, filename)
-    return impl(filename, modes);
-}
+    fs::path moddedPath = modPathForChroot(filename);
+    auto rv = fopen__impl(moddedPath.c_str(), mode);
 
-int open(const char *pathname, int flags, mode_t mode) {
-    CHROOT_WRAPPER(open, pathname)
-    int res = impl(pathname, flags, mode);
-    if (res < 0) {
-        fprintf(stderr, "open failed for %s: %s\n", pathname, strerror(errno));
-    }
-    return res;
-}
-
-int creat(const char *pathname, mode_t mode) {
-    CHROOT_WRAPPER(creat, pathname)
-    return impl(pathname, mode);
-}
-
-int openat(int dirfd, const char *pathname, int flags, mode_t mode) {
-    CHROOT_WRAPPER(openat, pathname)
-    return impl(dirfd, pathname, flags, mode);
-}
-
-int openat2(int dirfd, const char *pathname, const struct open_how *how, size_t size) {
-    CHROOT_WRAPPER(openat2, pathname)
-    return impl(dirfd, pathname, how, size);
-}
-
-int fprintf (FILE *__restrict __stream, const char *__restrict __format, ...) {
-    if ((uint64_t) __stream == 0x00007ffff7108f50
-        || (uint64_t) __stream == 0x00007ffff7104f50) {
-        __stream = stderr;
-    }
-
-    va_list ap;
-
-    va_start(ap, __format);
-    int rv = vfprintf(__stream, __format, ap);
-    va_end(ap);
-
+    END_SYSTEM_LIB_WRAPPER
     return rv;
 }
 
+FILE *fopen64(const char *__restrict filename, const char *__restrict modes) {
+    SYSTEM_LIB_WRAPPER(fopen64, filename, modes)
+
+    fs::path moddedPath = modPathForChroot(filename);
+    auto rv = fopen64__impl(moddedPath.c_str(), modes);
+
+    END_SYSTEM_LIB_WRAPPER
+    return rv;
 }
+
+int open(const char *pathname, int flags, mode_t mode) {
+    SYSTEM_LIB_WRAPPER(open, pathname, flags, mode)
+
+    fs::path moddedPath = modPathForChroot(pathname);
+    auto rv = open__impl(moddedPath.c_str(), flags, mode);
+
+    END_SYSTEM_LIB_WRAPPER
+    return rv;
+}
+
+int creat(const char *pathname, mode_t mode) {
+    SYSTEM_LIB_WRAPPER(creat, pathname, mode)
+
+    fs::path moddedPath = modPathForChroot(pathname);
+    auto rv = creat__impl(moddedPath.c_str(), mode);
+
+    END_SYSTEM_LIB_WRAPPER
+    return rv;
+}
+
+int openat(int dirfd, const char *pathname, int flags, mode_t mode) {
+    SYSTEM_LIB_WRAPPER(openat, dirfd, pathname, flags, mode)
+
+    fs::path moddedPath = modPathForChroot(pathname);
+    auto rv = openat__impl(dirfd, moddedPath.c_str(), flags, mode);
+
+    END_SYSTEM_LIB_WRAPPER
+    return rv;
+}
+
+int openat2(int dirfd, const char *pathname, const struct open_how *how, size_t size) {
+    SYSTEM_LIB_WRAPPER(openat2, dirfd, pathname, how, size)
+
+    fs::path moddedPath = modPathForChroot(pathname);
+    auto rv = openat2__impl(dirfd, moddedPath.c_str(), how, size);
+
+    END_SYSTEM_LIB_WRAPPER
+    return rv;
+}
+
+} // extern "C"

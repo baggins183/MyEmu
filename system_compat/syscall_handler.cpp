@@ -158,20 +158,11 @@ static greg_t handle_open(mcontext_t *mcontext) {
     int flags = *reinterpret_cast<int *>(&mcontext->gregs[REG_RSI]);
     mode_t mode = *reinterpret_cast<mode_t *>(&mcontext->gregs[REG_RDX]);
 
-    fprintf(stderr, "\tname: %s\n"
-        "\tflags: %d\n",
-        name,
-        flags
-    );
-
-    modded_path = get_chroot_path();
-    assert(!modded_path.empty());
-    modded_path += name;
-    name = modded_path.c_str();
-
-    fprintf(stderr, "\tmodded_name: %s\n", name);
-
+    // call open libc wrapper
+    raise(SIGTRAP);
+    enter_ps4_region();
     rv = open(name, flags, mode);
+    leave_ps4_region();
     if (rv < 0) {
         rv = -errno;
     }
@@ -392,6 +383,8 @@ void freebsd_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
     ucontext_t *ucontext = (ucontext_t *) ucontext_arg;
     mcontext_t *mcontext = &ucontext->uc_mcontext;
 
+    leave_ps4_region();
+
     int64_t rv = -EINVAL;
 
     greg_t ps4_syscall_nr = mcontext->gregs[REG_RAX];
@@ -484,6 +477,8 @@ void freebsd_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
         mcontext->gregs[REG_EFL] &= (~1llu);
     }
     mcontext->gregs[REG_RAX] = rv;
+
+    enter_ps4_region();
 }
 
 }
