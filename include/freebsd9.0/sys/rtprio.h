@@ -34,7 +34,8 @@
 #ifndef _SYS_RTPRIO_H_
 #define _SYS_RTPRIO_H_
 
-#include <sys/priority.h>
+#include "freebsd9.0/sys/priority.h"
+#include <sys/types.h>
 
 /*
  * Process realtime-priority specifications to rtprio.
@@ -70,8 +71,8 @@
  * Scheduling class information.
  */
 struct rtprio {
-	u_short type;			/* scheduling class */
-	u_short prio;
+	unsigned short type;			/* scheduling class */
+	unsigned short prio;
 };
 
 #ifdef _KERNEL
@@ -83,6 +84,8 @@ void	pri_to_rtp(struct thread *, struct rtprio *);
 
 #ifndef _KERNEL
 #include <sys/cdefs.h>
+
+typedef int32_t lwpid_t;
 
 __BEGIN_DECLS
 int	rtprio(int, pid_t, struct rtprio *);

@@ -28,67 +28,79 @@ extern "C" {
 #define	BSD_MAP_ANON	 0x1000	/* allocated from memory, swap space */
 #define	BSD_MAP_ANONYMOUS	 BSD_MAP_ANON /* For compatibility. */
 
-//void *mmap(void *addr, size_t length, int prot, int flags,
-//                  int fd, off_t offset)
-//{
-//    // Convert BSD flags to Linux flags
-//    typedef decltype(mmap)* PFN_mmap;
-//    static PFN_mmap impl = nullptr;
-//    if (!impl) {
-//        impl = (PFN_mmap) dlsym(RTLD_NEXT, "mmap");
-//    }
-//
-//    int linux_flags = 0;
-//
-//    if (flags & BSD_MAP_SHARED) {
-//        linux_flags |= MAP_SHARED;
-//    }
-//    if (flags & BSD_MAP_PRIVATE) {
-//        linux_flags |= MAP_PRIVATE;
-//    }
-//    if (flags & BSD_MAP_COPY) {
-//        fprintf(stderr, "mmap: warning: unhandled flag BSD_MAP_COPY\n");
-//    }
-//    if (flags & BSD_MAP_FIXED) {
-//        linux_flags |= MAP_FIXED;
-//    }
-//    if (flags & BSD_MAP_RENAME) {
-//        fprintf(stderr, "mmap: warning: unhandled flag BSD_MAP_RENAME\n");
-//    }
-//    if (flags & BSD_MAP_NORESERVE) {
-//        linux_flags |= MAP_NORESERVE;
-//    }
-//    if (flags & BSD_MAP_RESERVED0080) {
-//        fprintf(stderr, "mmap: warning: unhandled flag BSD_MAP_RESERVED0080\n");
-//    }
-//    if (flags & BSD_MAP_RESERVED0100) {
-//        fprintf(stderr, "mmap: warning: unhandled flag BSD_MAP_RESERVED0100\n");
-//    }
-//    if (flags & BSD_MAP_HASSEMAPHORE) {
-//        fprintf(stderr, "mmap: warning: unhandled flag BSD_MAP_HASSEMAPHORE\n");
-//    }
-//    if (flags & BSD_MAP_STACK) {
-//        linux_flags |= MAP_STACK;
-//    }
-//    if (flags & BSD_MAP_NOSYNC) {
-//        fprintf(stderr, "mmap: warning: unhandled flag BSD_MAP_NOSYNC\n");
-//    }
-//    if (flags & BSD_MAP_FILE) {
-//        linux_flags |= MAP_FILE;
-//    }
-//    if (flags & BSD_MAP_ANON) {
-//        linux_flags |= MAP_ANON;
-//    }
-//    if (flags & BSD_MAP_ANONYMOUS) {
-//        linux_flags |= MAP_ANONYMOUS;
-//    }
-//
-//    return impl(addr, length, prot, linux_flags, fd, offset);
-//}
+void *mmap(void *addr, size_t length, int prot, int flags,
+                  int fd, off_t offset)
+{
+    SYSTEM_LIB_WRAPPER(mmap, addr, length, prot, flags, fd, offset)
+    
+    // Note: at some point mmap is called with addr 0x0000000fe0300000,
+    // with MAP_ANONYMOUS | 0x2000
+    // The linux mmap fails (even skipping the 0x2000)
+    // Then prints:
+    // "Can't allocate SceGnmGpuInfo memory"
+
+    // Convert BSD flags to Linux flags
+    int linux_flags = 0;
+
+    if (flags & 0x2000) {
+        fprintf(stderr, "mmap: warning: unhandled flag 0x2000 (unknown)\n");
+    }
+
+    if (flags & BSD_MAP_SHARED) {
+        linux_flags |= MAP_SHARED;
+    }
+    if (flags & BSD_MAP_PRIVATE) {
+        linux_flags |= MAP_PRIVATE;
+    }
+    if (flags & BSD_MAP_COPY) {
+        fprintf(stderr, "mmap: warning: unhandled flag BSD_MAP_COPY\n");
+    }
+    if (flags & BSD_MAP_FIXED) {
+        linux_flags |= MAP_FIXED;
+    }
+    if (flags & BSD_MAP_RENAME) {
+        fprintf(stderr, "mmap: warning: unhandled flag BSD_MAP_RENAME\n");
+    }
+    if (flags & BSD_MAP_NORESERVE) {
+        linux_flags |= MAP_NORESERVE;
+    }
+    if (flags & BSD_MAP_RESERVED0080) {
+        fprintf(stderr, "mmap: warning: unhandled flag BSD_MAP_RESERVED0080\n");
+    }
+    if (flags & BSD_MAP_RESERVED0100) {
+        fprintf(stderr, "mmap: warning: unhandled flag BSD_MAP_RESERVED0100\n");
+    }
+    if (flags & BSD_MAP_HASSEMAPHORE) {
+        fprintf(stderr, "mmap: warning: unhandled flag BSD_MAP_HASSEMAPHORE\n");
+    }
+    if (flags & BSD_MAP_STACK) {
+        linux_flags |= MAP_STACK;
+    }
+    if (flags & BSD_MAP_NOSYNC) {
+        fprintf(stderr, "mmap: warning: unhandled flag BSD_MAP_NOSYNC\n");
+    }
+    if (flags & BSD_MAP_FILE) {
+        linux_flags |= MAP_FILE;
+    }
+    // ANON should == ANONYMOUS
+    if (flags & BSD_MAP_ANONYMOUS) {
+        linux_flags |= MAP_ANONYMOUS;
+    }
+
+    if ((linux_flags & (MAP_PRIVATE| MAP_SHARED | MAP_SHARED_VALIDATE)) == 0) {
+        linux_flags |= MAP_SHARED; // TODO
+    }    
+
+    void *rv = mmap__impl(addr, length, prot, linux_flags, fd, offset);
+    if (rv == MAP_FAILED) {
+        fprintf(stderr, "(mmap wrapper) warning: map failed. errno = %s\n", strerror(errno));
+    }
+    return rv;
+}
 
 int fprintf (FILE *__restrict __stream, const char *__restrict __format, ...) {
-    CodeRegionScope scope;
-    if (scope.lastScopeWasPs4()) {
+    CodeRegionScope __scope;
+    if (__scope.lastScopeWasPs4()) {
         if ((uint64_t) __stream == 0x00007ffff7108f50
             || (uint64_t) __stream == 0x00007ffff7104f50
             || (uint64_t) __stream == 0x00007ffff70c8f50) {

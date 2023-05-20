@@ -18,6 +18,7 @@
 #include <filesystem>
 namespace fs = std::filesystem;
 #include "system_compat/ps4_region.h"
+#include "freebsd9.0/sys/rtprio.h"
 
 #define DIRECT_SYSCALL_MAP(OP) \
     OP(SYS_getpid, __NR_getpid, ZERO_ARGS) \
@@ -357,25 +358,62 @@ static greg_t handle_mmap(mcontext_t *mcontext) {
     int fd = *reinterpret_cast<int *>(&mcontext->gregs[REG_R8]);
     off_t offset = *reinterpret_cast<off_t *>(&mcontext->gregs[REG_R9]);
 
-    greg_t rv;
+    greg_t rv;  
 
-    //pthread_t pid = pthread_self();
-    //pthread_attr_t attr;
-    //assert(!pthread_getattr_np(pid, &attr));
-    //void *stack_addr;
-    //size_t stack_size;
-    //assert(!pthread_attr_getstack(&attr, &stack_addr, &stack_size));    
-
-    // Call mmap wrapper to convert BSD flags to linux flags
-    // TODO: define mmap_wrapper in helper librarie, to be called from here and by ps4 libs when
-    // resolving mmap library call
-    void *result_addr = mmap(addr, len, prot, flags, fd, offset);
+    // Call mmap wrapper to convert BSD flags to linux flags.
+    void *result_addr;
+    {
+        // Callee wrapper needs to know caller is ps4 code
+        CodeRegionScope __scope(PS4_REGION);
+        result_addr = mmap(addr, len, prot, flags, fd, offset);
+    }
     if (result_addr == MAP_FAILED) {
         rv = -errno;
     } else {
         rv = *reinterpret_cast<greg_t *>(&result_addr);
     }
     return rv;
+}
+
+static greg_t handle_rtprio_thread(mcontext_t *mcontext) {
+    int function = *reinterpret_cast<int *>(&mcontext->gregs[REG_RDI]);
+    // lwpid_t
+    // int32_t lwpid = *reinterpret_cast<int32_t *>(&mcontext->gregs[REG_RSI]);
+    struct rtprio *rtp = *reinterpret_cast<struct rtprio **>(&mcontext->gregs[REG_RDX]);
+
+    greg_t rv = 0;
+
+    if ( !rtp) {
+        return -EINVAL;
+    }
+
+    switch (function) {
+        case RTP_LOOKUP:
+        {
+            rtp->type = RTP_PRIO_NORMAL;
+            rtp->prio = 0;
+            break;
+        }
+        case RTP_SET:
+        {
+            break;
+        }
+        default:
+            errno;
+    }
+
+    return rv;
+}
+
+static greg_t handle_586(mcontext_t *mcontext) {
+    greg_t arg1 = mcontext->gregs[REG_RDI];
+    greg_t arg2 = mcontext->gregs[REG_RSI];
+    greg_t arg3 = mcontext->gregs[REG_RDX];
+    greg_t arg4 = mcontext->gregs[REG_R10];
+    greg_t arg5 = mcontext->gregs[REG_R8];
+    greg_t arg6 = mcontext->gregs[REG_R9];
+
+    fprintf(stderr, "syscall 586\n");
 }
 
 extern "C" {
@@ -434,6 +472,11 @@ void freebsd_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
             rv = handle_sysctl(mcontext);
             break;
         }
+        case SYS_rtprio_thread:
+        {
+            rv = handle_rtprio_thread(mcontext);
+            break;
+        }
         case SYS_thr_self:
         {
             rv = gettid();
@@ -444,6 +487,9 @@ void freebsd_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
             rv = handle_mmap(mcontext);
             break;
         }
+        case 586:
+            rv = handle_586(mcontext);
+            break; 
         case 587:
             // get_authinfo
             rv = EINVAL;
