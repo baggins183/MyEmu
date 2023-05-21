@@ -6,8 +6,8 @@
 namespace fs = std::filesystem;
 #include "system_compat/ps4_region.h"
 #include <cstdarg>
-
-#include "wrappers.h"
+#include "Common.h"
+#include <fcntl.h>
 
 static fs::path modPathForChroot(const char *path) {
     if (path[0] == '/') {
@@ -19,48 +19,41 @@ static fs::path modPathForChroot(const char *path) {
     }
 }
 
+int open_wrapper(const char *pathname, int flags, mode_t mode) {
+    fs::path moddedPath = modPathForChroot(pathname);
+    return open(moddedPath.c_str(), flags, mode);
+}
+
+
 extern "C" {
 
-FILE *fopen( const char * filename, const char * mode) {
-    SYSTEM_LIB_WRAPPER(fopen, filename, mode)
-
+FILE *PS4FUN(fopen) ( const char * filename, const char * mode) {
     fs::path moddedPath = modPathForChroot(filename);
-    return fopen__impl(moddedPath.c_str(), mode);
+    return fopen(moddedPath.c_str(), mode);
 }
 
-FILE *fopen64(const char *__restrict filename, const char *__restrict modes) {
-    SYSTEM_LIB_WRAPPER(fopen64, filename, modes)
-
+FILE *PS4FUN(fopen64)(const char *__restrict filename, const char *__restrict modes) {
     fs::path moddedPath = modPathForChroot(filename);
-    return fopen64__impl(moddedPath.c_str(), modes);
+    return fopen64(moddedPath.c_str(), modes);
 }
 
-int open(const char *pathname, int flags, mode_t mode) {
-    SYSTEM_LIB_WRAPPER(open, pathname, flags, mode)
+int PS4FUN(open)(const char *pathname, int flags, mode_t mode) {
+    return open_wrapper(pathname, flags, mode);
+}
 
+int PS4FUN(creat)(const char *pathname, mode_t mode) {
     fs::path moddedPath = modPathForChroot(pathname);
-    return open__impl(moddedPath.c_str(), flags, mode);
+    return creat(moddedPath.c_str(), mode);
 }
 
-int creat(const char *pathname, mode_t mode) {
-    SYSTEM_LIB_WRAPPER(creat, pathname, mode)
-
+int PS4FUN(openat)(int dirfd, const char *pathname, int flags, mode_t mode) {
     fs::path moddedPath = modPathForChroot(pathname);
-    return creat__impl(moddedPath.c_str(), mode);
+    return openat(dirfd, moddedPath.c_str(), flags, mode);
 }
 
-int openat(int dirfd, const char *pathname, int flags, mode_t mode) {
-    SYSTEM_LIB_WRAPPER(openat, dirfd, pathname, flags, mode)
-
-    fs::path moddedPath = modPathForChroot(pathname);
-    return openat__impl(dirfd, moddedPath.c_str(), flags, mode);
-}
-
-int openat2(int dirfd, const char *pathname, const struct open_how *how, size_t size) {
-    SYSTEM_LIB_WRAPPER(openat2, dirfd, pathname, how, size)
-
-    fs::path moddedPath = modPathForChroot(pathname);
-    return openat2__impl(dirfd, moddedPath.c_str(), how, size);
-}
+//int PS4FUN(openat2)(int dirfd, const char *pathname, const struct open_how *how, size_t size) {
+//    fs::path moddedPath = modPathForChroot(pathname);
+//    return openat2(dirfd, moddedPath.c_str(), how, size);
+//}
 
 } // extern "C"

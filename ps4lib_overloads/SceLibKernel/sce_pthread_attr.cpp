@@ -19,7 +19,7 @@
 
 extern "C" {
 
-int scePthreadAttrGet(ScePthread thread, ScePthreadAttr *attr) {
+int PS4FUN(scePthreadAttrGet)(ScePthread thread, ScePthreadAttr *attr) {
 	int err = pthread_getattr_np(thread, &(*attr)->handle);
 	if (err) {
 		raise(SIGTRAP);
@@ -27,7 +27,7 @@ int scePthreadAttrGet(ScePthread thread, ScePthreadAttr *attr) {
 	return pthreadErrorToSceError(err);
 }
 
-int scePthreadAttrInit(ScePthreadAttr *attr) {
+int PS4FUN(scePthreadAttrInit)(ScePthreadAttr *attr) {
 	sce_pthread_attr_t *object = (sce_pthread_attr_t *) calloc(1, sizeof(sce_pthread_attr_t));
 	int err = pthread_attr_init(&object->handle);
 
@@ -35,14 +35,14 @@ int scePthreadAttrInit(ScePthreadAttr *attr) {
 	return pthreadErrorToSceError(err);
 }
 
-int scePthreadAttrDestroy(ScePthreadAttr *attr) {
+int PS4FUN(scePthreadAttrDestroy)(ScePthreadAttr *attr) {
 	int err = pthread_attr_destroy(&(*attr)->handle);
 	free(*attr);
 
 	return pthreadErrorToSceError(err);
 }
 
-int scePthreadAttrSetschedparam(ScePthreadAttr *attr, const SceKernelSchedParam *param) {
+int PS4FUN(scePthreadAttrSetschedparam)(ScePthreadAttr *attr, const SceKernelSchedParam *param) {
 	raise(SIGTRAP);
 	sched_param native_param;
 	int current_policy;
@@ -66,7 +66,7 @@ int scePthreadAttrSetschedparam(ScePthreadAttr *attr, const SceKernelSchedParam 
 	return pthreadErrorToSceError(err);
 }
 
-int scePthreadAttrGetschedparam(ScePthreadAttr *attr, SceKernelSchedParam *param) {
+int PS4FUN(scePthreadAttrGetschedparam)(ScePthreadAttr *attr, SceKernelSchedParam *param) {
 	raise(SIGTRAP);
 	sched_param native_param;
 	int err = pthread_attr_getschedparam(&(*attr)->handle, &native_param);
@@ -90,7 +90,7 @@ int scePthreadAttrGetschedparam(ScePthreadAttr *attr, SceKernelSchedParam *param
 	return SCE_OK;
 }
 
-int scePthreadAttrSetschedpolicy(ScePthreadAttr *attr, int policy) {
+int PS4FUN(scePthreadAttrSetschedpolicy)(ScePthreadAttr *attr, int policy) {
 	SCHED_RR;
 	int err = pthread_attr_setschedpolicy(&(*attr)->handle, policy);
 	if (err) {
@@ -99,7 +99,7 @@ int scePthreadAttrSetschedpolicy(ScePthreadAttr *attr, int policy) {
 	return pthreadErrorToSceError(err);
 }
 
-int scePthreadAttrGetschedpolicy(ScePthreadAttr *attr, int *policy) {
+int PS4FUN(scePthreadAttrGetschedpolicy)(ScePthreadAttr *attr, int *policy) {
 	int err = pthread_attr_getschedpolicy(&(*attr)->handle, policy);
 	if (err) {
 		raise(SIGTRAP);
@@ -107,7 +107,7 @@ int scePthreadAttrGetschedpolicy(ScePthreadAttr *attr, int *policy) {
 	return pthreadErrorToSceError(err);
 }
 
-int scePthreadAttrSetstacksize(ScePthreadAttr *attr, size_t stackSize) {
+int PS4FUN(scePthreadAttrSetstacksize)(ScePthreadAttr *attr, size_t stackSize) {
 	int err = pthread_attr_setstacksize(&(*attr)->handle, stackSize);
 	if (err) {
 		raise(SIGTRAP);
@@ -115,7 +115,7 @@ int scePthreadAttrSetstacksize(ScePthreadAttr *attr, size_t stackSize) {
 	return pthreadErrorToSceError(err);	
 }
 
-int scePthreadAttrGetstacksize(ScePthreadAttr *attr, size_t *stackSize) {
+int PS4FUN(scePthreadAttrGetstacksize)(ScePthreadAttr *attr, size_t *stackSize) {
 	int err = pthread_attr_getstacksize(&(*attr)->handle, stackSize);
 	if (err) {
 		raise(SIGTRAP);
@@ -123,7 +123,7 @@ int scePthreadAttrGetstacksize(ScePthreadAttr *attr, size_t *stackSize) {
 	return pthreadErrorToSceError(err);
 }
 
-int scePthreadAttrGetaffinity(ScePthreadAttr *attr, SceKernelCpumask* mask) {
+int PS4FUN(scePthreadAttrGetaffinity)(ScePthreadAttr *attr, SceKernelCpumask* mask) {
 	cpu_set_t native_mask;
 	SceKernelCpumask rv = 0;
 	pthread_attr_getaffinity_np(&(*attr)->handle, sizeof(rv), &native_mask);
@@ -136,7 +136,7 @@ int scePthreadAttrGetaffinity(ScePthreadAttr *attr, SceKernelCpumask* mask) {
 	return SCE_OK;
 }
 
-int scePthreadAttrSetaffinity(ScePthreadAttr *attr, SceKernelCpumask* mask) {
+int PS4FUN(scePthreadAttrSetaffinity)(ScePthreadAttr *attr, SceKernelCpumask* mask) {
 	raise(SIGTRAP);
     // TODO possibly limit to 8 bits
 	cpu_set_t native_mask;
@@ -151,30 +151,30 @@ int scePthreadAttrSetaffinity(ScePthreadAttr *attr, SceKernelCpumask* mask) {
 }
 
 #if 1
-//int scePthreadAttrDestroy(void) { raise(SIGTRAP); return SCE_OK; }
-//int scePthreadAttrGet(void) { raise(SIGTRAP); return SCE_OK; }
-//int scePthreadAttrGetaffinity(void) { raise(SIGTRAP); return SCE_OK; }
-int scePthreadAttrGetdetachstate(void) { raise(SIGTRAP); return SCE_OK; }
-int scePthreadAttrGetguardsize(void) { raise(SIGTRAP); return SCE_OK; }
-int scePthreadAttrGetinheritsched(void) { raise(SIGTRAP); return SCE_OK; }
-//int scePthreadAttrGetschedparam(void) { raise(SIGTRAP); return SCE_OK; }
-//int scePthreadAttrGetschedpolicy(void) { raise(SIGTRAP); return SCE_OK; }
-int scePthreadAttrGetscope(void) { raise(SIGTRAP); return SCE_OK; }
-int scePthreadAttrGetstack(void) { raise(SIGTRAP); return SCE_OK; }
-int scePthreadAttrGetstackaddr(void) { raise(SIGTRAP); return SCE_OK; }
-//int scePthreadAttrGetstacksize(void) { raise(SIGTRAP); return SCE_OK; }
-//int scePthreadAttrInit(void) { raise(SIGTRAP); return SCE_OK; }
-//int scePthreadAttrSetaffinity(void) { raise(SIGTRAP); return SCE_OK; }
-int scePthreadAttrSetcreatesuspend(void) { raise(SIGTRAP); return SCE_OK; }
-int scePthreadAttrSetdetachstate(void) { raise(SIGTRAP); return SCE_OK; }
-int scePthreadAttrSetguardsize(void) { raise(SIGTRAP); return SCE_OK; }
-int scePthreadAttrSetinheritsched(void) { raise(SIGTRAP); return SCE_OK; }
-//int scePthreadAttrSetschedparam(void) { raise(SIGTRAP); return SCE_OK; }
-//int scePthreadAttrSetschedpolicy(void) { raise(SIGTRAP); return SCE_OK; }
-int scePthreadAttrSetscope(void) { raise(SIGTRAP); return SCE_OK; }
-int scePthreadAttrSetstack(void) { raise(SIGTRAP); return SCE_OK; }
-int scePthreadAttrSetstackaddr(void) { raise(SIGTRAP); return SCE_OK; }
-//int scePthreadAttrSetstacksize(void) { raise(SIGTRAP); return SCE_OK; }
+//int PS4FUN(scePthreadAttrDestroy)(void) { raise(SIGTRAP); return SCE_OK; }
+//int PS4FUN(scePthreadAttrGet)(void) { raise(SIGTRAP); return SCE_OK; }
+//int PS4FUN(scePthreadAttrGetaffinity)(void) { raise(SIGTRAP); return SCE_OK; }
+int PS4FUN(scePthreadAttrGetdetachstate)(void) { raise(SIGTRAP); return SCE_OK; }
+int PS4FUN(scePthreadAttrGetguardsize)(void) { raise(SIGTRAP); return SCE_OK; }
+int PS4FUN(scePthreadAttrGetinheritsched)(void) { raise(SIGTRAP); return SCE_OK; }
+//int PS4FUN(scePthreadAttrGetschedparam)(void) { raise(SIGTRAP); return SCE_OK; }
+//int PS4FUN(scePthreadAttrGetschedpolicy)(void) { raise(SIGTRAP); return SCE_OK; }
+int PS4FUN(scePthreadAttrGetscope)(void) { raise(SIGTRAP); return SCE_OK; }
+int PS4FUN(scePthreadAttrGetstack)(void) { raise(SIGTRAP); return SCE_OK; }
+int PS4FUN(scePthreadAttrGetstackaddr)(void) { raise(SIGTRAP); return SCE_OK; }
+//int PS4FUN(scePthreadAttrGetstacksize)(void) { raise(SIGTRAP); return SCE_OK; }
+//int PS4FUN(scePthreadAttrInit)(void) { raise(SIGTRAP); return SCE_OK; }
+//int PS4FUN(scePthreadAttrSetaffinity)(void) { raise(SIGTRAP); return SCE_OK; }
+int PS4FUN(scePthreadAttrSetcreatesuspend)(void) { raise(SIGTRAP); return SCE_OK; }
+int PS4FUN(scePthreadAttrSetdetachstate)(void) { raise(SIGTRAP); return SCE_OK; }
+int PS4FUN(scePthreadAttrSetguardsize)(void) { raise(SIGTRAP); return SCE_OK; }
+int PS4FUN(scePthreadAttrSetinheritsched)(void) { raise(SIGTRAP); return SCE_OK; }
+//int PS4FUN(scePthreadAttrSetschedparam)(void) { raise(SIGTRAP); return SCE_OK; }
+//int PS4FUN(scePthreadAttrSetschedpolicy)(void) { raise(SIGTRAP); return SCE_OK; }
+int PS4FUN(scePthreadAttrSetscope)(void) { raise(SIGTRAP); return SCE_OK; }
+int PS4FUN(scePthreadAttrSetstack)(void) { raise(SIGTRAP); return SCE_OK; }
+int PS4FUN(scePthreadAttrSetstackaddr)(void) { raise(SIGTRAP); return SCE_OK; }
+//int PS4FUN(scePthreadAttrSetstacksize)(void) { raise(SIGTRAP); return SCE_OK; }
 #endif
 
 } // extern "C"

@@ -32,7 +32,7 @@ static void addMutexName(ScePthreadMutex *mutex, const char *name) {
 
 extern "C" {
 
-int scePthreadMutexattrInit(ScePthreadMutexattr *attr)
+int PS4FUN(scePthreadMutexattrInit)(ScePthreadMutexattr *attr)
 {
 	int err = pthread_mutexattr_init(attr);
 	if (err) {
@@ -42,7 +42,7 @@ int scePthreadMutexattrInit(ScePthreadMutexattr *attr)
 }
 
 
-int scePthreadMutexattrDestroy(ScePthreadMutexattr *attr)
+int PS4FUN(scePthreadMutexattrDestroy)(ScePthreadMutexattr *attr)
 {
 	int err = pthread_mutexattr_destroy(attr);
 	if (err) {
@@ -63,7 +63,7 @@ static int sceMutexAttrProtocolToPthreadType(int protocol)
 	return pthreadType;
 }
 
-int scePthreadMutexattrSetprotocol(ScePthreadMutexattr *attr, int protocol)
+int PS4FUN(scePthreadMutexattrSetprotocol)(ScePthreadMutexattr *attr, int protocol)
 {
 	int type = sceMutexAttrProtocolToPthreadType(protocol);
 	int err  = pthread_mutexattr_setprotocol(attr, type);
@@ -97,14 +97,14 @@ static int sceMutexAttrTypeToPthreadType(int sceType)
 	return pthreadType;
 }
 
-int scePthreadMutexattrSettype(ScePthreadMutexattr *attr, int type)
+int PS4FUN(scePthreadMutexattrSettype)(ScePthreadMutexattr *attr, int type)
 {
 	int ptype = sceMutexAttrTypeToPthreadType(type);
 	int err   = pthread_mutexattr_settype(attr, ptype);
 	return pthreadErrorToSceError(err);
 }
 
-int scePthreadMutexLock(ScePthreadMutex *mutex) {
+int PS4FUN(scePthreadMutexLock)(ScePthreadMutex *mutex) {
     LOG("scePthreadMutexLock\n")
     LOG("    sceMut: %llx\n", mutex)
     LOG("    *sceMut: %llx\n", *mutex)
@@ -120,7 +120,7 @@ int scePthreadMutexLock(ScePthreadMutex *mutex) {
     return pthreadErrorToSceError(err);
 }
 
-int scePthreadMutexUnlock(ScePthreadMutex *mutex) {
+int PS4FUN(scePthreadMutexUnlock)(ScePthreadMutex *mutex) {
     LOG("scePthreadMutexUnlock\n")
     LOG("    sceMut: %llx\n", mutex)
     LOG("    *sceMut: %llx\n", *mutex)
@@ -137,7 +137,7 @@ int scePthreadMutexUnlock(ScePthreadMutex *mutex) {
     return pthreadErrorToSceError(err);
 }
 
-int scePthreadMutexInit(ScePthreadMutex *mutex, const ScePthreadMutexattr *attr, const char *name) {
+int PS4FUN(scePthreadMutexInit)(ScePthreadMutex *mutex, const ScePthreadMutexattr *attr, const char *name) {
     //printf("Warning: passthrough scePthreadMutexInit\n");
     LOG("scePthreadMutexInit\n")
     LOG("    sceMut: %llx\n", mutex)
@@ -172,7 +172,7 @@ int scePthreadMutexInit(ScePthreadMutex *mutex, const ScePthreadMutexattr *attr,
 	return pthreadErrorToSceError(err);
 }
 
-int scePthreadMutexDestroy(ScePthreadMutex *mutex) {
+int PS4FUN(scePthreadMutexDestroy)(ScePthreadMutex *mutex) {
     LOG("scePthreadMutexDestroy\n")
 	if (mutexHasName(mutex)) {
 		LOG("    name: %s\n", getMutexName(mutex))
@@ -183,7 +183,7 @@ int scePthreadMutexDestroy(ScePthreadMutex *mutex) {
 	return pthreadErrorToSceError(err);
 }
 
-int scePthreadMutexGetprioceiling(ScePthreadMutex *mutex, int prioceiling, int *old_ceiling)
+int PS4FUN(scePthreadMutexGetprioceiling)(ScePthreadMutex *mutex, int prioceiling, int *old_ceiling)
 {
 	raise(SIGTRAP);
 	LOG("scePthreadMutexGetprioceiling\n")
@@ -196,7 +196,7 @@ int scePthreadMutexGetprioceiling(ScePthreadMutex *mutex, int prioceiling, int *
 }
 
 
-int scePthreadMutexTimedlock(ScePthreadMutex *mutex, const struct timespec * abs_timeout)
+int PS4FUN(scePthreadMutexTimedlock)(ScePthreadMutex *mutex, const struct timespec * abs_timeout)
 {
 	raise(SIGTRAP);
 	LOG("scePthreadMutexTimedlock\n")
@@ -210,40 +210,40 @@ int scePthreadMutexTimedlock(ScePthreadMutex *mutex, const struct timespec * abs
 	return pthreadErrorToSceError(err);
 }
 
-int scePthreadMutexTrylock(ScePthreadMutex *mutex)
+int PS4FUN(scePthreadMutexTrylock)(ScePthreadMutex *mutex)
 {
 	int err = pthread_mutex_trylock(&((*mutex)->handle));
 	return pthreadErrorToSceError(err);
 }
 
 #if 1
-//int scePthreadMutexattrDestroy(void) { raise(SIGTRAP); return SCE_OK; }
-int scePthreadMutexattrGetkind(void) { raise(SIGTRAP); return SCE_OK; }
-int scePthreadMutexattrGetprioceiling(void) { raise(SIGTRAP); return SCE_OK; }
-int scePthreadMutexattrGetprotocol(void) { raise(SIGTRAP); return SCE_OK; }
-int scePthreadMutexattrGetpshared(void) { raise(SIGTRAP); return SCE_OK; }
-int scePthreadMutexattrGettype(void) { raise(SIGTRAP); return SCE_OK; }
-//int scePthreadMutexattrInit(void) { raise(SIGTRAP); return SCE_OK; }
-int scePthreadMutexattrInitForInternalLibc(void) { raise(SIGTRAP); return SCE_OK; }
-int scePthreadMutexattrSetkind(void) { raise(SIGTRAP); return SCE_OK; }
-int scePthreadMutexattrSetprioceiling(void) { raise(SIGTRAP); return SCE_OK; }
-//int scePthreadMutexattrSetprotocol(void) { raise(SIGTRAP); return SCE_OK; }
-int scePthreadMutexattrSetpshared(void) { raise(SIGTRAP); return SCE_OK; }
-//int scePthreadMutexattrSettype(void) { raise(SIGTRAP); return SCE_OK; }
-//int scePthreadMutexDestroy(void) { raise(SIGTRAP); return SCE_OK; }
-//int scePthreadMutexGetprioceiling(void) { raise(SIGTRAP); return SCE_OK; }
-int scePthreadMutexGetspinloops(void) { raise(SIGTRAP); return SCE_OK; }
-int scePthreadMutexGetyieldloops(void) { raise(SIGTRAP); return SCE_OK; }
-//int scePthreadMutexInit(void) { raise(SIGTRAP); return SCE_OK; }
-int scePthreadMutexInitForInternalLibc(void) { raise(SIGTRAP); return SCE_OK; }
-int scePthreadMutexIsowned(void) { raise(SIGTRAP); return SCE_OK; }
-//int scePthreadMutexLock(void) { raise(SIGTRAP); return SCE_OK; }
-int scePthreadMutexSetprioceiling(void) { raise(SIGTRAP); return SCE_OK; }
-int scePthreadMutexSetspinloops(void) { raise(SIGTRAP); return SCE_OK; }
-int scePthreadMutexSetyieldloops(void) { raise(SIGTRAP); return SCE_OK; }
-//int scePthreadMutexTimedlock(void) { raise(SIGTRAP); return SCE_OK; }
-//int scePthreadMutexTrylock(void) { raise(SIGTRAP); return SCE_OK; }
-//int scePthreadMutexUnlock(void) { raise(SIGTRAP); return SCE_OK; }
+//int PS4FUN(scePthreadMutexattrDestroy)(void) { raise(SIGTRAP); return SCE_OK; }
+int PS4FUN(scePthreadMutexattrGetkind)(void) { raise(SIGTRAP); return SCE_OK; }
+int PS4FUN(scePthreadMutexattrGetprioceiling)(void) { raise(SIGTRAP); return SCE_OK; }
+int PS4FUN(scePthreadMutexattrGetprotocol)(void) { raise(SIGTRAP); return SCE_OK; }
+int PS4FUN(scePthreadMutexattrGetpshared)(void) { raise(SIGTRAP); return SCE_OK; }
+int PS4FUN(scePthreadMutexattrGettype)(void) { raise(SIGTRAP); return SCE_OK; }
+//int PS4FUN(scePthreadMutexattrInit)(void) { raise(SIGTRAP); return SCE_OK; }
+int PS4FUN(scePthreadMutexattrInitForInternalLibc)(void) { raise(SIGTRAP); return SCE_OK; }
+int PS4FUN(scePthreadMutexattrSetkind)(void) { raise(SIGTRAP); return SCE_OK; }
+int PS4FUN(scePthreadMutexattrSetprioceiling)(void) { raise(SIGTRAP); return SCE_OK; }
+//int PS4FUN(scePthreadMutexattrSetprotocol)(void) { raise(SIGTRAP); return SCE_OK; }
+int PS4FUN(scePthreadMutexattrSetpshared)(void) { raise(SIGTRAP); return SCE_OK; }
+//int PS4FUN(scePthreadMutexattrSettype)(void) { raise(SIGTRAP); return SCE_OK; }
+//int PS4FUN(scePthreadMutexDestroy)(void) { raise(SIGTRAP); return SCE_OK; }
+//int PS4FUN(scePthreadMutexGetprioceiling)(void) { raise(SIGTRAP); return SCE_OK; }
+int PS4FUN(scePthreadMutexGetspinloops)(void) { raise(SIGTRAP); return SCE_OK; }
+int PS4FUN(scePthreadMutexGetyieldloops)(void) { raise(SIGTRAP); return SCE_OK; }
+//int PS4FUN(scePthreadMutexInit)(void) { raise(SIGTRAP); return SCE_OK; }
+int PS4FUN(scePthreadMutexInitForInternalLibc)(void) { raise(SIGTRAP); return SCE_OK; }
+int PS4FUN(scePthreadMutexIsowned)(void) { raise(SIGTRAP); return SCE_OK; }
+//int PS4FUN(scePthreadMutexLock)(void) { raise(SIGTRAP); return SCE_OK; }
+int PS4FUN(scePthreadMutexSetprioceiling)(void) { raise(SIGTRAP); return SCE_OK; }
+int PS4FUN(scePthreadMutexSetspinloops)(void) { raise(SIGTRAP); return SCE_OK; }
+int PS4FUN(scePthreadMutexSetyieldloops)(void) { raise(SIGTRAP); return SCE_OK; }
+//int PS4FUN(scePthreadMutexTimedlock)(void) { raise(SIGTRAP); return SCE_OK; }
+//int PS4FUN(scePthreadMutexTrylock)(void) { raise(SIGTRAP); return SCE_OK; }
+//int PS4FUN(scePthreadMutexUnlock)(void) { raise(SIGTRAP); return SCE_OK; }
 #endif
 
 }

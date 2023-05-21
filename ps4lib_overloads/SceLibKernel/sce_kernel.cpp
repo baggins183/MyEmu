@@ -24,7 +24,7 @@ extern "C" {
 
 // Note: I saw this crash on a code path through libSceSysModule's DT_INIT function
 // Implementing this leaves a crash in sceKernelGetModuleInfo
-sce_module_handle_t sceKernelGetExecutableModuleHandle(void) {
+sce_module_handle_t PS4FUN(sceKernelGetExecutableModuleHandle)(void) {
     return { 0 };
 }
 
@@ -32,7 +32,7 @@ sce_module_handle_t sceKernelGetExecutableModuleHandle(void) {
 // Not sure what $2 is exactly.
 // Returns error code
 // TODO check where errors are coming from: break on printf, go down callstack to see what condition lead to error
-int sceKernelGetModuleInfo(sce_module_handle_t mod, sce_module_info_request_t *request) {
+int PS4FUN(sceKernelGetModuleInfo)(sce_module_handle_t mod, sce_module_info_request_t *request) {
     switch(request->bits) {
         case 0x160:
             // something to do with the SDK version
@@ -52,24 +52,13 @@ int sceKernelGetModuleInfo(sce_module_handle_t mod, sce_module_info_request_t *r
     }
 }
 
-int sceKernelGetModuleInfo2(void) {
+int PS4FUN(sceKernelGetModuleInfo2)(void) {
     raise(SIGTRAP);
     return 0;
 }
 
-int sceKernelGetCompiledSdkVersion(void) {
+int PS4FUN(sceKernelGetCompiledSdkVersion)(void) {
     return 0;
-}
-
-int
-sysctlbyname(const	char *name, void *oldp,	size_t *oldlenp,
-	 const void *newp, size_t newlen)
-{
-    raise(SIGTRAP);
-    typedef int (*PFN_SYSCTLBYNAME) (const	char *, void *,	size_t *,
-	 const void *, size_t);
-    PFN_SYSCTLBYNAME impl = (PFN_SYSCTLBYNAME) dlsym(RTLD_NEXT, "sysctlbyname");
-    return impl(name, oldp, oldlenp, newp, newlen);
 }
 
 }

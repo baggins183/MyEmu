@@ -16,9 +16,9 @@
 #include <cassert>
 #include <fcntl.h>
 #include <filesystem>
-namespace fs = std::filesystem;
 #include "system_compat/ps4_region.h"
 #include "freebsd9.0/sys/rtprio.h"
+#include "exported_wrappers.h"
 
 #define DIRECT_SYSCALL_MAP(OP) \
     OP(SYS_getpid, __NR_getpid, ZERO_ARGS) \
@@ -158,13 +158,9 @@ static greg_t handle_open(mcontext_t *mcontext) {
     int flags = *reinterpret_cast<int *>(&mcontext->gregs[REG_RSI]);
     mode_t mode = *reinterpret_cast<mode_t *>(&mcontext->gregs[REG_RDX]);
 
-    {
-        // Call open wrapper that chroots calls coming from ps4 code
-        // TODO verify this calls the wrapper and not libc
-        CodeRegionScope scope(PS4_REGION);
-        raise(SIGTRAP);
-        rv = open(name, flags, mode);
-    }
+    raise(SIGTRAP);
+    rv = open_wrapper(name, flags, mode);
+    
     if (rv < 0) {
         rv = -errno;
     }
@@ -198,7 +194,7 @@ static greg_t handle_close(mcontext_t *mcontext) {
 static greg_t handle_ioctl(mcontext_t *mcontext) {
     int rv;
 
-    int fd = *reinterpret_cast<int *>(&mcontext->gregs[REG_RDI]);
+    //int fd = *reinterpret_cast<int *>(&mcontext->gregs[REG_RDI]);
     uint32_t request = *reinterpret_cast<uint32_t *>(&mcontext->gregs[REG_RSI]);
     void *argp = *reinterpret_cast<void **>(&mcontext->gregs[REG_RDX]);
 
@@ -284,13 +280,11 @@ static greg_t handle_sysctl(mcontext_t *mcontext) {
                 case KERN_USRSTACK:
                 {
                     // TODO:
-                    // pthread_attr has lowest addressable byte.
-                    // should this return highest addressable byte?
+                    // pthread_attr stack address has lowest addressable byte.
+                    // should this return highest addressable byte? - do this for now
                     // during libSceGnmDriver init, it tries to mmap starting at stack_addr - 0x201000
                     // (diff is 2052 KB).
-                    // The usrstack is allocated as 8192KB (for now)
-                    // Maybe I should malloc with 2048KB.
-                    // That means the red zone is 4KB, which matches the mmap'd size
+                    // That makes sense if the ps4 stack is 4096 KB, since the red zone would be the next 4KB underneath
                     assert(!is_write);
                     assert(*oldlenp == 8);
                     pthread_t pid = pthread_self();
@@ -345,7 +339,7 @@ static greg_t handle_sysctl(mcontext_t *mcontext) {
     }
 
     if (rv) {
-        fprintf(stderr, "sysctl: error: %s\n", strerror(-rv));
+        fprintf(stderr, "SYSCALL_HANDLER: sysctl error\n");
     }
     return rv;
 }
@@ -361,12 +355,7 @@ static greg_t handle_mmap(mcontext_t *mcontext) {
     greg_t rv;  
 
     // Call mmap wrapper to convert BSD flags to linux flags.
-    void *result_addr;
-    {
-        // Callee wrapper needs to know caller is ps4 code
-        CodeRegionScope __scope(PS4_REGION);
-        result_addr = mmap(addr, len, prot, flags, fd, offset);
-    }
+    void *result_addr = mmap_wrapper(addr, len, prot, flags, fd, offset);
     if (result_addr == MAP_FAILED) {
         rv = -errno;
     } else {
@@ -406,14 +395,9 @@ static greg_t handle_rtprio_thread(mcontext_t *mcontext) {
 }
 
 static greg_t handle_586(mcontext_t *mcontext) {
-    greg_t arg1 = mcontext->gregs[REG_RDI];
-    greg_t arg2 = mcontext->gregs[REG_RSI];
-    greg_t arg3 = mcontext->gregs[REG_RDX];
-    greg_t arg4 = mcontext->gregs[REG_R10];
-    greg_t arg5 = mcontext->gregs[REG_R8];
-    greg_t arg6 = mcontext->gregs[REG_R9];
+    fprintf(stderr, "UNHANDLED syscall 586\n");
 
-    fprintf(stderr, "syscall 586\n");
+    return -EINVAL;
 }
 
 extern "C" {
@@ -430,7 +414,16 @@ void freebsd_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
     greg_t ps4_syscall_nr = mcontext->gregs[REG_RAX];
 
     std::string bsdName = to_string((BsdSyscallNr) ps4_syscall_nr);
-    printf("freebsd_syscall_handler: handling %s\n", bsdName.c_str());
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-variable"
+    greg_t arg1 = mcontext->gregs[REG_RDI];
+    greg_t arg2 = mcontext->gregs[REG_RSI];
+    greg_t arg3 = mcontext->gregs[REG_RDX];
+    greg_t arg4 = mcontext->gregs[REG_R10];
+    greg_t arg5 = mcontext->gregs[REG_R8];
+    greg_t arg6 = mcontext->gregs[REG_R9];
+#pragma GCC diagnostic pop
 
     switch (ps4_syscall_nr) {
 // For some syscall that is 1:1 freebsd to native (linux), create a case statement
@@ -451,52 +444,73 @@ void freebsd_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
 
         case SYS_open:
         {
+            printf("freebsd_syscall_handler: handling %s\n", bsdName.c_str());
             rv = handle_open(mcontext);
             break;
         }
 
         case SYS_close:
         {
+            printf("freebsd_syscall_handler: handling %s\n", bsdName.c_str());
             rv = handle_close(mcontext);
             break;
         }
 
         case SYS_ioctl:
         {
+            printf("freebsd_syscall_handler: handling %s\n", bsdName.c_str());
             rv = handle_ioctl(mcontext);
             break;
         }
 
         case SYS___sysctl:
         {
+            printf("freebsd_syscall_handler: handling %s\n", bsdName.c_str());
             rv = handle_sysctl(mcontext);
             break;
         }
         case SYS_rtprio_thread:
         {
+            printf("freebsd_syscall_handler: handling %s\n", bsdName.c_str());
             rv = handle_rtprio_thread(mcontext);
             break;
         }
         case SYS_thr_self:
         {
+            printf("freebsd_syscall_handler: handling %s\n", bsdName.c_str());
             rv = gettid();
             break;
         }
         case SYS_mmap:
         {
+            printf("freebsd_syscall_handler: handling %s\n", bsdName.c_str());
             rv = handle_mmap(mcontext);
             break;
         }
         case 586:
+            printf("freebsd_syscall_handler: handling %s\n", bsdName.c_str());
             rv = handle_586(mcontext);
             break; 
         case 587:
+            printf("freebsd_syscall_handler: handling %s\n", bsdName.c_str());
             // get_authinfo
-            rv = EINVAL;
+            // ScePthread: Fatal error 'Can't allocate initial thread' (errno = 22)            
+            //rv = -EINVAL;
+            rv = 0;
+            break;
+        case 588:
+            printf("freebsd_syscall_handler: handling %s\n", bsdName.c_str());
+            rv = -EINVAL;
+            break;
+        case 601:
+            printf("freebsd_syscall_handler: handling %s\n", bsdName.c_str());
+            // mdbg_service
+            rv = -EINVAL;
             break;
         case 612:
+            printf("freebsd_syscall_handler: handling %s\n", bsdName.c_str());
             // nG-FYqFutUo
-            rv = EINVAL;
+            rv = -EINVAL;
             break;
 
         default:

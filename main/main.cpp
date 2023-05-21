@@ -323,7 +323,7 @@ static bool runPs4Thread(Ps4EntryThreadArgs &entryThreadArgs) {
     pthread_attr_init(&attr);
 
     constexpr size_t stack_size = 2048 * 1024;
-    assert(stack_size > __sysconf (__SC_THREAD_STACK_MIN_VALUE));
+    assert(stack_size > (unsigned) __sysconf (__SC_THREAD_STACK_MIN_VALUE));
     void *stack = malloc(stack_size);
 
     if (!stack_size) {

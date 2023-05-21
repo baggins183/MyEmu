@@ -9,9 +9,7 @@
 #include "system_compat/ps4_region.h"
 #include <cstdarg>
 
-#include "wrappers.h"
-
-extern "C" {
+#include "Common.h"
 
 #define	BSD_MAP_SHARED	0x0001		/* share changes */
 #define	BSD_MAP_PRIVATE	0x0002		/* changes are private */
@@ -28,11 +26,8 @@ extern "C" {
 #define	BSD_MAP_ANON	 0x1000	/* allocated from memory, swap space */
 #define	BSD_MAP_ANONYMOUS	 BSD_MAP_ANON /* For compatibility. */
 
-void *mmap(void *addr, size_t length, int prot, int flags,
-                  int fd, off_t offset)
-{
-    SYSTEM_LIB_WRAPPER(mmap, addr, length, prot, flags, fd, offset)
-    
+void *mmap_wrapper(void *addr, size_t length, int prot, int flags,
+                  int fd, off_t offset) {
     // Note: at some point mmap is called with addr 0x0000000fe0300000,
     // with MAP_ANONYMOUS | 0x2000
     // The linux mmap fails (even skipping the 0x2000)
@@ -91,30 +86,38 @@ void *mmap(void *addr, size_t length, int prot, int flags,
         linux_flags |= MAP_SHARED; // TODO
     }    
 
-    void *rv = mmap__impl(addr, length, prot, linux_flags, fd, offset);
+    void *rv = mmap(addr, length, prot, linux_flags, fd, offset);
     if (rv == MAP_FAILED) {
         fprintf(stderr, "(mmap wrapper) warning: map failed. errno = %s\n", strerror(errno));
     }
     return rv;
 }
 
-int fprintf (FILE *__restrict __stream, const char *__restrict __format, ...) {
-    CodeRegionScope __scope;
-    if (__scope.lastScopeWasPs4()) {
-        if ((uint64_t) __stream == 0x00007ffff7108f50
-            || (uint64_t) __stream == 0x00007ffff7104f50
-            || (uint64_t) __stream == 0x00007ffff70c8f50) {
-            __stream = stderr;
-        }
-    }
+extern "C" {
 
-    va_list ap;
-
-    va_start(ap, __format);
-    int rv = vfprintf(__stream, __format, ap);
-    va_end(ap);
-
-    return rv;
+void *PS4FUN(mmap)(void *addr, size_t length, int prot, int flags,
+                  int fd, off_t offset)
+{
+    return mmap_wrapper(addr, length, prot, flags, fd, offset);
 }
+
+//int PS4FUN(fprintf) (FILE *__restrict __stream, const char *__restrict __format, ...) {
+//    CodeRegionScope __scope;
+//    if (__scope.lastScopeWasPs4()) {
+//        if ((uint64_t) __stream == 0x00007ffff7108f50
+//            || (uint64_t) __stream == 0x00007ffff7104f50
+//            || (uint64_t) __stream == 0x00007ffff70c8f50) {
+//            __stream = stderr;
+//        }
+//    }
+//
+//    va_list ap;
+//
+//    va_start(ap, __format);
+//    int rv = vfprintf(__stream, __format, ap);
+//    va_end(ap);
+//
+//    return rv;
+//}
 
 } // extern "C"

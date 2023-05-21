@@ -431,7 +431,11 @@ static bool fixDynlibData(ElfPatcherContext &Ctx, FILE *elf, std::vector<Elf64_P
     for (uint i = 0; i < numSyms; i++) {
         Elf64_Sym ent = syms[i];
         if (ent.st_name) {
-            ent.st_name = appendToStrtab(sections[sMap.dynstrIdx], newStrings[i].c_str());
+            // Use a prefix so the symbols in sce libraries don't collide with the host's dynamic libraries, like
+            // libc.
+            // So the hosts dynamic linker will treat "_ps4__printf" different than "printf" used in emulator code 
+            std::string finalSymName = "_ps4__" + newStrings[i];
+            ent.st_name = appendToStrtab(sections[sMap.dynstrIdx], finalSymName.c_str());
         }
         //ent.st_info = ELF64_ST_INFO(0, 0);
         //ent.st_info;
@@ -794,7 +798,7 @@ static bool fixDynamicInfoForLinker(ElfPatcherContext &Ctx, FILE *elf, std::vect
             case DT_SCE_IMPORT_LIB_ATTR:
             {
                 uint64_t upp = dyn->d_un.d_val >> 32;
-                uint64_t low = dyn->d_un.d_val & 0xffffffff;
+                //uint64_t low = dyn->d_un.d_val & 0xffffffff;
                 assert(upp % 0x10000 == 0);
                 //assert(low == 0x9);
                 break;
