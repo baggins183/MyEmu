@@ -220,6 +220,29 @@ static greg_t handle_ioctl(mcontext_t *mcontext) {
     rv = -EINVAL;
 
     switch(group) {
+        case 129:
+        {
+            // In libSceGnmDriver.prx.native init function
+            switch (num) {
+                case 16:
+                    // under _ps4__sceGnmSetGsRingSizes
+                    // *argp is 0x4000
+                    // has to do with geom shaders.
+                    // Notes in GPCS4
+                    //rv = 0;
+                    break;
+                case 25:
+                    // _ps4__sceGnmDisableMipStatsReport. called after 16
+                    //rv = 0;
+                    break;
+                case 27:
+                    // called after 25
+                    //rv = 0;
+                    break;
+                default:
+                    break;
+            }
+        }
         case 136:
         {
             switch(num) {
@@ -234,6 +257,10 @@ static greg_t handle_ioctl(mcontext_t *mcontext) {
         }
         default:
             break;
+    }
+
+    if (rv) {
+        fprintf(stderr, RED "SYSCALL_HANDLER: ioctl error\n" RESET);
     }
 
     return rv;
@@ -341,7 +368,7 @@ static greg_t handle_sysctl(mcontext_t *mcontext) {
     }
 
     if (rv) {
-        fprintf(stderr, "SYSCALL_HANDLER: sysctl error\n");
+        fprintf(stderr, RED "SYSCALL_HANDLER: sysctl error\n" RESET);
     }
     return rv;
 }
@@ -513,10 +540,14 @@ void freebsd_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
             // get_authinfo
             // ScePthread: Fatal error 'Can't allocate initial thread' (errno = 22)            
             //rv = -EINVAL;
-            rv = -EINVAL;
+            rv = 0;
             break;
         case 588:
-            rv = -EINVAL;
+            // Can't allocate SceGnmGpuInfo memory - after this
+            //rv = -EINVAL;
+            rv = 0;
+            // If return 0,
+            // gnmdriver init calls 588, mmap, 588, 601, 588
             break;
         case 601:
             // mdbg_service
