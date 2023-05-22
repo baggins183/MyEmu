@@ -5,6 +5,7 @@
 #include <dlfcn.h>
 #include <optional>
 #include <pthread.h>
+#include <set>
 #include <sys/mman.h>
 #include <unistd.h>
 #include <asm/unistd_64.h>
@@ -19,6 +20,7 @@
 #include "system_compat/ps4_region.h"
 #include "freebsd9.0/sys/rtprio.h"
 #include "exported_wrappers.h"
+#include "Common.h"
 
 #define DIRECT_SYSCALL_MAP(OP) \
     OP(SYS_getpid, __NR_getpid, ZERO_ARGS) \
@@ -158,7 +160,7 @@ static greg_t handle_open(mcontext_t *mcontext) {
     int flags = *reinterpret_cast<int *>(&mcontext->gregs[REG_RSI]);
     mode_t mode = *reinterpret_cast<mode_t *>(&mcontext->gregs[REG_RDX]);
 
-    raise(SIGTRAP);
+    printf(CYN "open syscall: %s\n" RESET, name);
     rv = open_wrapper(name, flags, mode);
     
     if (rv < 0) {
@@ -245,7 +247,7 @@ static greg_t handle_sysctl(mcontext_t *mcontext) {
     void *newp = *reinterpret_cast<void **>(&mcontext->gregs[REG_R8]);
     bool is_write = newp != NULL;
 
-    fprintf(stderr, "\tname: %d.%d.%d.%d\n"
+    printf("\tname: %d.%d.%d.%d\n"
         "\tnamelen: %d\n"
         "\toldlenp: %zu\n"
         "\twrite? : %s\n",
@@ -395,10 +397,28 @@ static greg_t handle_rtprio_thread(mcontext_t *mcontext) {
 }
 
 static greg_t handle_586(mcontext_t *mcontext) {
-    fprintf(stderr, "UNHANDLED syscall 586\n");
-
     return -EINVAL;
 }
+
+static std::set<BsdSyscallNr> green_syscalls = {
+    //SYS_write,
+    SYS_open,
+    SYS_close,
+    SYS_getpid,
+    SYS_ioctl,
+    SYS___sysctl,
+    SYS_rtprio_thread,
+    SYS_thr_self,
+    SYS_mmap,
+};
+
+static std::set<BsdSyscallNr> red_syscalls = {
+    SYS_586,
+    SYS_587,
+    SYS_588,
+    SYS_601,
+    SYS_612,    
+};
 
 extern "C" {
 
@@ -425,6 +445,12 @@ void freebsd_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
     greg_t arg6 = mcontext->gregs[REG_R9];
 #pragma GCC diagnostic pop
 
+    if (red_syscalls.find((BsdSyscallNr) ps4_syscall_nr) != red_syscalls.end()) {
+        fprintf(stderr, RED "freebsd_syscall_handler: handling %s\n" RESET, bsdName.c_str());
+    } else if (green_syscalls.find((BsdSyscallNr) ps4_syscall_nr) != green_syscalls.end()) {
+        printf(GRN "freebsd_syscall_handler: handling %s%s\n", bsdName.c_str(), RESET);
+    }
+
     switch (ps4_syscall_nr) {
 // For some syscall that is 1:1 freebsd to native (linux), create a case statement
 // for freebsd number bsd_nr, that invokes the native syscall with number native_nr.
@@ -444,71 +470,59 @@ void freebsd_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
 
         case SYS_open:
         {
-            printf("freebsd_syscall_handler: handling %s\n", bsdName.c_str());
             rv = handle_open(mcontext);
             break;
         }
 
         case SYS_close:
         {
-            printf("freebsd_syscall_handler: handling %s\n", bsdName.c_str());
             rv = handle_close(mcontext);
             break;
         }
 
         case SYS_ioctl:
         {
-            printf("freebsd_syscall_handler: handling %s\n", bsdName.c_str());
             rv = handle_ioctl(mcontext);
             break;
         }
 
         case SYS___sysctl:
         {
-            printf("freebsd_syscall_handler: handling %s\n", bsdName.c_str());
             rv = handle_sysctl(mcontext);
             break;
         }
         case SYS_rtprio_thread:
         {
-            printf("freebsd_syscall_handler: handling %s\n", bsdName.c_str());
             rv = handle_rtprio_thread(mcontext);
             break;
         }
         case SYS_thr_self:
         {
-            printf("freebsd_syscall_handler: handling %s\n", bsdName.c_str());
             rv = gettid();
             break;
         }
         case SYS_mmap:
         {
-            printf("freebsd_syscall_handler: handling %s\n", bsdName.c_str());
             rv = handle_mmap(mcontext);
             break;
         }
         case 586:
-            printf("freebsd_syscall_handler: handling %s\n", bsdName.c_str());
-            rv = handle_586(mcontext);
+            rv = -EINVAL;
             break; 
         case 587:
-            printf("freebsd_syscall_handler: handling %s\n", bsdName.c_str());
             // get_authinfo
             // ScePthread: Fatal error 'Can't allocate initial thread' (errno = 22)            
             //rv = -EINVAL;
-            rv = 0;
+            rv = -EINVAL;
             break;
         case 588:
-            printf("freebsd_syscall_handler: handling %s\n", bsdName.c_str());
             rv = -EINVAL;
             break;
         case 601:
-            printf("freebsd_syscall_handler: handling %s\n", bsdName.c_str());
             // mdbg_service
             rv = -EINVAL;
             break;
         case 612:
-            printf("freebsd_syscall_handler: handling %s\n", bsdName.c_str());
             // nG-FYqFutUo
             rv = -EINVAL;
             break;
@@ -516,7 +530,7 @@ void freebsd_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
         default:
         {
             std::string bsdName = to_string((BsdSyscallNr) ps4_syscall_nr);
-            fprintf(stderr, "Unhandled syscall : %lli (%s)\n", ps4_syscall_nr, bsdName.c_str());
+            fprintf(stderr, RED "Unhandled syscall : %lli (%s)\n" RESET, ps4_syscall_nr, bsdName.c_str());
             break;
         }
     }

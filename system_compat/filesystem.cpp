@@ -28,25 +28,30 @@ int open_wrapper(const char *pathname, int flags, mode_t mode) {
 extern "C" {
 
 FILE *PS4FUN(fopen) ( const char * filename, const char * mode) {
+    printf(CYN "fopen: %s\n" RESET, filename);
     fs::path moddedPath = modPathForChroot(filename);
     return fopen(moddedPath.c_str(), mode);
 }
 
 FILE *PS4FUN(fopen64)(const char *__restrict filename, const char *__restrict modes) {
+    printf(CYN "fopen64: %s\n" RESET, filename);
     fs::path moddedPath = modPathForChroot(filename);
     return fopen64(moddedPath.c_str(), modes);
 }
 
 int PS4FUN(open)(const char *pathname, int flags, mode_t mode) {
+    printf(CYN "open: %s\n" RESET, pathname);
     return open_wrapper(pathname, flags, mode);
 }
 
 int PS4FUN(creat)(const char *pathname, mode_t mode) {
+    printf(CYN "creat: %s\n" RESET, pathname);
     fs::path moddedPath = modPathForChroot(pathname);
     return creat(moddedPath.c_str(), mode);
 }
 
 int PS4FUN(openat)(int dirfd, const char *pathname, int flags, mode_t mode) {
+    printf(CYN "openat: %s\n" RESET, pathname);
     fs::path moddedPath = modPathForChroot(pathname);
     return openat(dirfd, moddedPath.c_str(), flags, mode);
 }

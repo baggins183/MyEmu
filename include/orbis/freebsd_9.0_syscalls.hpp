@@ -395,7 +395,12 @@
 	OP(SYS_rctl_add_rule,	528) \
 	OP(SYS_rctl_remove_rule,	529) \
 	OP(SYS_posix_fallocate,	530) \
-	OP(SYS_MAXSYSCALL,	532)
+	OP(SYS_MAXSYSCALL,	532) \
+	OP(SYS_586, 586) \
+	OP(SYS_587, 587) \
+	OP(SYS_588, 588) \
+	OP(SYS_601, 601) \
+	OP(SYS_612, 612)
 
 enum BsdSyscallNr {
 #define ENUM_OP(name, value) name = value,
