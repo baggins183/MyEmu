@@ -300,17 +300,22 @@ static bool reverseKnownHashes(ElfPatcherContext &Ctx, std::vector<const char *>
     sqlite3_finalize(stmt);
     sqlite3_close_v2(db);
 
+    // Prepend _ps4__ for reversed strings, _hash__ for hashes we couldn't reverse 
     for (const char *old: oldStrings) {
         int libIdx, modIdx;
         if (isHashedSymbol(old, libIdx, modIdx)) {
+            // truncate #A#B lib/module id's suffix
             std::string hash(old, 11);
             const auto &it = hashToSymbol.find(hash);
+            // Use a prefix "_ps4__" so the symbols in sce libraries don't collide with the host's dynamic libraries, like
+            // libc.
+            // So the hosts dynamic linker will treat "_ps4__printf" different than "printf" used in emulator code             
             if (it != hashToSymbol.end()) {
-                const std::string& symbol = it->second; 
+                std::string symbol = "_ps4__" + it->second; 
                 newStrings.push_back(symbol);
             } else {
-                // truncate #A#B lib/module id's
-                newStrings.push_back(hash);
+                std::string symbol = "_hash__" + hash; 
+                newStrings.push_back(symbol);
             }
         } else {
             newStrings.push_back(old);
@@ -431,11 +436,7 @@ static bool fixDynlibData(ElfPatcherContext &Ctx, FILE *elf, std::vector<Elf64_P
     for (uint i = 0; i < numSyms; i++) {
         Elf64_Sym ent = syms[i];
         if (ent.st_name) {
-            // Use a prefix so the symbols in sce libraries don't collide with the host's dynamic libraries, like
-            // libc.
-            // So the hosts dynamic linker will treat "_ps4__printf" different than "printf" used in emulator code 
-            std::string finalSymName = "_ps4__" + newStrings[i];
-            ent.st_name = appendToStrtab(sections[sMap.dynstrIdx], finalSymName.c_str());
+            ent.st_name = appendToStrtab(sections[sMap.dynstrIdx], newStrings[i].c_str());
         }
         //ent.st_info = ELF64_ST_INFO(0, 0);
         //ent.st_info;
