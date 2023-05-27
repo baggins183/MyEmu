@@ -2,9 +2,11 @@
 #include <algorithm>
 #include <elf.h>
 #include <elfpatcher/elfpatcher.h>
+#include <fcntl.h>
 #include <vector>
 #include <sys/stat.h>
 #include <sqlite3.h>
+#include <boost/iostreams/device/mapped_file.hpp>
 
 std::optional<fs::path> LibSearcher::findLibrary(fs::path name) {
     for (PathElt &elt: m_paths) {
@@ -1106,7 +1108,7 @@ bool patchPs4Lib(ElfPatcherContext &Ctx, std::string elfPath) {
     std::vector<Elf64_Phdr> progHdrs;
     // in a Ps4 module, these Dyn Ents are in the DYNAMIC segment/.dynamic section,
     // and describe the DYNLIBDATA segment
-    std::vector<Elf64_Dyn> oldPs4DynEnts;    
+    std::vector<Elf64_Dyn> oldPs4DynEnts;
     std::vector<Elf64_Dyn> newElfDynEnts;
     // index of the strtab in the shEntries
 
@@ -1211,6 +1213,61 @@ bool patchPs4Lib(ElfPatcherContext &Ctx, std::string elfPath) {
 
     fsync(fileno(f));
     fclose(f);
+
+    return true;
+}
+
+bool findDependencies(fs::path patchedElf, std::vector<std::string> &deps) {
+    const Elf64_Ehdr *elfHdr;
+    const Elf64_Shdr *sHdrs;
+
+    deps.clear();
+
+    boost::iostreams::mapped_file_source file;
+    file.open(patchedElf.c_str());
+    if ( !file.is_open()) {
+        fprintf(stderr, "Couldn't open %s\n", patchedElf.c_str());
+        return false;
+    }
+    const unsigned char *data = (const unsigned char *) file.data();
+    elfHdr = reinterpret_cast<const Elf64_Ehdr *>(data);
+    sHdrs = reinterpret_cast<const Elf64_Shdr *>(data + elfHdr->e_shoff);
+
+    const Elf64_Shdr *shstrtab = &sHdrs[elfHdr->e_shstrndx];
+    const Elf64_Shdr *dynstr = nullptr;
+    const Elf64_Shdr *dynamic = nullptr;
+
+    const char *shStrtabData = reinterpret_cast<const char *>(data + shstrtab->sh_offset);
+    for (uint i = 0; i < elfHdr->e_shnum; i++) {
+        const Elf64_Shdr *curSection = &sHdrs[i];
+        const char *shName = &shStrtabData[curSection->sh_name];
+        if ( !strcmp(".dynstr", shName)) {
+            dynstr = curSection;
+        } else if (!strcmp(".dynamic", shName)) {
+            dynamic = curSection;
+        }
+    }
+
+    if ( !dynstr) {
+        fprintf(stderr ,"Couldn't find .dynstr section in %s\n", patchedElf.c_str());
+        return false;
+    }
+    if ( !dynamic) {
+        fprintf(stderr ,"Couldn't find .dynamic section in %s\n", patchedElf.c_str());
+        return false;
+    }
+
+    const char *dynstrData = reinterpret_cast<const char *>(data + dynstr->sh_offset);
+    const Elf64_Dyn *dyn = reinterpret_cast<const Elf64_Dyn *>(data + dynamic->sh_offset);
+
+    for (uint i = 0; i < dynamic->sh_size / dynamic->sh_entsize; i++) {
+        if (dyn[i].d_tag == DT_NULL) {
+            break;
+        } else if (dyn[i].d_tag == DT_NEEDED) {
+            const char *libName = &dynstrData[dyn[i].d_un.d_val];
+            deps.emplace_back(libName);
+        }
+    }
 
     return true;
 }

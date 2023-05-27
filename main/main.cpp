@@ -369,18 +369,8 @@ int main(int argc, char **argv) {
     inWorklist.insert(getNativeLibName(worklist[0]));
 
     bool needToPatch = true;
-//    if (!CmdArgs.purgeElfs) {
-//        uint i = 0;
-//        while (i < worklist.size()) {
-//            if (false) {
-//                // TODO
-//                worklist.resize(1);
-//                break;
-//            }
-//        }
-//
-//        needToPatch = false;
-//    }
+    // find deps and their deps
+    // if ps4 lib found but native lib not found, patch that and then look for deps 
 
     if (needToPatch) {
         // Patch ps4 modules, starting with the entry module (eboot.bin) and working through

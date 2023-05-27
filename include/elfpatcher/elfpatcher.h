@@ -12,7 +12,8 @@ namespace fs = std::filesystem;
 #include <set>
 #include <map>
 
-/* FIND EXPORTED FUNCTIONS AT BOTTOM */
+#include <nlohmann/json.hpp>
+using json = nlohmann::json;
 
 class LibSearcher {
 public:
@@ -236,5 +237,11 @@ std::optional<fs::path> findPathToSceLib(fs::path ps4LibName, ElfPatcherContext 
 // These are the ps4/sce ELF names and not the canonical patched names.
 // To be able to dlopen() or exec() this, all the recursive dependencies should be patched beforehand 
 bool patchPs4Lib(ElfPatcherContext &Ctx, std::string elfPath);
+
+bool dumpPatchedElfInfoToJson(fs::path jsonPath, fs::path elfPath, InitFiniInfo &initFiniInfo);
+
+std::optional<json> parsePatchedElfInfoFromJson(fs::path jsonPath, InitFiniInfo *initFiniInfo = nullptr);
+
+bool findDependencies(fs::path patchedElf, std::vector<std::string> &deps);
 
 #endif // _ELF_PATCHER_H_
