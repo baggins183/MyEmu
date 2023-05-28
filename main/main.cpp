@@ -67,7 +67,6 @@ CmdConfig CmdArgs;
 
 bool parseCmdArgs(int argc, char **argv) {
     if (argc < 2) {
-        //fprintf(stderr, "usage: %s [options] <PATH TO PKG DUMP>\n", argv[0]);
         fprintf(stderr, "usage: %s [options] <PATH TO ELF>\n", argv[0]);
         exit(1);
     }
@@ -461,10 +460,8 @@ int main(int argc, char **argv) {
     }
 
     // Setup trampoline to handle syscalls coming from inside sce code
-    // Only syscalls from libc and the handler itself will execute unfiltered
     // Needs to be before dlopen is called on any sce lib, because we need to
-    // reserve the range between libc and the handler function, with mmap, so sce libs
-    // don't sneak in
+    // reserve the range between libc and the lib containing the handler function
     assert(thread_init_syscall_user_dispatch());
 
     // Preload compatability libs that override sce functions in symbol order
@@ -506,23 +503,16 @@ int main(int argc, char **argv) {
         }
     }
 
-    // Call initialization functions for all sce libraries.
-    // Do independent libs first, then those that depend on them, etc
-    // Some cycles exist though
+    // Find initialization order for all sce libraries.
+    // Do in order of dependencies (there can be circular deps)
     // TODO does preinit go in forward order?
-    // Skip entry module in topological order (eboot.bin)
     std::vector<std::string> topologicalLibOrder;
     topologicalLibOrder = findTopologicalLibOrder(dependsOn);
-    // TODO try to remove this below:
-    //auto it = std::find(topologicalLibOrder.begin(), topologicalLibOrder.end(), "libkernel.prx.native");
-    //topologicalLibOrder.erase(it);
-    //topologicalLibOrder.insert(topologicalLibOrder.begin(), "libkernel.prx.native");
     assert(topologicalLibOrder.size() == dependsOn.size());
     if ( !init_filesystem()) {
         return 1;
     }
 
-    // TODO game thread
     Ps4EntryThreadArgs args;
     args.initFiniInfos = initFiniInfos;
     args.initLibOrder = topologicalLibOrder;
