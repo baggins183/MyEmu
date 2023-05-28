@@ -48,10 +48,10 @@ void from_json(const json& j, InitFiniInfo& info) {
 
 static bool getFileHash(fs::path path, uint64_t &hash) {
     boost::iostreams::mapped_file_source file;
-    // TODO catch error
-    file.open(path);
-    if ( !file.is_open()) {
-        fprintf(stderr, "Couldn't open %s\n", path.c_str());
+    try {
+        file.open(path);
+    } catch (const std::ios_base::failure& e) {
+        fprintf(stderr, "Couldn't open %s: %s\n", path.c_str(), e.what());
         return false;
     }
 

@@ -1227,11 +1227,13 @@ bool findDependencies(fs::path patchedElf, std::vector<std::string> &deps) {
     deps.clear();
 
     boost::iostreams::mapped_file_source file;
-    file.open(patchedElf.c_str());
-    if ( !file.is_open()) {
-        fprintf(stderr, "Couldn't open %s\n", patchedElf.c_str());
+    try {
+        file.open(patchedElf.c_str());
+    } catch (const std::ios_base::failure& e) {
+        fprintf(stderr, "Couldn't open %s: %s\n", patchedElf.c_str(), e.what());
         return false;
     }
+
     const unsigned char *data = (const unsigned char *) file.data();
     elfHdr = reinterpret_cast<const Elf64_Ehdr *>(data);
     sHdrs = reinterpret_cast<const Elf64_Shdr *>(data + elfHdr->e_shoff);
