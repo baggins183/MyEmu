@@ -7,7 +7,7 @@ nid_hash/nid_hash
 .gdb_history
 .brestore.gdb
 *.so
-.*
+.cache
 build/
 elfdump/
 test.log
