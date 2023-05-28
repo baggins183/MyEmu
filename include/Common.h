@@ -47,11 +47,11 @@ static const long PGSZ = sysconf(_SC_PAGE_SIZE);
 #define WHT   "\x1B[37m"
 #define RESET "\x1B[0m"
 
-static inline uint64_t simpleHash(const unsigned char *data, size_t length)
+static inline uint64_t pjwHash(const unsigned char *data, size_t length)
 {
-   unsigned int hash = 0;
-   unsigned int x    = 0;
-   unsigned int i    = 0;
+   uint64_t hash = 0;
+   uint64_t x    = 0;
+   size_t   i    = 0;
 
    for (i = 0; i < length; ++data, ++i)
    {
@@ -59,7 +59,7 @@ static inline uint64_t simpleHash(const unsigned char *data, size_t length)
 
       if ((x = hash & 0xF000000000000000L) != 0)
       {
-         hash ^= (x >> 24);
+         hash ^= (x >> 48);
       }
 
       hash &= ~x;

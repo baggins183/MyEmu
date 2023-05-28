@@ -16,6 +16,7 @@
 #include <signal.h>
 #include <time.h>
 #include <limits.h>
+#include "system_compat/ps4_region.h"
 
 int pthreadErrorToSceError(int perror)
 {
@@ -147,18 +148,19 @@ int pthreadErrorToSceError(int perror)
 
 extern "C" {
 
-ScePthread scePthreadSelf(void) {
+ScePthread PS4FUN(scePthreadSelf)(void) {
 	return pthread_self();
 }
 
-int scePthreadSetaffinity(ScePthread thread, const SceKernelCpumask mask) {
+int PS4FUN(scePthreadSetaffinity)(ScePthread thread, const SceKernelCpumask mask) {
 	// TODO
 	return SCE_OK;
 }
 
-int scePthreadCreate(ScePthread *thread, const ScePthreadAttr *attr, void *(PS4API *entry) (void *), void *arg, const char *name) {
+int PS4FUN(scePthreadCreate)(ScePthread *thread, const ScePthreadAttr *attr, void *(PS4API *entry) (void *), void *arg, const char *name) {
 	raise(SIGTRAP);
-
+	thread_init_syscall_user_dispatch();
+	enter_ps4_region();
 	return 0;
 }
 

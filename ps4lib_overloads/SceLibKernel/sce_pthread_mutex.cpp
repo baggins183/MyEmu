@@ -1,29 +1,19 @@
 #include "sce_pthread_common.h"
 
-static std::map<pthread_mutex_t *, std::string> *MutexNames = nullptr;
-static std::map<pthread_mutex_t *, std::string>& initMutexNames() {
-	if (!MutexNames) 
-		MutexNames = new std::map<pthread_mutex_t *, std::string>;
+static std::map<pthread_mutex_t *, std::string> MutexNames;
 
-	return *MutexNames;
-}
 static bool mutexHasName(ScePthreadMutex *mutex) {
-	auto &map = initMutexNames();
-	return map.find(&(*mutex)->handle) != map.end();
+	return MutexNames.find(&(*mutex)->handle) != MutexNames.end();
 }
-static const char *getMutexName(ScePthreadMutex *mutex) {
-	auto &map = initMutexNames();
-
-	if (map.find(&(*mutex)->handle) == map.end()) {
+static inline const char *getMutexName(ScePthreadMutex *mutex) {
+	if (MutexNames.find(&(*mutex)->handle) == MutexNames.end()) {
 		return nullptr;
 	}
-	std::string &name = map[&(*mutex)->handle];
+	std::string &name = MutexNames[&(*mutex)->handle];
 	return name.c_str();
 }
 static void addMutexName(ScePthreadMutex *mutex, const char *name) {
-	auto &map = initMutexNames();
-
-	map[&(*mutex)->handle] = name;
+	MutexNames[&(*mutex)->handle] = name;
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////

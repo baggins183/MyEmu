@@ -7,6 +7,7 @@
 #include <sys/prctl.h>
 #include <signal.h>
 #include "Common.h"
+#include <mutex>
 
 extern "C" {
 #include "pmparser.h"
@@ -143,16 +144,11 @@ static bool setupSyscallTrampoline(uint64_t &addr_start, uint64_t &addr_end) {
 }
 
 bool thread_init_syscall_user_dispatch() {
-    static bool _has_set_sigsys_handler = false;
+    static std::once_flag _flag;
     static uint64_t _addr_start = 0;
     static uint64_t _addr_end = 0;
 
-    if (!_has_set_sigsys_handler) {
-        if (!setupSyscallTrampoline(_addr_start, _addr_end)) {
-            return false;
-        }
-        _has_set_sigsys_handler = true;
-    }
+    std::call_once(_flag, setupSyscallTrampoline, _addr_start, _addr_end);
 
     // Does &_syscall_dispatch_switch (thread_local) ) work?
     int err = prctl(PR_SET_SYSCALL_USER_DISPATCH, PR_SYS_DISPATCH_ON, _addr_start, (_addr_end - _addr_start), &_syscall_dispatch_switch);

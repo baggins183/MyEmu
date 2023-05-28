@@ -62,10 +62,13 @@ fs::path getNativeLibName(fs::path ps4LibName) {
     return libStem;
 }
 
+fs::path getPs4LibName(fs::path nativeLibName) {
+    assert(nativeLibName.extension() == ".native");
+    fs::path ps4Name = nativeLibName.stem();
+    return ps4Name;
+}
+
 std::optional<fs::path> findPathToSceLib(fs::path libName, ElfPatcherContext &Ctx) {
-    /*if (ps4LibName == Ctx.dlPath) {
-        return ps4LibName;
-    }*/
     std::optional<fs::path> res;
     res = Ctx.nativeLibSearcher.findLibrary(libName);
     if (res) {

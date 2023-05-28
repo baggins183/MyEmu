@@ -166,6 +166,9 @@ struct InitFiniInfo {
     std::vector<Elf64_Addr> dt_fini_array;
 };
 
+void to_json(json& j, const InitFiniInfo& p);
+void from_json(const json& j, InitFiniInfo& p);
+
 struct ElfPatcherContext {
     fs::path pkgdumpPath;
     LibSearcher ps4LibSearcher;

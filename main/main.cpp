@@ -37,6 +37,7 @@
 #include <set>
 #include <optional>
 #include <sys/capability.h>
+#include <deque>
 
 #include "elfpatcher/elfpatcher.h"
 #include "system_compat/ps4_region.h"
@@ -52,13 +53,14 @@ struct {
 struct CmdConfig {
     std::string entryModule; // TODO remove, this implied pkgdumpPath/eboot.bin
     std::string hashdbPath;
-    std::string nativeElfOutputDir;
+    std::string patchedElfDir;
     std::string pkgdumpPath;
     std::string ps4libsPath;
     std::string preloadDirPath;
-    bool purgeElfs;
+    bool genElfs;
+    bool onlyPatch;
 
-    CmdConfig(): nativeElfOutputDir("./elfdump/"), purgeElfs(false) {}
+    CmdConfig(): patchedElfDir("./elfdump/"), genElfs(false), onlyPatch(false) {}
 };
 
 CmdConfig CmdArgs;
@@ -73,16 +75,18 @@ bool parseCmdArgs(int argc, char **argv) {
     for (int i = 1; i < argc - 1; i++) {
         if (!strcmp(argv[i], "--hashdb")) {
             CmdArgs.hashdbPath = argv[++i];
-        } else if (!strcmp(argv[i], "--native_elf_output")) {
-            CmdArgs.nativeElfOutputDir = argv[++i];
+        } else if (!strcmp(argv[i], "--patched_elf_dir")) {
+            CmdArgs.patchedElfDir = argv[++i];
         } else if(!strcmp(argv[i], "--pkgdump")) {
             CmdArgs.pkgdumpPath = argv[++i];
         } else if(!strcmp(argv[i], "--ps4libs")) {
             CmdArgs.ps4libsPath = argv[++i];
         } else if (!strcmp(argv[i], "--preload_dir")) {
             CmdArgs.preloadDirPath = argv[++i];
-        } else if (!strcmp(argv[i], "--purge_elfs")) {
-            CmdArgs.purgeElfs = true;
+        } else if (!strcmp(argv[i], "--gen_elfs")) {
+            CmdArgs.genElfs = true;
+        } else if (!strcmp(argv[i], "--only_patch")) {
+            CmdArgs.onlyPatch = true;
         } else {
             fprintf(stderr, "Unrecognized cmd arg: %s\n", argv[i]);
             return false;
@@ -171,7 +175,7 @@ error:
     return success;
 }
 
-static bool findCyclicDependency(const std::string &curLib, const std::string &origLib, std::set<std::string> &transitiveDeps, std::map<std::string, std::set<std::string>> &dependsOn) {
+static bool findCyclicDependency(const std::string &curLib, const std::string &origLib, std::set<std::string> &transitiveDeps, const std::map<std::string, std::set<std::string>> &dependsOn) {
     if (curLib == origLib) {
         return true;
     }
@@ -182,7 +186,7 @@ static bool findCyclicDependency(const std::string &curLib, const std::string &o
 
     transitiveDeps.insert(curLib);
 
-    auto &deps = dependsOn[curLib];
+    auto &deps = dependsOn.find(curLib)->second;
     for (auto &dep: deps) {
         if (findCyclicDependency(dep, origLib, transitiveDeps, dependsOn)) {
             return true;
@@ -205,12 +209,13 @@ static void visitToBuildTopoOrder(const std::string &lib, const std::map<std::st
 
 // The sce libs can have cyclic dependencies, so return an order s.t. libA comes before libB if libA is a transitive dependency of libB but
 // libB is not a transitive dependency of libA
-static std::vector<std::string> findTopologicalLibOrder(const std::vector<std::string> &libs, std::map<std::string, std::set<std::string>> &dependsOn) {
+static std::vector<std::string> findTopologicalLibOrder(const std::map<std::string, std::set<std::string>> &dependsOn) {
     // Only direct dependencies, not transitive
     std::map<std::string, std::set<std::string>> dependsOnOneWay;
 
-    for (const auto &lib: libs) {
-        auto &deps = dependsOn[lib];
+    for (const auto &pair: dependsOn) {
+        std::string lib = pair.first;        
+        const auto &deps = pair.second;
         std::set<std::string> totalDeps;
         for (auto &dep: deps) {
             std::set<std::string> transitiveDeps;
@@ -223,8 +228,8 @@ static std::vector<std::string> findTopologicalLibOrder(const std::vector<std::s
 
     std::vector<std::string> sorted;
     std::set<std::string> visited;
-    for (const auto &lib: libs) {
-        visitToBuildTopoOrder(lib, dependsOnOneWay, sorted, visited);
+    for (const auto &pair: dependsOn) {
+        visitToBuildTopoOrder(pair.first, dependsOnOneWay, sorted, visited);
     }
 
     std::reverse(sorted.begin(), sorted.end());
@@ -343,7 +348,7 @@ int main(int argc, char **argv) {
     void *dl;
 
     parseCmdArgs(argc, argv);
-    ElfPatcherContext Ctx(CmdArgs.ps4libsPath,CmdArgs.preloadDirPath, CmdArgs.hashdbPath, CmdArgs.nativeElfOutputDir, CmdArgs.pkgdumpPath, CmdArgs.purgeElfs);
+    ElfPatcherContext Ctx(CmdArgs.ps4libsPath,CmdArgs.preloadDirPath, CmdArgs.hashdbPath, CmdArgs.patchedElfDir, CmdArgs.pkgdumpPath, CmdArgs.genElfs);
 
     if ( !getenv("LD_LIBRARY_PATH")) {
         fprintf(stderr, "LD_LIBRARY_PATH unset\n");
@@ -351,36 +356,26 @@ int main(int argc, char **argv) {
     }
 
     std::error_code ec;
-    fs::create_directory(CmdArgs.nativeElfOutputDir, ".", ec);
+    fs::create_directory(CmdArgs.patchedElfDir, ".", ec);
     if (ec) {
         std::string m = ec.message();
-        fprintf(stderr, "Failed to create directory %s: %s\n", CmdArgs.nativeElfOutputDir.c_str(), m.c_str());
+        fprintf(stderr, "Failed to create directory %s: %s\n", CmdArgs.patchedElfDir.c_str(), m.c_str());
         return -1;
     }    
-
 
     std::map<std::string, std::set<std::string>> dependsOn;
     std::map<std::string, InitFiniInfo> initFiniInfos;
 
-    std::vector<std::string> allSceLibs;
-
-    std::vector<std::string> worklist = { CmdArgs.entryModule };
-    std::set<std::string> inWorklist;
-    inWorklist.insert(getNativeLibName(worklist[0]));
-
-    bool needToPatch = true;
-    // find deps and their deps
-    // if ps4 lib found but native lib not found, patch that and then look for deps 
-
-    if (needToPatch) {
-        // Patch ps4 modules, starting with the entry module (eboot.bin) and working through
+    if (CmdArgs.genElfs) {
+        // Patch ps4 modules, starting with the entry executable (eboot.bin) and working through
         // the dependencies.
-        // Convert these to native ELF files (libs openable with dlopen)        
-        uint i = 0;
-        while (i < worklist.size()) {
-            fs::path libName = worklist[i];
-            allSceLibs.push_back(getNativeLibName(libName));
-            ++i;
+        // Convert these to native ELF files (libs openable with dlopen)
+        std::deque<std::string> worklist = { CmdArgs.entryModule };
+        std::set<std::string> inWorklist;
+        inWorklist.insert(getNativeLibName(worklist[0]));        
+        while ( !worklist.empty()) {
+            fs::path libName = worklist.front();
+            worklist.pop_front();
             auto oLibPath = findPathToSceLib(libName, Ctx);
             if ( !oLibPath) {
                 fprintf(stderr, "Warning: unable to locate library %s\n", libName.c_str());
@@ -388,7 +383,7 @@ int main(int argc, char **argv) {
             }
 
             fs::path libPath = oLibPath.value();
-            fs::path nativePath = CmdArgs.nativeElfOutputDir; 
+            fs::path nativePath = CmdArgs.patchedElfDir; 
             nativePath /= getNativeLibName(libPath);
 
             if ( !fs::copy_file(libPath, nativePath, fs::copy_options::overwrite_existing)) {
@@ -417,8 +412,52 @@ int main(int argc, char **argv) {
                     inWorklist.insert(getNativeLibName(dep));
                 }
             }
+
+            fs::path elfJsonPath = nativePath;
+            elfJsonPath += ".json";
+            if ( !dumpPatchedElfInfoToJson(elfJsonPath, nativePath, Ctx.initFiniInfo)) {
+                return -1;
+            }
             Ctx.reset();
         }
+    }
+    else {
+        fs::path prefix = CmdArgs.patchedElfDir;
+        std::deque<std::string> worklist = { getNativeLibName(CmdArgs.entryModule) };
+        std::set<std::string> inWorklist;
+        inWorklist.insert(worklist[0]);         
+        while ( !worklist.empty()) {
+            std::string nativeName = worklist.front();
+            worklist.pop_front();
+            fs::path nativePath = prefix;
+            nativePath /= nativeName;
+            std::vector<std::string> deps;
+            findDependencies(nativePath, deps);
+
+            // Get info about the lib (currently the addresses of init/finilization functions)
+            fs::path elfJsonPath = nativePath;
+            elfJsonPath += ".json";
+            InitFiniInfo initFini;
+            if ( !parsePatchedElfInfoFromJson(elfJsonPath, &initFini)) {
+                return -1;
+            }
+            initFiniInfos[nativeName] = initFini;
+
+            for (auto &dep: deps) {
+                dependsOn[nativeName].insert(getNativeLibName(dep));
+            }
+
+            for (auto &dep: deps) {
+                if (inWorklist.find(getNativeLibName(dep)) == inWorklist.end()) {
+                    worklist.push_back(dep);
+                    inWorklist.insert(getNativeLibName(dep));
+                }
+            }
+        }
+    }
+
+    if (CmdArgs.onlyPatch) {
+        return 0;
     }
 
     // Setup trampoline to handle syscalls coming from inside sce code
@@ -447,16 +486,24 @@ int main(int argc, char **argv) {
         preloadHandles.push_back(handle);
     }
 
-    // Load ps4 module
-    fs::path firstLib = CmdArgs.nativeElfOutputDir;
-    firstLib /= getNativeLibName(CmdArgs.entryModule);
-    dl = dlopen(firstLib.c_str(), RTLD_LAZY);
-    if (!dl) {
-        char *err;
-        while ((err = dlerror())) {
-            fprintf(stderr, "(dlopen) %s\n", err);
-        }
+    // Load immediate shared library dependencies of the entry module (should be eboot.bin)
+    std::vector<std::string> immediateDeps;
+    fs::path patchedEntryModule = CmdArgs.patchedElfDir;
+    patchedEntryModule /= getNativeLibName(CmdArgs.entryModule);
+    if ( !findDependencies(patchedEntryModule, immediateDeps)) {
         return -1;
+    }
+    for (std::string depName: immediateDeps) {
+        fs::path depPath = CmdArgs.patchedElfDir;
+        depPath /= depName;
+        dl = dlopen(depName.c_str(), RTLD_LAZY);
+        if (!dl) {
+            char *err;
+            while ((err = dlerror())) {
+                fprintf(stderr, "(dlopen) %s\n", err);
+            }
+            return -1;
+        }
     }
 
     // Call initialization functions for all sce libraries.
@@ -465,25 +512,15 @@ int main(int argc, char **argv) {
     // TODO does preinit go in forward order?
     // Skip entry module in topological order (eboot.bin)
     std::vector<std::string> topologicalLibOrder;
-    topologicalLibOrder = findTopologicalLibOrder(allSceLibs, dependsOn);
-    auto it = std::find(topologicalLibOrder.begin(), topologicalLibOrder.end(), "libkernel.prx.native");
-    topologicalLibOrder.erase(it);
-    topologicalLibOrder.insert(topologicalLibOrder.begin(), "libkernel.prx.native");
-    assert(topologicalLibOrder.size() == allSceLibs.size());
+    topologicalLibOrder = findTopologicalLibOrder(dependsOn);
+    // TODO try to remove this below:
+    //auto it = std::find(topologicalLibOrder.begin(), topologicalLibOrder.end(), "libkernel.prx.native");
+    //topologicalLibOrder.erase(it);
+    //topologicalLibOrder.insert(topologicalLibOrder.begin(), "libkernel.prx.native");
+    assert(topologicalLibOrder.size() == dependsOn.size());
     if ( !init_filesystem()) {
         return 1;
     }
-
-//    fs::path entryModule = CmdArgs.nativeElfOutputDir;
-//    entryModule /= getNativeLibName("eboot.bin");
-//    if ( !mapEntryModuleIntoMemory(entryModule)) {
-//        return -1;
-//    }
-
-//    for (uint i = 0; i < topologicalLibOrder.size(); i++) {
-//        fs::path nativeLibName = getNativeLibName(topologicalLibOrder[i]);
-//        callInitFunctions(topologicalLibOrder[i], initFiniInfos[nativeLibName]);
-//    }
 
     // TODO game thread
     Ps4EntryThreadArgs args;
