@@ -247,7 +247,6 @@ static bool create_dir_structure(fs::path &chroot_path) {
     static const char *dirs[] = {
         "/dev",
         "/dev/dipsw",
-        "/mnt",
     };
 
     static const char *files[] {
@@ -278,6 +277,8 @@ static bool create_dir_structure(fs::path &chroot_path) {
 }
 
 static bool init_filesystem() {
+    std::error_code ec;
+
     const char *home_dir = getenv("HOME");
     if ( !home_dir) {
         return false;
@@ -286,6 +287,33 @@ static bool init_filesystem() {
     chroot_path /= fs::path(".local/share/MyEmu/chroot");
 
     if ( !create_dir_structure(chroot_path)) {
+        return false;
+    }
+
+    // Create symlink to pkg file dump
+    // The name should be "app0", at the root of the chrooted ps4 directory structure
+    fs::path pkg_dump_mount_link_name = chroot_path;
+    pkg_dump_mount_link_name /= "app0";
+    fs::path pkg_dump_mount_target = CmdArgs.pkgdumpPath;
+
+    pkg_dump_mount_target = fs::absolute(pkg_dump_mount_target, ec);
+    if (ec) {
+        std::string msg = ec.message();
+        fprintf(stderr, "Couldn't get absolute path to pkg dump directory: %s\n", msg.c_str());
+        return false;
+    }
+
+    fs::remove(pkg_dump_mount_link_name, ec);
+    if (ec) {
+        std::string msg = ec.message();
+        fprintf(stderr, "Couldn't remove existing symlink to pkg dump: %s\n", msg.c_str());
+        return false;        
+    }
+
+    fs::create_symlink(pkg_dump_mount_target, pkg_dump_mount_link_name, ec);
+    if (ec) {
+        std::string msg = ec.message();
+        fprintf(stderr, "Couldn't create symlink to pkg: %s\n", msg.c_str());
         return false;
     }
 
@@ -312,8 +340,17 @@ void *ps4_entry_thread(void *entry_thread_arg) {
 
     assert(thread_init_syscall_user_dispatch());
 
+    constexpr std::array initBlackList = {
+        "libSceNet.prx.native",
+    };
+
     for (uint i = 0; i < entryThreadArgs->initLibOrder.size(); i++) {
         fs::path nativeLibName = getNativeLibName(entryThreadArgs->initLibOrder[i]);
+        if (std::find(begin(initBlackList), end(initBlackList), nativeLibName) != end(initBlackList)) {
+            printf("module %s blacklisted\n", nativeLibName.c_str());
+            continue;
+        }
+
         callInitFunctions(entryThreadArgs->initLibOrder[i], entryThreadArgs->initFiniInfos[nativeLibName]);
     }
 

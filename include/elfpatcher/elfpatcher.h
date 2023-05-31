@@ -98,6 +98,8 @@ struct SectionMap {
     uint relaIdx;
     uint jmprelIdx;
     uint hashIdx;
+    uint strtabIdx;
+    uint symtabIdx;
 };
 
 struct DynamicTableInfo {
@@ -194,9 +196,6 @@ struct ElfPatcherContext {
             hashdbPath(hashdbPath),
             purgeElfs(purgeElfs)
     {
-        std::string ldLibraryPath = getenv("LD_LIBRARY_PATH");
-        assert( ldLibraryPath.find(preloadDir) != ldLibraryPath.npos);
-
         fs::recursive_directory_iterator it(preloadDir);
         for (auto &dirent: it) {
             if (dirent.is_regular_file() && dirent.path().extension() == ".so") {

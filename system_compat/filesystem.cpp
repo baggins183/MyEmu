@@ -21,7 +21,11 @@ static fs::path modPathForChroot(const char *path) {
 
 int open_wrapper(const char *pathname, int flags, mode_t mode) {
     fs::path moddedPath = modPathForChroot(pathname);
-    return open(moddedPath.c_str(), flags, mode);
+    auto rv = open(moddedPath.c_str(), flags, mode);
+    if (rv < 0) {
+        printf(RED "open failed: %s\n" RESET, strerror(errno));
+    }
+    return rv;
 }
 
 

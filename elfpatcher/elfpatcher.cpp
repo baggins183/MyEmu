@@ -526,6 +526,34 @@ static bool fixDynlibData(ElfPatcherContext &Ctx, FILE *elf, std::vector<Elf64_P
     }
 #endif
 
+    // Copy dynsym to symtab and dynstr to strtab for GDB
+    Elf64_Shdr sHdr;
+    sMap.strtabIdx = sections.size();
+    sHdr = {
+        .sh_name = appendToStrtab(sections[sMap.shstrtabIdx], ".strtab"),
+        .sh_type = SHT_STRTAB,
+        .sh_flags = SHF_STRINGS | SHF_ALLOC,
+        .sh_link = 0,
+        .sh_info = 0,
+        .sh_addralign = static_cast<Elf64_Xword>(PGSZ),
+        .sh_entsize = 0
+    };
+    sections.emplace_back(sHdr);
+    sections[sMap.strtabIdx].contents = sections[sMap.dynstrIdx].contents;
+
+    sMap.symtabIdx = sections.size();
+    sHdr = {
+        .sh_name = appendToStrtab(sections[sMap.shstrtabIdx], ".symtab"),
+        .sh_type = SHT_SYMTAB,
+        .sh_flags = SHF_ALLOC,
+        .sh_link = sMap.strtabIdx,
+        .sh_info = sections[sMap.dynsymIdx].getInfo(),
+        .sh_addralign = static_cast<Elf64_Xword>(PGSZ),
+        .sh_entsize = sizeof(Elf64_Sym),
+    };
+    sections.emplace_back(sHdr);
+    sections[sMap.symtabIdx].contents = sections[sMap.dynsymIdx].contents;
+
     // Create dynlibdata segment
     std::vector<uint> dynlibDataSections = {
         sMap.dynstrIdx,
@@ -533,6 +561,8 @@ static bool fixDynlibData(ElfPatcherContext &Ctx, FILE *elf, std::vector<Elf64_P
         sMap.hashIdx,
         sMap.jmprelIdx,
         sMap.relaIdx,
+        sMap.strtabIdx,
+        sMap.symtabIdx
     };
     Elf64_Phdr newDynlibDataSegmentHdr {
         .p_type = PT_LOAD,

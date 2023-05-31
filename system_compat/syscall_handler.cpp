@@ -24,7 +24,9 @@
 
 #define DIRECT_SYSCALL_MAP(OP) \
     OP(SYS_getpid, __NR_getpid, ZERO_ARGS) \
-    OP(SYS_write, __NR_write, THREE_ARGS)
+    OP(SYS_read, __NR_read, THREE_ARGS) \
+    OP(SYS_write, __NR_write, THREE_ARGS) \
+    OP(SYS_clock_gettime, __NR_clock_gettime, TWO_ARGS)
 
 //"system-call is done via the syscall instruction. The kernel destroys
 // registers %rcx and %r11." - https://refspecs.linuxfoundation.org/elf/x86_64-abi-0.99.pdf
@@ -423,12 +425,9 @@ static greg_t handle_rtprio_thread(mcontext_t *mcontext) {
     return rv;
 }
 
-static greg_t handle_586(mcontext_t *mcontext) {
-    return -EINVAL;
-}
-
 static std::set<BsdSyscallNr> green_syscalls = {
     //SYS_write,
+    SYS_read,
     SYS_open,
     SYS_close,
     SYS_getpid,
@@ -437,14 +436,22 @@ static std::set<BsdSyscallNr> green_syscalls = {
     SYS_rtprio_thread,
     SYS_thr_self,
     SYS_mmap,
+    SYS_clock_gettime,
 };
 
 static std::set<BsdSyscallNr> red_syscalls = {
-    SYS_586,
-    SYS_587,
-    SYS_588,
-    SYS_601,
-    SYS_612,    
+    SYS_99,
+    SYS_538,
+	SYS_549,
+	SYS_550,
+	SYS_586,
+	SYS_587,
+	SYS_588,
+	SYS_598,
+	SYS_601,
+	SYS_610,
+    SYS_602,
+	SYS_612,
 };
 
 extern "C" {
@@ -513,6 +520,14 @@ void freebsd_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
             break;
         }
 
+        case 99:
+            // _ps4____sys_netcontrol
+            // during libSceNet init
+            //
+            // then crash in _ps4____tls_get_addr
+            rv = -EINVAL;
+            break;
+
         case SYS___sysctl:
         {
             rv = handle_sysctl(mcontext);
@@ -533,9 +548,15 @@ void freebsd_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
             rv = handle_mmap(mcontext);
             break;
         }
+        case 549:
+            rv = -EINVAL;
+            break;
+        case 550:
+            rv = -EINVAL;
+            break;
         case 586:
             rv = -EINVAL;
-            break; 
+            break;
         case 587:
             // get_authinfo
             // ScePthread: Fatal error 'Can't allocate initial thread' (errno = 22)            
@@ -545,12 +566,29 @@ void freebsd_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
         case 588:
             // Can't allocate SceGnmGpuInfo memory - after this
             //rv = -EINVAL;
-            rv = 0;
+            rv = -EINVAL;
+            //rv = 0;
             // If return 0,
             // gnmdriver init calls 588, mmap, 588, 601, 588
             break;
+        case 598:
+            // somewhere under __ps4__malloc_init, libc startup
+            rv = -EINVAL;
+            break;
         case 601:
             // mdbg_service
+            rv = -EINVAL;
+            break;
+        case 602:
+            // ... syscall handler
+            // libkernel : _ps4____sys_randomized_path
+            // libkernel : _ps4__sceKernelGetFsSandboxRandomWord
+            // libSceDiscMap init
+            //
+            // prints "[DiskMap BitmapInfo] get path failed"
+            rv = -EINVAL;
+            break;
+        case 610:
             rv = -EINVAL;
             break;
         case 612:
@@ -562,6 +600,7 @@ void freebsd_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
         {
             std::string bsdName = to_string((BsdSyscallNr) ps4_syscall_nr);
             fprintf(stderr, RED "Unhandled syscall : %lli (%s)\n" RESET, ps4_syscall_nr, bsdName.c_str());
+            rv = -EINVAL;
             break;
         }
     }

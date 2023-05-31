@@ -81,6 +81,7 @@
 	OP(SYS_setpriority,	96) \
 	OP(SYS_socket,	97) \
 	OP(SYS_connect,	98) \
+	OP(SYS_99, 99) \
 	OP(SYS_getpriority,	100) \
 	OP(SYS_bind,	104) \
 	OP(SYS_setsockopt,	105) \
@@ -396,10 +397,16 @@
 	OP(SYS_rctl_remove_rule,	529) \
 	OP(SYS_posix_fallocate,	530) \
 	OP(SYS_MAXSYSCALL,	532) \
+	OP(SYS_538, 538) \
+	OP(SYS_549, 549) \
+	OP(SYS_550, 550) \
 	OP(SYS_586, 586) \
 	OP(SYS_587, 587) \
 	OP(SYS_588, 588) \
+	OP(SYS_598, 598) \
 	OP(SYS_601, 601) \
+	OP(SYS_602, 602) \
+	OP(SYS_610, 610) \
 	OP(SYS_612, 612)
 
 enum BsdSyscallNr {

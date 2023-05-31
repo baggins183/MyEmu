@@ -1,11 +1,20 @@
 #include "sce_pthread_common.h"
+#include <mutex>
 
-static std::map<pthread_mutex_t *, std::string> MutexNames;
+// For some reason this crashes when using MutexNames, unless it's explicitly initialized
+std::map<pthread_mutex_t *, std::string> MutexNames;
+std::mutex MutexNamesMut;
+std::once_flag _init_mutex_names_map;
+void initMutexNames() { MutexNames = std::map<pthread_mutex_t *, std::string>(); }
 
 static bool mutexHasName(ScePthreadMutex *mutex) {
+	std::scoped_lock<std::mutex> lock(MutexNamesMut);
+	std::call_once(_init_mutex_names_map,initMutexNames);
 	return MutexNames.find(&(*mutex)->handle) != MutexNames.end();
 }
 static inline const char *getMutexName(ScePthreadMutex *mutex) {
+	std::scoped_lock<std::mutex> lock(MutexNamesMut);
+	std::call_once(_init_mutex_names_map,initMutexNames);
 	if (MutexNames.find(&(*mutex)->handle) == MutexNames.end()) {
 		return nullptr;
 	}
@@ -13,6 +22,8 @@ static inline const char *getMutexName(ScePthreadMutex *mutex) {
 	return name.c_str();
 }
 static void addMutexName(ScePthreadMutex *mutex, const char *name) {
+	std::scoped_lock<std::mutex> lock(MutexNamesMut);
+	std::call_once(_init_mutex_names_map,initMutexNames);	
 	MutexNames[&(*mutex)->handle] = name;
 }
 
