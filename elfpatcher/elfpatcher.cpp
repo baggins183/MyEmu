@@ -460,10 +460,8 @@ static bool fixDynlibData(ElfPatcherContext &Ctx, FILE *elf, std::vector<Elf64_P
                 printf("Symbol has reserved symbol shndx\n");
             }
         } else if (ent.st_shndx != SHN_UNDEF) {
-            // Using a random shdnx, e.g. 777, messes with the debugger
-            // For now, .dynsym has worked. Technically this should refer to the .text or .data section I think.
-            // LLDB has shown function names from the converted elf's in the disas and callstack
-            ent.st_shndx = sMap.dynsymIdx; // TODO
+            // GDB needs shndx to point to .text to show function names correctly
+            ent.st_shndx = sMap.textIdx;
         }
         //ent.st_value; // TODO - ensure all pointer values are in LOAD segments that haven't been rebased or removed
         // For example, the got and plt
@@ -1040,32 +1038,6 @@ static bool fixDynamicInfoForLinker(ElfPatcherContext &Ctx, FILE *elf, std::vect
     };
     sections.emplace_back(sHdr);
 
-    Elf64_Phdr textSegment = progHdrs[0];
-    Elf64_Phdr dataSegment = progHdrs[2];
-    // Add .text, .data sections so hopefully gdb doesnt bug out
-    // Probably not accurate, bigger than in actuality
-    sHdr = {
-        .sh_name = appendToStrtab(sections[sMap.shstrtabIdx], ".text"),
-        .sh_type = SHT_PROGBITS,
-        .sh_flags = SHF_ALLOC | SHF_EXECINSTR,
-        .sh_addr = textSegment.p_vaddr,
-        .sh_offset = textSegment.p_offset,
-        .sh_size = textSegment.p_filesz,
-        .sh_addralign = 16
-    };
-    sections.emplace_back(sHdr);
-
-    sHdr = {
-        .sh_name = appendToStrtab(sections[sMap.shstrtabIdx], ".data"),
-        .sh_type = SHT_PROGBITS,
-        .sh_flags = SHF_ALLOC | SHF_WRITE,
-        .sh_addr = dataSegment.p_vaddr,
-        .sh_offset = dataSegment.p_offset,
-        .sh_size = dataSegment.p_filesz,
-        .sh_addralign = 8
-    };
-    sections.emplace_back(sHdr);    
-
     // TODO add sections for gotplt, relro, other sections that aren't changing location but are needed
 
     // TODO place extra dynamic ents with tags
@@ -1185,6 +1157,33 @@ bool patchPs4Lib(ElfPatcherContext &Ctx, std::string elfPath) {
     sections.emplace_back(sHdr);
     appendToStrtab(sections[sMap.shstrtabIdx], "\0");
     sections[sMap.shstrtabIdx].setName(appendToStrtab(sections[sMap.shstrtabIdx], ".shstrtab"));
+
+    Elf64_Phdr textSegment = progHdrs[0];
+    Elf64_Phdr dataSegment = progHdrs[2];
+    // Add .text, .data sections so hopefully gdb doesnt bug out
+    // Probably not accurate, bigger than in actuality
+    sMap.textIdx = sections.size();
+    sHdr = {
+        .sh_name = appendToStrtab(sections[sMap.shstrtabIdx], ".text"),
+        .sh_type = SHT_PROGBITS,
+        .sh_flags = SHF_ALLOC | SHF_EXECINSTR,
+        .sh_addr = textSegment.p_vaddr,
+        .sh_offset = textSegment.p_offset,
+        .sh_size = textSegment.p_filesz,
+        .sh_addralign = 16
+    };
+    sections.emplace_back(sHdr);
+
+    sHdr = {
+        .sh_name = appendToStrtab(sections[sMap.shstrtabIdx], ".data"),
+        .sh_type = SHT_PROGBITS,
+        .sh_flags = SHF_ALLOC | SHF_WRITE,
+        .sh_addr = dataSegment.p_vaddr,
+        .sh_offset = dataSegment.p_offset,
+        .sh_size = dataSegment.p_filesz,
+        .sh_addralign = 8
+    };
+    sections.emplace_back(sHdr);
 
     // Patch dynamic segment with new dynents
     // Copy parts of PT_SCE_DYNLIBDATA to new Segment, such as unhashed strings

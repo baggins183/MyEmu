@@ -100,6 +100,7 @@ struct SectionMap {
     uint hashIdx;
     uint strtabIdx;
     uint symtabIdx;
+    uint textIdx;
 };
 
 struct DynamicTableInfo {
