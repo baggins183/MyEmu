@@ -419,9 +419,9 @@ static bool fixDynlibData(ElfPatcherContext &Ctx, FILE *elf, std::vector<Elf64_P
     std::vector<const char *> oldSymStrings;
 
     uint numSyms = dynInfo.symtabSz / dynInfo.symtabEntSz;
-    Elf64_Sym *syms = reinterpret_cast<Elf64_Sym *>(&dynlibContents[dynInfo.symtabOff]);
+    Elf64_Sym *dynsymSyms = reinterpret_cast<Elf64_Sym *>(&dynlibContents[dynInfo.symtabOff]);
     for (uint i = 0; i < numSyms; i++) {
-        Elf64_Sym ent = syms[i];
+        Elf64_Sym ent = dynsymSyms[i];
         if (ent.st_name) {
             oldSymStrings.push_back((const char *) &dynlibContents[dynInfo.strtabOff+ ent.st_name]);
         } else {
@@ -439,7 +439,7 @@ static bool fixDynlibData(ElfPatcherContext &Ctx, FILE *elf, std::vector<Elf64_P
     int firstNonLocalIdx = -1;
     Section &dynsym = sections[sMap.dynsymIdx];
     for (uint i = 0; i < numSyms; i++) {
-        Elf64_Sym ent = syms[i];
+        Elf64_Sym ent = dynsymSyms[i];
         if (ent.st_name) {
             ent.st_name = appendToStrtab(sections[sMap.dynstrIdx], newStrings[i].c_str());
         }
@@ -530,7 +530,7 @@ static bool fixDynlibData(ElfPatcherContext &Ctx, FILE *elf, std::vector<Elf64_P
     sHdr = {
         .sh_name = appendToStrtab(sections[sMap.shstrtabIdx], ".strtab"),
         .sh_type = SHT_STRTAB,
-        .sh_flags = SHF_STRINGS | SHF_ALLOC,
+        .sh_flags = SHF_STRINGS,
         .sh_link = 0,
         .sh_info = 0,
         .sh_addralign = static_cast<Elf64_Xword>(PGSZ),
@@ -543,7 +543,7 @@ static bool fixDynlibData(ElfPatcherContext &Ctx, FILE *elf, std::vector<Elf64_P
     sHdr = {
         .sh_name = appendToStrtab(sections[sMap.shstrtabIdx], ".symtab"),
         .sh_type = SHT_SYMTAB,
-        .sh_flags = SHF_ALLOC,
+        .sh_flags = 0,
         .sh_link = sMap.strtabIdx,
         .sh_info = sections[sMap.dynsymIdx].getInfo(),
         .sh_addralign = static_cast<Elf64_Xword>(PGSZ),
@@ -552,6 +552,18 @@ static bool fixDynlibData(ElfPatcherContext &Ctx, FILE *elf, std::vector<Elf64_P
     sections.emplace_back(sHdr);
     sections[sMap.symtabIdx].contents = sections[sMap.dynsymIdx].contents;
 
+    Section &symtab = sections[sMap.symtabIdx];
+    Elf64_Sym *symtabSyms = reinterpret_cast<Elf64_Sym *>(symtab.contents.data());
+    Elf64_Addr textBaseAddr = sections[sMap.textIdx].getAddr();
+    // Change ents in .symtab to have values as offsets relative to .text.
+    // I think GDB expects this
+    for (uint i = 0; i < symtab.contents.size() / sizeof(Elf64_Sym); i++) {
+        Elf64_Sym *sym = &symtabSyms[i];
+        if (sym->st_value > 0) {
+            sym->st_value -= textBaseAddr;
+        }
+    }
+
     // Create dynlibdata segment
     std::vector<uint> dynlibDataSections = {
         sMap.dynstrIdx,
@@ -559,7 +571,7 @@ static bool fixDynlibData(ElfPatcherContext &Ctx, FILE *elf, std::vector<Elf64_P
         sMap.hashIdx,
         sMap.jmprelIdx,
         sMap.relaIdx,
-        sMap.strtabIdx,
+        sMap.strtabIdx, // strtab and symtab don't need VA addresses, so they could go somewhere else
         sMap.symtabIdx
     };
     Elf64_Phdr newDynlibDataSegmentHdr {
