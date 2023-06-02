@@ -457,9 +457,11 @@ static std::set<OrbisSyscallNr> red_syscalls = {
 extern "C" {
 
 void freebsd_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
+    HostRegionScope __scope;
+
     ucontext_t *ucontext = (ucontext_t *) ucontext_arg;
     mcontext_t *mcontext = &ucontext->uc_mcontext;
-    int64_t rv = -EINVAL;
+    greg_t rv = -EINVAL;
 
     greg_t ps4_syscall_nr = mcontext->gregs[REG_RAX];
 

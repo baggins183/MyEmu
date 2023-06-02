@@ -157,11 +157,32 @@ int PS4FUN(scePthreadSetaffinity)(ScePthread thread, const SceKernelCpumask mask
 	return SCE_OK;
 }
 
-int PS4FUN(scePthreadCreate)(ScePthread *thread, const ScePthreadAttr *attr, void *(PS4API *entry) (void *), void *arg, const char *name) {
-	raise(SIGTRAP);
+struct sce_pthread_entry_arg_wrapper {
+	void *(*user_entry_point) (void *);
+	void *user_arg;
+};
+
+static void *sce_pthread_entry_wrapper(void *arg) {
+	auto *arg_wrapper = reinterpret_cast<sce_pthread_entry_arg_wrapper *>(arg);
+
 	thread_init_syscall_user_dispatch();
 	enter_ps4_region();
-	return 0;
+
+	return arg_wrapper->user_entry_point(arg_wrapper->user_arg);
+}
+
+int PS4FUN(scePthreadCreate)(ScePthread *thread, const ScePthreadAttr *attr, void *(PS4API *entry) (void *), void *arg, const char *name) {
+	raise(SIGTRAP);
+
+	// Leak memory for now, who cares
+	sce_pthread_entry_arg_wrapper *wrapper_arg = (sce_pthread_entry_arg_wrapper *) new sce_pthread_entry_arg_wrapper;
+	wrapper_arg->user_entry_point = entry;
+	wrapper_arg->user_arg = arg;
+
+	// TODO do something with name
+
+	int err = pthread_create(thread, &((*attr)->handle), sce_pthread_entry_wrapper, wrapper_arg);
+	return pthreadErrorToSceError(err);
 }
 
 #if 1
