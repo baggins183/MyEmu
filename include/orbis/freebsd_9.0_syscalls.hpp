@@ -409,13 +409,13 @@
 	OP(SYS_610, 610) \
 	OP(SYS_612, 612)
 
-enum BsdSyscallNr {
+enum OrbisSyscallNr {
 #define ENUM_OP(name, value) name = value,
 	BSD_SYS_TABLE(ENUM_OP)
 #undef ENUM_OP
 };
 
-static std::map<BsdSyscallNr, const char *> bsd_syscall_strings_map = {
+static std::map<OrbisSyscallNr, const char *> bsd_syscall_strings_map = {
 #define STRING_OP(name, value) { name, #name },
 	BSD_SYS_TABLE(STRING_OP)
 #undef STRING_OP
@@ -423,7 +423,7 @@ static std::map<BsdSyscallNr, const char *> bsd_syscall_strings_map = {
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-function"
-static std::string to_string(BsdSyscallNr nr) {
+static std::string to_string(OrbisSyscallNr nr) {
 	const auto &it = bsd_syscall_strings_map.find(nr);
 	if (it == bsd_syscall_strings_map.end()) {
 		return std::string("UNKNOWN_SYSCALL ") + "(" + std::to_string((uint) nr) + ")";

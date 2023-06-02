@@ -12,3 +12,4 @@ build/
 elfdump/
 test.log
 *.sqlite
+.vscode/

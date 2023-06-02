@@ -341,7 +341,7 @@ void *ps4_entry_thread(void *entry_thread_arg) {
     assert(thread_init_syscall_user_dispatch());
 
     constexpr std::array initBlackList = {
-        "libSceNet.prx.native",
+        "libSceNet.prx.so",
     };
 
     for (uint i = 0; i < entryThreadArgs->initLibOrder.size(); i++) {

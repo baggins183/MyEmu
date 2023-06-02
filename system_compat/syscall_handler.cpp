@@ -11,7 +11,7 @@
 #include <asm/unistd_64.h>
 #include <stdio.h>
 #include "syscall_handler.h"
-#include "orbis/freebsd_9.0_syscalls.hpp"
+#include "orbis/orbis_syscalls.h"
 #include <sys/ucontext.h>
 #include "ps4_sysctl.h"
 #include <cassert>
@@ -425,7 +425,7 @@ static greg_t handle_rtprio_thread(mcontext_t *mcontext) {
     return rv;
 }
 
-static std::set<BsdSyscallNr> green_syscalls = {
+static std::set<OrbisSyscallNr> green_syscalls = {
     //SYS_write,
     SYS_read,
     SYS_open,
@@ -439,19 +439,19 @@ static std::set<BsdSyscallNr> green_syscalls = {
     SYS_clock_gettime,
 };
 
-static std::set<BsdSyscallNr> red_syscalls = {
-    SYS_99,
-    SYS_538,
-	SYS_549,
-	SYS_550,
-	SYS_586,
-	SYS_587,
-	SYS_588,
-	SYS_598,
-	SYS_601,
-	SYS_610,
-    SYS_602,
-	SYS_612,
+static std::set<OrbisSyscallNr> red_syscalls = {
+    SYS_netcontrol,
+    SYS_evf_create,
+	SYS_osem_create,
+	SYS_osem_delete,
+	SYS_dmem_container,
+	SYS_get_authinfo,
+	SYS_mname,
+	SYS_dynlib_get_proc_param,
+	SYS_mdbg_service,
+    SYS_randomized_path,
+	SYS_budget_get_ptype,
+	SYS_get_proc_type_info,
 };
 
 extern "C" {
@@ -467,7 +467,7 @@ void freebsd_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
 
     greg_t ps4_syscall_nr = mcontext->gregs[REG_RAX];
 
-    std::string bsdName = to_string((BsdSyscallNr) ps4_syscall_nr);
+    std::string bsdName = to_string((OrbisSyscallNr) ps4_syscall_nr);
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-variable"
@@ -479,14 +479,14 @@ void freebsd_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
     greg_t arg6 = mcontext->gregs[REG_R9];
 #pragma GCC diagnostic pop
 
-    if (red_syscalls.find((BsdSyscallNr) ps4_syscall_nr) != red_syscalls.end()) {
+    if (red_syscalls.find((OrbisSyscallNr) ps4_syscall_nr) != red_syscalls.end()) {
         fprintf(stderr, RED "freebsd_syscall_handler: handling %s\n" RESET, bsdName.c_str());
-    } else if (green_syscalls.find((BsdSyscallNr) ps4_syscall_nr) != green_syscalls.end()) {
+    } else if (green_syscalls.find((OrbisSyscallNr) ps4_syscall_nr) != green_syscalls.end()) {
         printf(GRN "freebsd_syscall_handler: handling %s%s\n", bsdName.c_str(), RESET);
     }
 
     switch (ps4_syscall_nr) {
-// For some syscall that is 1:1 freebsd to native (linux), create a case statement
+// For some syscall that is 1:1 orbis to native host (linux), create a case statement
 // for freebsd number bsd_nr, that invokes the native syscall with number native_nr.
 // Pass N-Args directly from the mcontext to the native syscall.
 #define DIRECT_SYSCALL_CASE(ps4_nr, native_nr, NUM_ARG_FUNCTION) \
@@ -520,19 +520,77 @@ void freebsd_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
             break;
         }
 
+        case SYS_netbsd_msync:
+        case 277:
+        {
+            bsdName = to_string(SYS_netbsd_msync);
+            rv = -EINVAL;
+        }
+
         case 99:
+        {
             // _ps4____sys_netcontrol
             // during libSceNet init
             //
             // then crash in _ps4____tls_get_addr
             rv = -EINVAL;
             break;
+        }
+
+        case SYS_shmctl:
+        case 169:
+        case 170:
+        case 171:
+        case 220:
+        case 339:
+        case 377:
+        case 457:
+        case 458:
+        case 459:
+        case 460:
+        case 461:
+        case 462:
+        case 505:
+        case 510:
+        case 511:
+        case 512:
+        {
+            bsdName = to_string(SYS_shmctl);
+            rv = -EINVAL;
+            break;
+        }
 
         case SYS___sysctl:
         {
             rv = handle_sysctl(mcontext);
             break;
         }
+
+        case SYS_lkmnosys:
+        case 211:
+        case 212:
+        case 213:
+        case 214:
+        case 215:
+        case 216:
+        case 217:
+        case 218:
+        case 219:
+        {
+            bsdName = to_string(SYS_lkmnosys);
+            // SYS_lkmnosys
+            rv = -EINVAL;
+            break;
+        }
+
+        case SYS_netbsd_lchown:
+        case 275:
+        {
+            bsdName = to_string(SYS_netbsd_lchown);
+            rv = -EINVAL;
+            break;
+        }
+
         case SYS_rtprio_thread:
         {
             rv = handle_rtprio_thread(mcontext);
@@ -548,22 +606,22 @@ void freebsd_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
             rv = handle_mmap(mcontext);
             break;
         }
-        case 549:
+        case SYS_osem_create:
             rv = -EINVAL;
             break;
-        case 550:
+        case SYS_osem_delete:
             rv = -EINVAL;
             break;
-        case 586:
+        case SYS_dmem_container:
             rv = -EINVAL;
             break;
-        case 587:
+        case SYS_get_authinfo:
             // get_authinfo
             // ScePthread: Fatal error 'Can't allocate initial thread' (errno = 22)            
             //rv = -EINVAL;
             rv = 0;
             break;
-        case 588:
+        case SYS_mname:
             // Can't allocate SceGnmGpuInfo memory - after this
             //rv = -EINVAL;
             rv = -EINVAL;
@@ -571,15 +629,15 @@ void freebsd_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
             // If return 0,
             // gnmdriver init calls 588, mmap, 588, 601, 588
             break;
-        case 598:
+        case SYS_dynlib_get_proc_param:
             // somewhere under __ps4__malloc_init, libc startup
             rv = -EINVAL;
             break;
-        case 601:
+        case SYS_mdbg_service:
             // mdbg_service
             rv = -EINVAL;
             break;
-        case 602:
+        case SYS_randomized_path:
             // ... syscall handler
             // libkernel : _ps4____sys_randomized_path
             // libkernel : _ps4__sceKernelGetFsSandboxRandomWord
@@ -588,17 +646,17 @@ void freebsd_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
             // prints "[DiskMap BitmapInfo] get path failed"
             rv = -EINVAL;
             break;
-        case 610:
+        case SYS_budget_get_ptype:
             rv = -EINVAL;
             break;
-        case 612:
+        case SYS_get_proc_type_info:
             // nG-FYqFutUo
             rv = -EINVAL;
             break;
 
         default:
         {
-            std::string bsdName = to_string((BsdSyscallNr) ps4_syscall_nr);
+            std::string bsdName = to_string((OrbisSyscallNr) ps4_syscall_nr);
             fprintf(stderr, RED "Unhandled syscall : %lli (%s)\n" RESET, ps4_syscall_nr, bsdName.c_str());
             rv = -EINVAL;
             break;

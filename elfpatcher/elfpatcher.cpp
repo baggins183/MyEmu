@@ -52,8 +52,8 @@ fs::path getNativeLibName(fs::path ps4LibName) {
         ext = ".prx";
     }
     
-    if (ext != ".native") {
-        ext += ".native";
+    if (ext != ".so") {
+        ext += ".so";
     }
 
     auto libStem = ps4LibName.stem();
@@ -63,7 +63,7 @@ fs::path getNativeLibName(fs::path ps4LibName) {
 }
 
 fs::path getPs4LibName(fs::path nativeLibName) {
-    assert(nativeLibName.extension() == ".native");
+    assert(nativeLibName.extension() == ".so");
     fs::path ps4Name = nativeLibName.stem();
     return ps4Name;
 }

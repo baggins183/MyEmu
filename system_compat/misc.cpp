@@ -101,23 +101,4 @@ void *PS4FUN(mmap)(void *addr, size_t length, int prot, int flags,
     return mmap_wrapper(addr, length, prot, flags, fd, offset);
 }
 
-//int PS4FUN(fprintf) (FILE *__restrict __stream, const char *__restrict __format, ...) {
-//    CodeRegionScope __scope;
-//    if (__scope.lastScopeWasPs4()) {
-//        if ((uint64_t) __stream == 0x00007ffff7108f50
-//            || (uint64_t) __stream == 0x00007ffff7104f50
-//            || (uint64_t) __stream == 0x00007ffff70c8f50) {
-//            __stream = stderr;
-//        }
-//    }
-//
-//    va_list ap;
-//
-//    va_start(ap, __format);
-//    int rv = vfprintf(__stream, __format, ap);
-//    va_end(ap);
-//
-//    return rv;
-//}
-
 } // extern "C"
