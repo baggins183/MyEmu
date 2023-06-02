@@ -425,6 +425,68 @@ static greg_t handle_rtprio_thread(mcontext_t *mcontext) {
     return rv;
 }
 
+static greg_t handle_dynlib_get_proc_param(mcontext_t *mcontext) {
+    uint64_t *arg1 = *reinterpret_cast<uint64_t **>(&mcontext->gregs[REG_RDI]);
+    uint64_t *arg2 = *reinterpret_cast<uint64_t **>(&mcontext->gregs[REG_RSI]);
+    
+    // arg 1 is really a return parameter for a pointer
+    // so procparam_t *
+
+    // syscall seems to operate on two addresses.
+
+    // one call stack:
+    // syscall_handler
+    // anon_fn1(arg1, arg2, arg3) <- arg3 not set by caller
+    //              decompiler looks wrong: asm just seems to do syscall, ret if CF==0
+    // _ps4__sceKernelGetProcParam() : returns anonfn1 ? 0 : *arg1
+    //              returns 8 bytes - ptr?
+    // _ps4___malloc_init (in libc.prx.so INI)
+
+    // arg1: 0x00007ffff6315c88
+    // arg2: 0x00007ffff6315c80
+    // 2 stack variable pointers: return parameters, since they are uninitialized before syscall in caller.
+    // arg2 possibly unused by _ps4__sceKernelGetProcParam? Does another caller variant exist which does the syscall
+    // but actually uses *arg2?
+
+    return -EINVAL;
+}
+
+static greg_t handle_mname(mcontext_t *mcontext) {
+    void *addr = *reinterpret_cast<void **>(&mcontext->gregs[REG_RDI]);
+    size_t len = *reinterpret_cast<size_t *>(&mcontext->gregs[REG_RSI]);
+    const char *name = *reinterpret_cast<const char **>(&mcontext->gregs[REG_RDX]);
+
+    greg_t rv;
+    // Can't allocate SceGnmGpuInfo memory - appears after error here
+
+    // under _ps4__sceKernelMapNamedFlexibleMemory
+    // Usually Follows mmap
+    // names memory?
+    // arg1 and arg2 identical to previous mmaps
+
+    // ghidra shows other callers, all have to do with naming memory ranges
+
+    // "SceNpTusGame" - during libSceNpTus.prx.so init
+    rv = -EINVAL;
+    // rv = 0;
+    // rv = *reinterpret_cast<greg_t *>(&addr);
+    // what to return?
+    // 0 or original address causes process exit after:
+    //freebsd_syscall_handler: handling SYS_mmap
+    //freebsd_syscall_handler: handling SYS_mname
+    //freebsd_syscall_handler: handling SYS_osem_create
+    //freebsd_syscall_handler: handling SYS_osem_delete    
+    return rv;
+}
+
+static greg_t handle_osem_create(mcontext_t *mcontext) {
+    return -EINVAL;
+}
+
+static greg_t handle_osem_delete(mcontext_t *mcontext) {
+    return -EINVAL;
+}
+
 static std::set<OrbisSyscallNr> green_syscalls = {
     //SYS_write,
     SYS_read,
@@ -456,7 +518,7 @@ static std::set<OrbisSyscallNr> red_syscalls = {
 
 extern "C" {
 
-void freebsd_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
+void orbis_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
     HostRegionScope __scope;
 
     ucontext_t *ucontext = (ucontext_t *) ucontext_arg;
@@ -605,11 +667,15 @@ void freebsd_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
             break;
         }
         case SYS_osem_create:
-            rv = -EINVAL;
+        {
+            rv = handle_osem_create(mcontext);
             break;
+        }
         case SYS_osem_delete:
-            rv = -EINVAL;
+        {
+            rv = handle_osem_delete(mcontext);
             break;
+        }
         case SYS_dmem_container:
             rv = -EINVAL;
             break;
@@ -620,17 +686,15 @@ void freebsd_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
             rv = 0;
             break;
         case SYS_mname:
-            // Can't allocate SceGnmGpuInfo memory - after this
-            //rv = -EINVAL;
-            rv = -EINVAL;
-            //rv = 0;
-            // If return 0,
-            // gnmdriver init calls 588, mmap, 588, 601, 588
+        {
+            rv = handle_mname(mcontext);
             break;
+        }
         case SYS_dynlib_get_proc_param:
-            // somewhere under __ps4__malloc_init, libc startup
-            rv = -EINVAL;
+        {
+            rv = handle_dynlib_get_proc_param(mcontext);
             break;
+        }
         case SYS_mdbg_service:
             // mdbg_service
             rv = -EINVAL;

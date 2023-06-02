@@ -148,6 +148,8 @@ int pthreadErrorToSceError(int perror)
 
 extern "C" {
 
+// TODO are these needed? Or does the sce thread library work in the linux userspace without changes?
+
 ScePthread PS4FUN(scePthreadSelf)(void) {
 	return pthread_self();
 }
@@ -168,13 +170,15 @@ static void *sce_pthread_entry_wrapper(void *arg) {
 	thread_init_syscall_user_dispatch();
 	enter_ps4_region();
 
-	return arg_wrapper->user_entry_point(arg_wrapper->user_arg);
+	void *rv = arg_wrapper->user_entry_point(arg_wrapper->user_arg);
+	delete arg_wrapper;
+	return rv;
+
 }
 
 int PS4FUN(scePthreadCreate)(ScePthread *thread, const ScePthreadAttr *attr, void *(PS4API *entry) (void *), void *arg, const char *name) {
 	raise(SIGTRAP);
 
-	// Leak memory for now, who cares
 	sce_pthread_entry_arg_wrapper *wrapper_arg = (sce_pthread_entry_arg_wrapper *) new sce_pthread_entry_arg_wrapper;
 	wrapper_arg->user_entry_point = entry;
 	wrapper_arg->user_arg = arg;
@@ -183,6 +187,10 @@ int PS4FUN(scePthreadCreate)(ScePthread *thread, const ScePthreadAttr *attr, voi
 
 	int err = pthread_create(thread, &((*attr)->handle), sce_pthread_entry_wrapper, wrapper_arg);
 	return pthreadErrorToSceError(err);
+}
+
+void PS4FUN(scePthreadExit)(ScePthread *thread) {
+	pthread_exit(thread);
 }
 
 #if 1
@@ -198,7 +206,7 @@ int PS4FUN(scePthreadCancel)(void) { raise(SIGTRAP); return SCE_OK; }
 //int PS4FUN(scePthreadCreate)(void) { raise(SIGTRAP); return SCE_OK; }
 int PS4FUN(scePthreadDetach)(void) { raise(SIGTRAP); return SCE_OK; }
 int PS4FUN(scePthreadEqual)(void) { raise(SIGTRAP); return SCE_OK; }
-int PS4FUN(scePthreadExit)(void) { raise(SIGTRAP); return SCE_OK; }
+//int PS4FUN(scePthreadExit)(void) { raise(SIGTRAP); return SCE_OK; }
 int PS4FUN(scePthreadGetaffinity)(void) { raise(SIGTRAP); return SCE_OK; }
 int PS4FUN(scePthreadGetconcurrency)(void) { raise(SIGTRAP); return SCE_OK; }
 int PS4FUN(scePthreadGetcpuclockid)(void) { raise(SIGTRAP); return SCE_OK; }

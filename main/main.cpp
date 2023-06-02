@@ -345,6 +345,7 @@ void *ps4_entry_thread(void *entry_thread_arg) {
 
     assert(thread_init_syscall_user_dispatch());
 
+    // TODO try to remove this after fixing syscalls
     constexpr std::array initBlackList = {
         "libSceNet.prx.so",
     };

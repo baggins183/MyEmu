@@ -81,4 +81,5 @@ void calculateNid(const char *sym, size_t sym_len, /* ret */ char *hash) {
 #endif
 
     b64_encode_nid(base64_in, hash);
+	free(mbuf);
 }
