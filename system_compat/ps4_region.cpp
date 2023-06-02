@@ -18,20 +18,13 @@ extern "C" {
 namespace fs = std::filesystem;
 
 static thread_local char _syscall_dispatch_switch = SYSCALL_DISPATCH_FILTER_ALLOW;
-static thread_local bool _in_ps4_region = false;
 
 void enter_ps4_region() {
     _syscall_dispatch_switch = SYSCALL_DISPATCH_FILTER_BLOCK;
-    _in_ps4_region = true;
 }
 
 void leave_ps4_region() {
-    _in_ps4_region = false;
     _syscall_dispatch_switch = SYSCALL_DISPATCH_FILTER_ALLOW;
-}
-
-bool in_ps4_region() {
-    return _in_ps4_region;
 }
 
 struct MappedRange {
@@ -40,7 +33,7 @@ struct MappedRange {
 };
 
 // Syscalls from other memory regions will be handled by a translation layer
-// This is to translate FreeBSD syscalls to linux, and handle differences in how the ps4 libs
+// This is to translate FreeBSD/Ps4 syscalls to linux, and handle differences in how the ps4 libs
 // interpret syscall errors
 static bool setupSyscallTrampoline(uint64_t &addr_start, uint64_t &addr_end) {
     // parse /proc/self/map to find the ranges to give to the SYSCALL_USER_DISPATCH prctl call

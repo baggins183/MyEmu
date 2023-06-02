@@ -461,10 +461,6 @@ void freebsd_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
     mcontext_t *mcontext = &ucontext->uc_mcontext;
     int64_t rv = -EINVAL;
 
-    // Enter host code
-    CodeRegionScope __scope(HOST_REGION);
-    assert(__scope.lastScopeWasPs4());
-
     greg_t ps4_syscall_nr = mcontext->gregs[REG_RAX];
 
     std::string bsdName = to_string((OrbisSyscallNr) ps4_syscall_nr);
@@ -667,7 +663,7 @@ void freebsd_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
     // change to bsd conventions here (rax holds result or positive errno, CF means error)
     if (rv < 0) {
         rv = -rv;
-        // Set carry flag. ps4 libs and freebsd expect this
+        // Set carry flag. ps4/bsd code expects carry flag to be 1 on errors
         mcontext->gregs[REG_EFL] |= 1;
     } else {
         // Clear carry flag (no error)

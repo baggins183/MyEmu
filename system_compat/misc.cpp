@@ -95,6 +95,7 @@ void *mmap_wrapper(void *addr, size_t length, int prot, int flags,
 
 extern "C" {
 
+// I forgot if this is necessary. I think just having the syscall handler is fine
 void *PS4FUN(mmap)(void *addr, size_t length, int prot, int flags,
                   int fd, off_t offset)
 {

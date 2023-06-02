@@ -115,6 +115,11 @@ bool mapEntryModuleIntoMemory(fs::path nativeExecutablePath) {
     return true;
 }
 
+// Call dynamic library initialization functions manually.
+// Keeping DT_INIT, FINI, etc tags is hard to reconcile with syscall interception -
+// since dlopen would call ps4 code, and at that point you'd have to flip the syscall
+// intercept switch, and you can't flip the switch before dlopen because dlopen seems to
+// do syscalls instructions outside of libc wrappers. 
 static bool callInitFunctions(std::string ps4Name, InitFiniInfo &initFiniInfo) {
     bool success = true;
     const char *argv[] = {
@@ -140,28 +145,28 @@ static bool callInitFunctions(std::string ps4Name, InitFiniInfo &initFiniInfo) {
     dl = nullptr;
     // decrements ref count, but should stay loaded
 
-    {
-        CodeRegionScope __scope(PS4_REGION);
+    // Turn on syscall interception
+    enter_ps4_region();
 
-        if ( !initFiniInfo.dt_preinit_array.empty()) {
-            for (uint i = 0; i < initFiniInfo.dt_preinit_array.size(); i++) {
-                ((PFN_PS4_INIT_FUNC) (l->l_addr + initFiniInfo.dt_preinit_array[i])) (argc, argv, NULL);
-            }
+    if ( !initFiniInfo.dt_preinit_array.empty()) {
+        for (uint i = 0; i < initFiniInfo.dt_preinit_array.size(); i++) {
+            ((PFN_PS4_INIT_FUNC) (l->l_addr + initFiniInfo.dt_preinit_array[i])) (argc, argv, NULL);
         }
-
-        if ( initFiniInfo.dt_init) {
-            ((PFN_PS4_INIT_FUNC) (l->l_addr + initFiniInfo.dt_init.value())) (argc, argv, NULL);
-        }
-
-        if ( !initFiniInfo.dt_init_array.empty()) {
-            for (uint i = 0; i < initFiniInfo.dt_init_array.size(); i++) {
-                ((PFN_PS4_INIT_FUNC) (l->l_addr + initFiniInfo.dt_init_array[i])) (argc, argv, NULL);
-            }
-        }
-
     }
 
+    if ( initFiniInfo.dt_init) {
+        ((PFN_PS4_INIT_FUNC) (l->l_addr + initFiniInfo.dt_init.value())) (argc, argv, NULL);
+    }
+
+    if ( !initFiniInfo.dt_init_array.empty()) {
+        for (uint i = 0; i < initFiniInfo.dt_init_array.size(); i++) {
+            ((PFN_PS4_INIT_FUNC) (l->l_addr + initFiniInfo.dt_init_array[i])) (argc, argv, NULL);
+        }
+    }
+        
 error:
+    leave_ps4_region();
+
     char *err;
     while ((err = dlerror())) {
         printf("doInit: %s\n", err);
