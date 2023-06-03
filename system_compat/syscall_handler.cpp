@@ -458,24 +458,25 @@ static greg_t handle_mname(mcontext_t *mcontext) {
 
     greg_t rv;
     // Can't allocate SceGnmGpuInfo memory - appears after error here
+    // return addr fixes this
 
     // under _ps4__sceKernelMapNamedFlexibleMemory
     // Usually Follows mmap
     // names memory?
     // arg1 and arg2 identical to previous mmaps
 
-    // ghidra shows other callers, all have to do with naming memory ranges
-
-    // "SceNpTusGame" - during libSceNpTus.prx.so init
-    rv = -EINVAL;
-    // rv = 0;
-    // rv = *reinterpret_cast<greg_t *>(&addr);
+    //rv = -EINVAL;
+    rv = 0;
+    //rv = *reinterpret_cast<greg_t *>(&addr);
     // what to return?
     // 0 or original address causes process exit after:
     //freebsd_syscall_handler: handling SYS_mmap
     //freebsd_syscall_handler: handling SYS_mname
     //freebsd_syscall_handler: handling SYS_osem_create
-    //freebsd_syscall_handler: handling SYS_osem_delete    
+    //freebsd_syscall_handler: handling SYS_osem_delete
+    // in sonic
+
+    // I think returning 0 is right and errors after are red herring - other syscalls' fault
     return rv;
 }
 
@@ -484,6 +485,31 @@ static greg_t handle_osem_create(mcontext_t *mcontext) {
 }
 
 static greg_t handle_osem_delete(mcontext_t *mcontext) {
+    return -EINVAL;
+}
+
+static greg_t handle_osem_open(mcontext_t *mcontext) {
+    return -EINVAL;
+}
+
+static greg_t handle_osem_close(mcontext_t *mcontext) {
+    return -EINVAL;
+}
+
+static greg_t handle_osem_wait(mcontext_t *mcontext) {
+    return -EINVAL;
+}
+
+static greg_t handle_osem_trywait(mcontext_t *mcontext) {
+    return -EINVAL;
+}
+
+static greg_t handle_osem_post(mcontext_t *mcontext) {
+    // "post" seems mean the same as "release"
+    return -EINVAL;
+}
+
+static greg_t handle_osem_cancel(mcontext_t *mcontext) {
     return -EINVAL;
 }
 
@@ -508,12 +534,17 @@ static std::set<OrbisSyscallNr> red_syscalls = {
 	SYS_osem_delete,
 	SYS_dmem_container,
 	SYS_get_authinfo,
-	SYS_mname,
 	SYS_dynlib_get_proc_param,
 	SYS_mdbg_service,
     SYS_randomized_path,
 	SYS_budget_get_ptype,
 	SYS_get_proc_type_info,
+    SYS_regmgr_call,
+};
+
+// handler may/may not be correct
+static std::set<OrbisSyscallNr> yellow_syscalls = {
+    SYS_mname,
 };
 
 extern "C" {
@@ -543,6 +574,8 @@ void orbis_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
         fprintf(stderr, RED "freebsd_syscall_handler: handling %s\n" RESET, bsdName.c_str());
     } else if (green_syscalls.find((OrbisSyscallNr) ps4_syscall_nr) != green_syscalls.end()) {
         printf(GRN "freebsd_syscall_handler: handling %s%s\n", bsdName.c_str(), RESET);
+    } else if (yellow_syscalls.find((OrbisSyscallNr) ps4_syscall_nr) != yellow_syscalls.end()) {
+        printf(YEL "freebsd_syscall_handler: handling %s%s\n", bsdName.c_str(), RESET);
     }
 
     switch (ps4_syscall_nr) {
@@ -668,6 +701,11 @@ void orbis_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
         }
         case SYS_osem_create:
         {
+            // scePthreadMutexattrInitForInternalLibc called (hits wrapper)
+            // then scePthreadMutexInitForInternalLibc (hits wrapper)
+            
+            // then _ps4__sceKernelCreateSema calls syscall
+            // then scePthreadMutexDestroy calls osem_delete syscall
             rv = handle_osem_create(mcontext);
             break;
         }

@@ -33,6 +33,7 @@ sce_module_handle_t PS4FUN(sceKernelGetExecutableModuleHandle)(void) {
 // Returns error code
 // TODO check where errors are coming from: break on printf, go down callstack to see what condition lead to error
 int PS4FUN(sceKernelGetModuleInfo)(sce_module_handle_t mod, sce_module_info_request_t *request) {
+    raise(SIGTRAP);
     switch(request->bits) {
         case 0x160:
             // something to do with the SDK version
