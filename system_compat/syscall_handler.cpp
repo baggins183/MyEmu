@@ -22,7 +22,9 @@
 #include "exported_wrappers.h"
 #include "Common.h"
 #include <semaphore.h>
-#include <sce_errors/sce_kernel_error.h>
+#include <sys/stat.h>
+#include "orbis/sce_errors/sce_kernel_error.h"
+#include "orbis/sce_file.h"
 
 #define DIRECT_SYSCALL_MAP(OP) \
     OP(SYS_getpid, __NR_getpid, ZERO_ARGS) \
@@ -173,11 +175,11 @@ static inline T ARG6(mcontext_t *mcontext) { return *reinterpret_cast<T *>(&mcon
 static greg_t handle_open(mcontext_t *mcontext) {
     int rv;
     auto *name = ARG1<const char *>(mcontext);
-    auto flags = ARG2<int>(mcontext);
-    auto mode = ARG3<mode_t>(mcontext);
+    auto sceFlags = ARG2<sce_file_flags_t>(mcontext);
+    auto sceMode = ARG3<sce_mode_t>(mcontext);
 
     printf(CYN "open syscall: %s\n" RESET, name);
-    rv = open_wrapper(name, flags, mode);
+    rv = open_wrapper(name, sceFlags, sceMode);
     
     if (rv < 0) {
         rv = -errno;
@@ -307,6 +309,8 @@ static greg_t handle_sysctl(mcontext_t *mcontext) {
     // 1.33                        - CTL_KERN.KERN_USRSTACK
     //                from gnmdriver
     // 6.7                         - CTL_HW.HW_PAGESIZE
+
+    // "kern.smp.cpus" - somewhere in scePthreadCreate 
 
     greg_t rv = -ENOENT;
     switch(name[0]) {
@@ -484,16 +488,35 @@ static greg_t handle_mname(mcontext_t *mcontext) {
 }
 
 static greg_t handle_osem_create(mcontext_t *mcontext) {
+    greg_t rv;
     // libkernel wrapper: _ps4__sceKernelCreateSema
     // param_1: return param for sem type
     // param_2: name
-    // param_3:
-    // param_4: count?
-    // param_5: a flag?
+    // param_3: int oflag or sce_mode_t mode?  (as in open, eg O_CREAT for oflag, user/group/others perms for mode)
+    //      sce_mode_t would make more sense - "create" implies O_CREAT
+    //      can probably ignore
+    // param_4: init count?
+    // param_5: GPCS4 says max count (I guess post() would error at the max)?
     // param_6: some kind of mode: if 0, makes syscall, if 1, sets return param to big value
+    //      can probably ignore
 
     // 4 params to syscall: param_2, param_3, param_4, param_5
-    return -EINVAL;
+    auto *name = ARG1<const char *>(mcontext);
+    auto sceMode = ARG2<sce_mode_t>(mcontext);
+    auto init = ARG3<int>(mcontext);
+    auto maxCount = ARG4<int>(mcontext);
+
+    mode_t mode = sceModeToLinux(sceMode);
+
+    // TODO check conversion from BSD mode bits to linux
+    sem_t *sem = sem_open(name, O_CREAT, mode, init);
+    if (sem == SEM_FAILED) {
+        rv = -errno;
+    } else {
+        rv = *reinterpret_cast<greg_t *>(&sem);
+    }
+
+    return -rv;
 }
 
 static greg_t handle_osem_delete(mcontext_t *mcontext) {
@@ -723,7 +746,7 @@ void orbis_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
         }
         case SYS_osem_create:
         {
-            rv = handle_osem_create(mcontext);
+            rv = handle_osem_create(mcontext);            
             break;
         }
         case SYS_osem_delete:
@@ -731,6 +754,36 @@ void orbis_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
             rv = handle_osem_delete(mcontext);
             break;
         }
+        case SYS_osem_open:
+        {
+            rv = handle_osem_open(mcontext);
+            break;
+        }
+        case SYS_osem_close:
+        {
+            rv = handle_osem_close(mcontext);
+            break;
+        }
+        case SYS_osem_wait:
+        {
+            rv = handle_osem_wait(mcontext);
+            break;
+        }
+        case SYS_osem_trywait:
+        {
+            rv = handle_osem_trywait(mcontext);
+            break;
+        }
+        case SYS_osem_post:
+        {
+            rv = handle_osem_post(mcontext);
+            break;
+        }
+        case SYS_osem_cancel:
+        {
+            rv = handle_osem_cancel(mcontext);
+            break;
+        }        
         case SYS_dmem_container:
             rv = -EINVAL;
             break;
@@ -783,6 +836,7 @@ void orbis_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
     // before this point, rv should be -errno if there was an error
     // change to bsd conventions here (rax holds result or positive errno, CF means error)
     if (rv < 0) {
+        // TODO? Convert linux errno to SCE_KERNEL_* errno?
         rv = -rv;
         // Set carry flag. ps4/bsd code expects carry flag to be 1 on errors
         mcontext->gregs[REG_EFL] |= 1;
