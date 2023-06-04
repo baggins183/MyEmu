@@ -1,8 +1,10 @@
 #include <asm-generic/errno-base.h>
+#include <climits>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <dlfcn.h>
+#include <mutex>
 #include <optional>
 #include <pthread.h>
 #include <set>
@@ -487,6 +489,60 @@ static greg_t handle_mname(mcontext_t *mcontext) {
     return rv;
 }
 
+template<uint NUM_SCE_BITS, typename V>
+class Ps4HandleMap {
+    // A class that manages some pool of opaque handles, e.g. sce semaphores.
+    // Hand a simple integer key back to the ps4 application, when the ps4 app/lib tries to get a handle to some
+    // resource.
+    // We should allocate the appropriate linux resource and map the opaque handle, which we give back to the
+    // app, to the linux resource.
+    //
+    // Useful to handle size differences in handles.
+    // E.g. if a ps4 lib expects a 4 byte handle when the linux handle is an 8-byte pointer.
+public:
+    // give 8B size to the generic sce_type handle, but enforce that the actual used bits stays under SCE_NUM_BITS 
+    typedef size_t sce_type;
+    typedef V host_type;
+
+    // check that size_t is wide enough to hold the opaque handle
+    static_assert(sizeof(sce_type) * CHAR_BIT >= NUM_SCE_BITS);
+
+    sce_type getNewHandle(host_type hostResourceHandle) {
+        std::unique_lock<std::mutex> _lock(mutex);
+
+        // Enforce that the MSB doesn't go 0 -> 1
+        // A ps4 lib might check the sign of the handle for an error
+        size_t msb = 1 << (NUM_SCE_BITS - 1);
+        assert(maxSceHandle != ~msb); // Would overflow to signed with next increment, eg
+        // maxSceHandle=0111 for SCE_NUM_BITS=4
+        sce_type newId = ++maxSceHandle;
+        ps4ToHostHandle.insert(std::make_pair<newId, hostResourceHandle>);
+        // TODO: make smarter data structure so we can reclaim freed slots
+        // This will crash after 2^NUM_SCE_BITS handles
+    }
+    std::optional<host_type> find(sce_type key) {
+        std::unique_lock<std::mutex> _lock(mutex);
+
+        auto it = ps4ToHostHandle.find(key);
+        return it != ps4ToHostHandle.end() ? it->second() : std::nullopt;
+    }
+
+    // Doesn't free the linux resource, only removes sce -> linux mapping
+    bool remove(sce_type key) {
+        std::unique_lock<std::mutex> _lock(mutex);
+
+        return 1 == ps4ToHostHandle.erase(key);
+    }
+
+private:
+    std::mutex mutex;
+    std::map<sce_type, host_type> ps4ToHostHandle;
+    size_t maxSceHandle = 0;
+};
+
+typedef Ps4HandleMap<32, sem_t *> OsemHandleMap;
+static OsemHandleMap _OsemHandles;
+
 static greg_t handle_osem_create(mcontext_t *mcontext) {
     greg_t rv;
     // libkernel wrapper: _ps4__sceKernelCreateSema
@@ -504,23 +560,39 @@ static greg_t handle_osem_create(mcontext_t *mcontext) {
     auto *name = ARG1<const char *>(mcontext);
     auto sceMode = ARG2<sce_mode_t>(mcontext);
     auto init = ARG3<int>(mcontext);
+    // TODO do anything with this?
     auto maxCount = ARG4<int>(mcontext);
 
     mode_t mode = sceModeToLinux(sceMode);
 
-    // TODO check conversion from BSD mode bits to linux
+    // TODO: see verify sem_t is usable handle for callers
+    // "sem.SceNpTusGame" created with SCE_S_IXOTH - might need to set USR R/W
+    // if not set, next osem_create will fail with "permission denied"
+    // Use O_EXCL? - EXCL returns error if exists
     sem_t *sem = sem_open(name, O_CREAT, mode, init);
     if (sem == SEM_FAILED) {
+        fprintf(stderr, RED "sem_open failed: %s\n", strerror(errno));
         rv = -errno;
     } else {
+        printf(MAG "osem create: %p\n", sem);
         rv = *reinterpret_cast<greg_t *>(&sem);
     }
 
-    return -rv;
+    return rv;
 }
 
 static greg_t handle_osem_delete(mcontext_t *mcontext) {
-    return -EINVAL;
+    greg_t rv;
+    auto *sem = ARG1<sem_t *>(mcontext);
+
+    printf(MAG "osem delete: %p\n", sem);
+    rv = sem_close(sem);
+    if (rv < 0) {
+        fprintf(stderr, RED "sem_close failed: %s\n", strerror(errno));
+        rv = -errno;
+    }
+
+    return rv;
 }
 
 static greg_t handle_osem_open(mcontext_t *mcontext) {

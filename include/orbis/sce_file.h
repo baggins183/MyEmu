@@ -125,51 +125,52 @@ static inline int sceFlagsToLinux(sce_file_flags_t flags) {
     return linuxFlags;
 }
 
+// Apparently linux and sce use the same flags - probably delete later
 static inline mode_t sceModeToLinux(sce_mode_t mode) {
     mode_t linuxMode = 0;
-    if (mode & SCE_S_IRWXU) {
+    if (SCE_S_IRWXU == (mode & SCE_S_IRWXU)) {
         linuxMode |= S_IRWXU;
     }
-    if (mode & SCE_S_IRUSR) {
+    if (SCE_S_IRUSR == (mode & SCE_S_IRUSR)) {
         linuxMode |= S_IRUSR;
     }
-    if (mode & SCE_S_IWUSR) {
+    if (SCE_S_IWUSR == (mode & SCE_S_IWUSR)) {
         linuxMode |= S_IWUSR;
     }
-    if (mode & SCE_S_IXUSR) {
+    if (SCE_S_IXUSR == (mode & SCE_S_IXUSR)) {
         linuxMode |= S_IXUSR;
     }
-    if (mode & SCE_S_IRWXG) {
+    if (SCE_S_IRWXG == (mode & SCE_S_IRWXG)) {
         linuxMode |= S_IRWXG;
     }
-    if (mode & SCE_S_IRGRP) {
+    if (SCE_S_IRGRP == (mode & SCE_S_IRGRP)) {
         linuxMode |= S_IRGRP;
     }
-    if (mode & SCE_S_IWGRP) {
+    if (SCE_S_IWGRP == (mode & SCE_S_IWGRP)) {
         linuxMode |= S_IWGRP;
     }
-    if (mode & SCE_S_IXGRP) {
+    if (SCE_S_IXGRP == (mode & SCE_S_IXGRP)) {
         linuxMode |= S_IXGRP;
     }
-    if (mode & SCE_S_IRWXO) {
+    if (SCE_S_IRWXO == (mode & SCE_S_IRWXO)) {
         linuxMode |= S_IRWXO;
     }
-    if (mode & SCE_S_IROTH) {
+    if (SCE_S_IROTH == (mode & SCE_S_IROTH)) {
         linuxMode |= S_IROTH;
     }
-    if (mode & SCE_S_IWOTH) {
+    if (SCE_S_IWOTH == (mode & SCE_S_IWOTH)) {
         linuxMode |= S_IWOTH;
     }
-    if (mode & SCE_S_IXOTH) {
+    if (SCE_S_IXOTH == (mode & SCE_S_IXOTH)) {
         linuxMode |= S_IXOTH;
     }
-//    if (mode & SCE_S_ISUID) {
+//    if (SCE_S_ISUID == (mode & SCE_S_ISUID)) {
 //        linux_flags |= S_ISUID;
 //    }
-//    if (mode & SCE_S_ISGID) {
+//    if (SCE_S_ISGID == (mode & SCE_S_ISGID)) {
 //        linux_flags |= S_ISGID;
 //    }
-    if (mode & SCE_S_ISVTX) {
+    if (SCE_S_ISVTX == (mode & SCE_S_ISVTX)) {
         linuxMode |= S_ISVTX;
     }
     return linuxMode;
