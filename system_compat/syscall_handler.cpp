@@ -200,18 +200,18 @@ static greg_t handle_close(mcontext_t *mcontext) {
     return rv;
 }
 
-#define PS4_IOCPARM_SHIFT   13              /* number of bits for ioctl size */
-#define PS4_IOCPARM_MASK    ((1 << PS4_IOCPARM_SHIFT) - 1) /* parameter length mask */
-#define PS4_IOCPARM_LEN(x)  (((x) >> 16) & PS4_IOCPARM_MASK)
-#define PS4_IOCBASECMD(x)   ((x) & ~(PS4_IOCPARM_MASK << 16))
-#define PS4_IOCGROUP(x)     (((x) >> 8) & 0xff)
+#define BSD_IOCPARM_SHIFT   13              /* number of bits for ioctl size */
+#define BSD_IOCPARM_MASK    ((1 << BSD_IOCPARM_SHIFT) - 1) /* parameter length mask */
+#define BSD_IOCPARM_LEN(x)  (((x) >> 16) & BSD_IOCPARM_MASK)
+#define BSD_IOCBASECMD(x)   ((x) & ~(BSD_IOCPARM_MASK << 16))
+#define BSD_IOCGROUP(x)     (((x) >> 8) & 0xff)
 
-#define PS4_IOCPARM_MAX     (1 << PS4_IOCPARM_SHIFT) /* max size of ioctl */
-#define PS4_IOC_VOID        0x20000000      /* no parameters */
-#define PS4_IOC_OUT         0x40000000      /* copy out parameters */
-#define PS4_IOC_IN          0x80000000      /* copy in parameters */
-#define PS4_IOC_INOUT       (PS4_IOC_IN|PS4_IOC_OUT)
-#define PS4_IOC_DIRMASK     (PS4_IOC_VOID|PS4_IOC_OUT|PS4_IOC_IN)
+#define BSD_IOCPARM_MAX     (1 << BSD_IOCPARM_SHIFT) /* max size of ioctl */
+#define BSD_IOC_VOID        0x20000000      /* no parameters */
+#define BSD_IOC_OUT         0x40000000      /* copy out parameters */
+#define BSD_IOC_IN          0x80000000      /* copy in parameters */
+#define BSD_IOC_INOUT       (BSD_IOC_IN|BSD_IOC_OUT)
+#define BSD_IOC_DIRMASK     (BSD_IOC_VOID|BSD_IOC_OUT|BSD_IOC_IN)
 
 static greg_t handle_ioctl(mcontext_t *mcontext) {
     int rv;
@@ -219,18 +219,18 @@ static greg_t handle_ioctl(mcontext_t *mcontext) {
     auto request = ARG2<uint32_t>(mcontext);
     auto *argp = ARG3<void *>(mcontext);
 
-    uint32_t group = PS4_IOCGROUP(request);
+    uint32_t group = BSD_IOCGROUP(request);
     uint32_t num = request & 0xff;
-    uint32_t len = PS4_IOCPARM_LEN(request);
+    uint32_t len = BSD_IOCPARM_LEN(request);
 
     fprintf(stderr,
         "\t%s\n"
         "\tgroup: %c (%d)\n"
         "\tnum: %d\n"
         "\tlen: %d\n",
-        PS4_IOC_INOUT == (request & PS4_IOC_INOUT) ? "inout" 
-            : (request & PS4_IOC_IN ? "in (write)"
-                : (request & PS4_IOC_OUT ? "out (read)" : "void")),
+        BSD_IOC_INOUT == (request & BSD_IOC_INOUT) ? "inout"
+            : (request & BSD_IOC_IN ? "in (write)"
+                : (request & BSD_IOC_OUT ? "out (read)" : "void")),
         group, group,
         num,
         len
@@ -516,15 +516,19 @@ public:
         assert(maxSceHandle != ~msb); // Would overflow to signed with next increment, eg
         // maxSceHandle=0111 for SCE_NUM_BITS=4
         sce_type newId = ++maxSceHandle;
-        ps4ToHostHandle.insert(std::make_pair<newId, hostResourceHandle>);
+        ps4ToHostHandle.insert(std::make_pair(newId, hostResourceHandle));
         // TODO: make smarter data structure so we can reclaim freed slots
         // This will crash after 2^NUM_SCE_BITS handles
+        return newId;
     }
     std::optional<host_type> find(sce_type key) {
         std::unique_lock<std::mutex> _lock(mutex);
 
-        auto it = ps4ToHostHandle.find(key);
-        return it != ps4ToHostHandle.end() ? it->second() : std::nullopt;
+        const auto& it = ps4ToHostHandle.find(key);
+        if (it != ps4ToHostHandle.end()) {
+            return it->second;
+        }
+        return std::nullopt;
     }
 
     // Doesn't free the linux resource, only removes sce -> linux mapping
@@ -574,8 +578,9 @@ static greg_t handle_osem_create(mcontext_t *mcontext) {
         fprintf(stderr, RED "sem_open failed: %s\n", strerror(errno));
         rv = -errno;
     } else {
-        printf(MAG "osem create: %p\n", sem);
-        rv = *reinterpret_cast<greg_t *>(&sem);
+        OsemHandleMap::sce_type sceHandle = _OsemHandles.getNewHandle(sem);
+        rv = sceHandle;
+        printf(MAG "osem create: %lu -> %p\n", sceHandle, sem);
     }
 
     return rv;
@@ -583,14 +588,24 @@ static greg_t handle_osem_create(mcontext_t *mcontext) {
 
 static greg_t handle_osem_delete(mcontext_t *mcontext) {
     greg_t rv;
-    auto *sem = ARG1<sem_t *>(mcontext);
+    auto sceHandle = ARG1<OsemHandleMap::sce_type>(mcontext);
 
-    printf(MAG "osem delete: %p\n", sem);
-    rv = sem_close(sem);
-    if (rv < 0) {
-        fprintf(stderr, RED "sem_close failed: %s\n", strerror(errno));
-        rv = -errno;
+    printf(MAG "osem delete: %lu\n", sceHandle);
+    auto hostHandle = _OsemHandles.find(sceHandle);
+    if ( !hostHandle) {
+        fprintf(stderr, RED "sem_close: sce handle not found in OsemHandleMap\n");
+        rv = -EINVAL;
+    } else {
+        rv = sem_close(hostHandle.value());
+        if (rv < 0) {
+            fprintf(stderr, RED "sem_close failed: %s\n", strerror(errno));
+            rv = -errno;
+        }
     }
+
+    // I'd think osem_delete would be like sem_unlink
+    // and osem_close would be like sem_close
+    // But osem_delete takes a handle wihle sem_unlink uses a name
 
     return rv;
 }
