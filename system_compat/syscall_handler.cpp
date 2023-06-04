@@ -21,6 +21,8 @@
 #include "freebsd9.0/sys/rtprio.h"
 #include "exported_wrappers.h"
 #include "Common.h"
+#include <semaphore.h>
+#include <sce_errors/sce_kernel_error.h>
 
 #define DIRECT_SYSCALL_MAP(OP) \
     OP(SYS_getpid, __NR_getpid, ZERO_ARGS) \
@@ -37,6 +39,19 @@
 // %rdi, %rsi, %rdx, %r10, %r8 and %r9"
 // Judging by sysctl, the ps4 uses this convention also, moving %rcx to %r10 before
 // the syscall instruction
+
+template<typename T>
+static inline T ARG1(mcontext_t *mcontext) { return *reinterpret_cast<T *>(&mcontext->gregs[REG_RDI]); }
+template<typename T>
+static inline T ARG2(mcontext_t *mcontext) { return *reinterpret_cast<T *>(&mcontext->gregs[REG_RSI]); }
+template<typename T>
+static inline T ARG3(mcontext_t *mcontext) { return *reinterpret_cast<T *>(&mcontext->gregs[REG_RDX]); }
+template<typename T>
+static inline T ARG4(mcontext_t *mcontext) { return *reinterpret_cast<T *>(&mcontext->gregs[REG_R10]); }
+template<typename T>
+static inline T ARG5(mcontext_t *mcontext) { return *reinterpret_cast<T *>(&mcontext->gregs[REG_R8]); }
+template<typename T>
+static inline T ARG6(mcontext_t *mcontext) { return *reinterpret_cast<T *>(&mcontext->gregs[REG_R9]); }
 
 // ZERO_ARGS ... SIX_ARGS
 // Macros to invoke the native (linux) syscall, with the arguments directly mapped
@@ -157,10 +172,9 @@
 
 static greg_t handle_open(mcontext_t *mcontext) {
     int rv;
-
-    const char *name = *reinterpret_cast<char **>(&mcontext->gregs[REG_RDI]);
-    int flags = *reinterpret_cast<int *>(&mcontext->gregs[REG_RSI]);
-    mode_t mode = *reinterpret_cast<mode_t *>(&mcontext->gregs[REG_RDX]);
+    auto *name = ARG1<const char *>(mcontext);
+    auto flags = ARG2<int>(mcontext);
+    auto mode = ARG3<mode_t>(mcontext);
 
     printf(CYN "open syscall: %s\n" RESET, name);
     rv = open_wrapper(name, flags, mode);
@@ -173,8 +187,8 @@ static greg_t handle_open(mcontext_t *mcontext) {
 
 static greg_t handle_close(mcontext_t *mcontext) {
     int rv;
+    auto fd = ARG1<int>(mcontext);
 
-    int fd = *reinterpret_cast<int *>(&mcontext->gregs[REG_RDI]);
     rv = close(fd);
     if (rv) {
         rv = -errno;
@@ -197,10 +211,9 @@ static greg_t handle_close(mcontext_t *mcontext) {
 
 static greg_t handle_ioctl(mcontext_t *mcontext) {
     int rv;
-
-    //int fd = *reinterpret_cast<int *>(&mcontext->gregs[REG_RDI]);
-    uint32_t request = *reinterpret_cast<uint32_t *>(&mcontext->gregs[REG_RSI]);
-    void *argp = *reinterpret_cast<void **>(&mcontext->gregs[REG_RDX]);
+    //auto fd = ARG1<int>(mcontext);
+    auto request = ARG2<uint32_t>(mcontext);
+    auto *argp = ARG3<void *>(mcontext);
 
     uint32_t group = PS4_IOCGROUP(request);
     uint32_t num = request & 0xff;
@@ -250,6 +263,7 @@ static greg_t handle_ioctl(mcontext_t *mcontext) {
             switch(num) {
                 case 6:
                 {
+                    // TODO check this, dont remember
                     memset(argp, 0, len);
                     rv = 0;
                 }
@@ -269,11 +283,11 @@ static greg_t handle_ioctl(mcontext_t *mcontext) {
 }
 
 static greg_t handle_sysctl(mcontext_t *mcontext) {
-    int *name = *reinterpret_cast<int **>(&mcontext->gregs[REG_RDI]);
-    uint namelen = *reinterpret_cast<uint *>(&mcontext->gregs[REG_RSI]);
-    void *oldp = *reinterpret_cast<void **>(&mcontext->gregs[REG_RDX]);
-    size_t *oldlenp = *reinterpret_cast<size_t **>(&mcontext->gregs[REG_R10]);
-    void *newp = *reinterpret_cast<void **>(&mcontext->gregs[REG_R8]);
+    auto *name = ARG1<int *>(mcontext);
+    auto namelen = ARG2<uint>(mcontext);
+    auto *oldp = ARG3<void *>(mcontext);
+    auto *oldlenp = ARG4<size_t *>(mcontext);
+    auto *newp = ARG5<void *>(mcontext);
     bool is_write = newp != NULL;
 
     printf("\tname: %d.%d.%d.%d\n"
@@ -376,12 +390,12 @@ static greg_t handle_sysctl(mcontext_t *mcontext) {
 }
 
 static greg_t handle_mmap(mcontext_t *mcontext) {
-    void *addr = *reinterpret_cast<void **>(&mcontext->gregs[REG_RDI]);
-    size_t len = *reinterpret_cast<size_t *>(&mcontext->gregs[REG_RSI]);
-    int prot = *reinterpret_cast<int *>(&mcontext->gregs[REG_RDX]);
-    int flags = *reinterpret_cast<int *>(&mcontext->gregs[REG_R10]);
-    int fd = *reinterpret_cast<int *>(&mcontext->gregs[REG_R8]);
-    off_t offset = *reinterpret_cast<off_t *>(&mcontext->gregs[REG_R9]);
+    auto *addr = ARG1<void *>(mcontext);
+    auto len = ARG2<size_t>(mcontext);
+    auto prot = ARG3<int>(mcontext);
+    auto flags = ARG4<int>(mcontext);
+    auto fd = ARG5<int>(mcontext);
+    auto offset = ARG6<off_t>(mcontext);
 
     greg_t rv;  
 
@@ -396,10 +410,9 @@ static greg_t handle_mmap(mcontext_t *mcontext) {
 }
 
 static greg_t handle_rtprio_thread(mcontext_t *mcontext) {
-    int function = *reinterpret_cast<int *>(&mcontext->gregs[REG_RDI]);
-    // lwpid_t
-    // int32_t lwpid = *reinterpret_cast<int32_t *>(&mcontext->gregs[REG_RSI]);
-    struct rtprio *rtp = *reinterpret_cast<struct rtprio **>(&mcontext->gregs[REG_RDX]);
+    auto function = ARG1<int>(mcontext);
+    // auto lwpid = ARG2<int32_t>(mcontext)
+    auto *rtp = ARG3<struct rtprio *>(mcontext);
 
     greg_t rv = 0;
 
@@ -426,8 +439,8 @@ static greg_t handle_rtprio_thread(mcontext_t *mcontext) {
 }
 
 static greg_t handle_dynlib_get_proc_param(mcontext_t *mcontext) {
-    uint64_t *arg1 = *reinterpret_cast<uint64_t **>(&mcontext->gregs[REG_RDI]);
-    uint64_t *arg2 = *reinterpret_cast<uint64_t **>(&mcontext->gregs[REG_RSI]);
+    auto *arg1 = ARG1<uint64_t *>(mcontext);
+    auto *arg2 = ARG2<uint64_t *>(mcontext);
     
     // arg 1 is really a return parameter for a pointer
     // so procparam_t *
@@ -452,9 +465,9 @@ static greg_t handle_dynlib_get_proc_param(mcontext_t *mcontext) {
 }
 
 static greg_t handle_mname(mcontext_t *mcontext) {
-    void *addr = *reinterpret_cast<void **>(&mcontext->gregs[REG_RDI]);
-    size_t len = *reinterpret_cast<size_t *>(&mcontext->gregs[REG_RSI]);
-    const char *name = *reinterpret_cast<const char **>(&mcontext->gregs[REG_RDX]);
+    auto *addr = ARG1<void *>(mcontext);
+    auto len = ARG2<size_t>(mcontext);
+    auto *name = ARG3<const char *>(mcontext);
 
     greg_t rv;
     // Can't allocate SceGnmGpuInfo memory - appears after error here
@@ -467,20 +480,19 @@ static greg_t handle_mname(mcontext_t *mcontext) {
 
     //rv = -EINVAL;
     rv = 0;
-    //rv = *reinterpret_cast<greg_t *>(&addr);
-    // what to return?
-    // 0 or original address causes process exit after:
-    //freebsd_syscall_handler: handling SYS_mmap
-    //freebsd_syscall_handler: handling SYS_mname
-    //freebsd_syscall_handler: handling SYS_osem_create
-    //freebsd_syscall_handler: handling SYS_osem_delete
-    // in sonic
-
-    // I think returning 0 is right and errors after are red herring - other syscalls' fault
     return rv;
 }
 
 static greg_t handle_osem_create(mcontext_t *mcontext) {
+    // libkernel wrapper: _ps4__sceKernelCreateSema
+    // param_1: return param for sem type
+    // param_2: name
+    // param_3:
+    // param_4: count?
+    // param_5: a flag?
+    // param_6: some kind of mode: if 0, makes syscall, if 1, sets return param to big value
+
+    // 4 params to syscall: param_2, param_3, param_4, param_5
     return -EINVAL;
 }
 
@@ -489,6 +501,16 @@ static greg_t handle_osem_delete(mcontext_t *mcontext) {
 }
 
 static greg_t handle_osem_open(mcontext_t *mcontext) {
+    // Guessing that param_2 to _ps4__sceKernelOpenSema is the semaphore name, and that it
+    // must already exist (since count and other init params aren't given)
+
+    // _ps4__sceKernelOpenSema
+    // param_1: return param
+    // param_2: ??? arg to syscall
+
+    // syscall: param_2
+    const char *name = ARG1<const char *>(mcontext);
+
     return -EINVAL;
 }
 
@@ -701,11 +723,6 @@ void orbis_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
         }
         case SYS_osem_create:
         {
-            // scePthreadMutexattrInitForInternalLibc called (hits wrapper)
-            // then scePthreadMutexInitForInternalLibc (hits wrapper)
-            
-            // then _ps4__sceKernelCreateSema calls syscall
-            // then scePthreadMutexDestroy calls osem_delete syscall
             rv = handle_osem_create(mcontext);
             break;
         }
