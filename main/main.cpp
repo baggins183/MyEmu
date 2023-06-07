@@ -386,11 +386,10 @@ static bool runPs4Thread(Ps4EntryThreadArgs &entryThreadArgs) {
 }
 
 int main(int argc, char **argv) {
-    //FILE *eboot;
     void *dl;
 
     parseCmdArgs(argc, argv);
-    ElfPatcherContext Ctx(CmdArgs.ps4libsPath,CmdArgs.preloadDirPath, CmdArgs.hashdbPath, CmdArgs.patchedElfDir, CmdArgs.pkgdumpPath, CmdArgs.genElfs);
+    ElfPatcherContext Ctx(CmdArgs.ps4libsPath, CmdArgs.hashdbPath, CmdArgs.pkgdumpPath);
 
     if ( !getenv("LD_LIBRARY_PATH")) {
         fprintf(stderr, "LD_LIBRARY_PATH unset\n");
@@ -455,11 +454,6 @@ int main(int argc, char **argv) {
                 }
             }
 
-            fs::path elfJsonPath = nativePath;
-            elfJsonPath += ".json";
-            if ( !dumpPatchedElfInfoToJson(elfJsonPath, nativePath, Ctx.initFiniInfo)) {
-                return -1;
-            }
             Ctx.reset();
         }
     }
@@ -479,11 +473,11 @@ int main(int argc, char **argv) {
             // Get info about the lib (currently the addresses of init/finilization functions)
             fs::path elfJsonPath = nativePath;
             elfJsonPath += ".json";
-            InitFiniInfo initFini;
-            if ( !parsePatchedElfInfoFromJson(elfJsonPath, &initFini)) {
+            std::optional<PatchedElfInfo> elfInfo;
+            if ( !(elfInfo = parsePatchedElfInfoFromJson(elfJsonPath))) {
                 return -1;
             }
-            initFiniInfos[nativeName] = initFini;
+            initFiniInfos[nativeName] = elfInfo.value().initFiniInfo;
 
             for (auto &dep: deps) {
                 dependsOn[nativeName].insert(getNativeLibName(dep));
@@ -509,13 +503,16 @@ int main(int argc, char **argv) {
 
     // Preload compatability libs that override sce functions in symbol order
     std::vector<void *> preloadHandles;
-    LibSearcher preloadSearcher({{CmdArgs.preloadDirPath, true}});
-    for (std::string preload: Ctx.preloadNames) {
-        auto preloadPath = preloadSearcher.findLibrary(preload);
-        assert(preloadPath);
-        fprintf(stderr, "main: preloading %s\n", preloadPath->c_str());
+
+    fs::recursive_directory_iterator it(CmdArgs.preloadDirPath);
+    for (auto &dirent: it) {
+        if ( !(dirent.is_regular_file() && dirent.path().extension() == ".so")) {
+            continue;
+        }        
+        auto preloadPath = dirent.path();
+        fprintf(stderr, "main: preloading %s\n", preloadPath.c_str());
         // Note RTLD_GLOBAL: these symbols will take precedence over ps4 symbols in lookups/relocs
-        void *handle = dlopen(preloadPath->c_str(), RTLD_LAZY | RTLD_GLOBAL);
+        void *handle = dlopen(preloadPath.c_str(), RTLD_LAZY | RTLD_GLOBAL);
         if (!handle) {
             char *err;
             while ((err = dlerror())) {

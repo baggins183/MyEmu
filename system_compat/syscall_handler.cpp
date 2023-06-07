@@ -645,6 +645,47 @@ static greg_t handle_osem_cancel(mcontext_t *mcontext) {
     return -EINVAL;
 }
 
+// Dunno what this is
+struct authinfo_t {
+    uint64_t utype;
+    uint64_t flags;
+};
+
+static greg_t handle_get_authinfo(mcontext_t *mcontext) {
+    auto pid = ARG1<pid_t>(mcontext);
+    auto *authinfo = ARG2<authinfo_t *>(mcontext);
+
+    /*
+    uint64_t to_write[] = {
+        0x3800000000000006,
+        0x380000000000000f,
+        0x3800000000000010,
+        0x3800000000000015,
+        0x3800000000000016,
+        0x3800000000000017,
+        0x3800000000000018,
+        0x3800000000000033,
+        0x3800000000000034,
+        0x3800000000000035,
+        0x3800000000000036,
+        0x3800000000010003,
+        0x3800000010000001,
+        0x3800000010000002,
+        0x3800000010000003,
+        0x3800000010000004,
+        0x3800000010000005,
+        0x3800000010000009,
+        0x380000001000000f,
+    };
+    */
+
+    //authinfo->utype = 0x3800000010000009;
+    authinfo->utype = 0;
+    authinfo->flags = 0;
+
+    return 0;
+}
+
 static std::set<OrbisSyscallNr> green_syscalls = {
     //SYS_write,
     SYS_read,
@@ -652,7 +693,6 @@ static std::set<OrbisSyscallNr> green_syscalls = {
     SYS_close,
     SYS_getpid,
     SYS_ioctl,
-    SYS___sysctl,
     SYS_rtprio_thread,
     SYS_thr_self,
     SYS_mmap,
@@ -662,8 +702,6 @@ static std::set<OrbisSyscallNr> green_syscalls = {
 static std::set<OrbisSyscallNr> red_syscalls = {
     SYS_netcontrol,
     SYS_evf_create,
-	SYS_osem_create,
-	SYS_osem_delete,
 	SYS_dmem_container,
 	SYS_get_authinfo,
 	SYS_dynlib_get_proc_param,
@@ -672,11 +710,20 @@ static std::set<OrbisSyscallNr> red_syscalls = {
 	SYS_budget_get_ptype,
 	SYS_get_proc_type_info,
     SYS_regmgr_call,
+    SYS_osem_open,
+    SYS_osem_close,
+    SYS_osem_wait,
+    SYS_osem_trywait,
+    SYS_osem_post,
+    SYS_osem_cancel
 };
 
 // handler may/may not be correct
 static std::set<OrbisSyscallNr> yellow_syscalls = {
     SYS_mname,
+	SYS_osem_create,
+	SYS_osem_delete,
+    SYS___sysctl,
 };
 
 extern "C" {
@@ -877,8 +924,7 @@ void orbis_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
         case SYS_get_authinfo:
             // get_authinfo
             // ScePthread: Fatal error 'Can't allocate initial thread' (errno = 22)            
-            //rv = -EINVAL;
-            rv = 0;
+            rv = handle_get_authinfo(mcontext);
             break;
         case SYS_mname:
         {

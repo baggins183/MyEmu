@@ -6,6 +6,7 @@
 #include <cstring>
 #include <elf.h>
 #include <filesystem>
+#include <nlohmann/detail/macro_scope.hpp>
 namespace fs = std::filesystem;
 #include <optional>
 #include <vector>
@@ -172,16 +173,17 @@ struct InitFiniInfo {
 void to_json(json& j, const InitFiniInfo& p);
 void from_json(const json& j, InitFiniInfo& p);
 
+// Random info passed around by elfpatcher functions
 struct ElfPatcherContext {
+    std::string currentPs4Lib;
+
     fs::path pkgdumpPath;
     LibSearcher ps4LibSearcher;
     
     fs::path nativeElfOutputDir;
     LibSearcher nativeLibSearcher;
 
-    std::vector<fs::path> preloadNames;
     fs::path hashdbPath;
-    bool purgeElfs;
 
     // Per-object state
     // dependencies (DT_NEEDED) on the processed ELF. Uses original names (non-native)
@@ -189,20 +191,11 @@ struct ElfPatcherContext {
     // info about initialization and finalization functions
     InitFiniInfo initFiniInfo;
 
-    ElfPatcherContext(std::string ps4libsPath, std::string preloadDir, std::string hashdbPath, std::string nativeElfOutputDir, std::string pkgdumpPath, bool purgeElfs):
+    ElfPatcherContext(std::string ps4libsPath, std::string hashdbPath, std::string pkgdumpPath):
             pkgdumpPath(pkgdumpPath),
             ps4LibSearcher({{pkgdumpPath, true}, {ps4libsPath, false}}),
-            nativeElfOutputDir(nativeElfOutputDir),
-            nativeLibSearcher({nativeElfOutputDir}),
-            hashdbPath(hashdbPath),
-            purgeElfs(purgeElfs)
+            hashdbPath(hashdbPath)
     {
-        fs::recursive_directory_iterator it(preloadDir);
-        for (auto &dirent: it) {
-            if (dirent.is_regular_file() && dirent.path().extension() == ".so") {
-                preloadNames.push_back(dirent.path().filename());
-            }
-        }
     }
 
     // Reset per-object state
@@ -241,10 +234,20 @@ std::optional<fs::path> findPathToSceLib(fs::path ps4LibName, ElfPatcherContext 
 // To be able to dlopen() or exec() this, all the recursive dependencies should be patched beforehand 
 bool patchPs4Lib(ElfPatcherContext &Ctx, std::string elfPath);
 
-bool dumpPatchedElfInfoToJson(fs::path jsonPath, fs::path elfPath, InitFiniInfo &initFiniInfo);
-
-std::optional<json> parsePatchedElfInfoFromJson(fs::path jsonPath, InitFiniInfo *initFiniInfo = nullptr);
-
 bool findDependencies(fs::path patchedElf, std::vector<std::string> &deps);
+
+// TODO add dependencies (original names of ps4 elfs)
+struct PatchedElfInfo {
+    fs::path path;
+    InitFiniInfo initFiniInfo;
+    uint64_t hash;
+    EtType elfType;
+
+    NLOHMANN_DEFINE_TYPE_INTRUSIVE(PatchedElfInfo, path, initFiniInfo, hash, elfType)
+};
+
+bool dumpPatchedElfInfoToJson(fs::path jsonPath, const PatchedElfInfo &elfInfo);
+
+std::optional<PatchedElfInfo> parsePatchedElfInfoFromJson(fs::path jsonPath);
 
 #endif // _ELF_PATCHER_H_

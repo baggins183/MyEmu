@@ -46,41 +46,17 @@ void from_json(const json& j, InitFiniInfo& info) {
     }
 }
 
-static bool getFileHash(fs::path path, uint64_t &hash) {
-    boost::iostreams::mapped_file_source file;
-    try {
-        file.open(path);
-    } catch (const std::ios_base::failure& e) {
-        fprintf(stderr, "Couldn't open %s: %s\n", path.c_str(), e.what());
-        return false;
-    }
-
-    hash = pjwHash((unsigned char *) file.data(), file.size());
-    return true;
-}
-
-bool dumpPatchedElfInfoToJson(fs::path jsonPath, fs::path elfPath, InitFiniInfo &initFiniInfo) {
-    json elfJson;
-    elfJson["filename"] = elfPath.filename();
-
-    uint64_t hash;
-    if ( !getFileHash(elfPath, hash)) {
-        return false;
-    }
-    elfJson["hash"] = hash;
-
-    elfJson["init_fini_info"] = initFiniInfo;
-
+bool dumpPatchedElfInfoToJson(fs::path jsonPath, const PatchedElfInfo &elfInfo) {
     std::ofstream of(jsonPath);
     if ( !of.is_open()) {
         return false;
     }
-    of << std::setw(4) << elfJson << std::endl;
+    of << std::setw(4) << json(elfInfo) << std::endl;
 
     return true;
 }
 
-std::optional<json> parsePatchedElfInfoFromJson(fs::path jsonPath, InitFiniInfo *initFiniInfo) {
+std::optional<PatchedElfInfo> parsePatchedElfInfoFromJson(fs::path jsonPath) {
     std::ifstream is(jsonPath);
     if ( !is.is_open()) {
         return std::nullopt;
@@ -88,10 +64,6 @@ std::optional<json> parsePatchedElfInfoFromJson(fs::path jsonPath, InitFiniInfo 
 
     json elfJson;
     is >> elfJson;
-
-    if (initFiniInfo) {
-        elfJson["init_fini_info"].get_to(*initFiniInfo);
-    }
 
     return elfJson;
 }

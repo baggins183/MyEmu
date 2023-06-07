@@ -1,3 +1,5 @@
+#if 0
+
 #include "sce_pthread_common.h"
 
 #include <assert.h>
@@ -178,3 +180,5 @@ int PS4FUN(scePthreadAttrSetstackaddr)(void) { raise(SIGTRAP); return SCE_OK; }
 #endif
 
 } // extern "C"
+
+#endif // #if 0

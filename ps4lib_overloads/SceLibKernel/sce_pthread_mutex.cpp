@@ -1,3 +1,5 @@
+#if 0
+
 #include "sce_pthread_common.h"
 #include <mutex>
 
@@ -248,3 +250,5 @@ int PS4FUN(scePthreadMutexSetyieldloops)(void) { raise(SIGTRAP); return SCE_OK; 
 #endif
 
 }
+
+#endif // #if 0

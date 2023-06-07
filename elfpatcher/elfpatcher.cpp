@@ -6,6 +6,8 @@
 #include <vector>
 #include <sys/stat.h>
 #include <sqlite3.h>
+#include <fstream>
+#include <iostream>
 #include <boost/iostreams/device/mapped_file.hpp>
 
 std::optional<fs::path> LibSearcher::findLibrary(fs::path name) {
@@ -69,12 +71,6 @@ fs::path getPs4LibName(fs::path nativeLibName) {
 }
 
 std::optional<fs::path> findPathToSceLib(fs::path libName, ElfPatcherContext &Ctx) {
-    std::optional<fs::path> res;
-    res = Ctx.nativeLibSearcher.findLibrary(libName);
-    if (res) {
-        return res;
-    }
-
     if (!libName.has_extension()) {
         fprintf(stderr, "Warning, findPathToLibName: library %s has no extension\n", libName.c_str());
     }
@@ -92,9 +88,18 @@ std::optional<fs::path> findPathToSceLib(fs::path libName, ElfPatcherContext &Ct
     return Ctx.ps4LibSearcher.findLibrary(libStem, validExts);
 }
 
-struct {
-    std::string currentPs4Lib;
-} TheDebugContext;
+static bool getFileHash(fs::path path, uint64_t &hash) {
+    boost::iostreams::mapped_file_source file;
+    try {
+        file.open(path);
+    } catch (const std::ios_base::failure& e) {
+        fprintf(stderr, "Couldn't open %s: %s\n", path.c_str(), e.what());
+        return false;
+    }
+
+    hash = pjwHash((unsigned char *) file.data(), file.size());
+    return true;
+}
 
 void printSegmentRanges(std::vector<Elf64_Phdr>& progHdrs) {
     for (auto p: progHdrs) {
@@ -489,7 +494,7 @@ static bool fixDynlibData(ElfPatcherContext &Ctx, FILE *elf, std::vector<Elf64_P
         if ( findPathToSceLib(ps4Name, Ctx)) {
             Ctx.deps.push_back(ps4Name);
         } else {
-            fprintf(stderr, "Warning: couldn't find dependency %s needed by %s. Skipping\n", ps4Name.c_str(), TheDebugContext.currentPs4Lib.c_str());
+            fprintf(stderr, "Warning: couldn't find dependency %s needed by %s. Skipping\n", ps4Name.c_str(), Ctx.currentPs4Lib.c_str());
             continue;
         }
 
@@ -1121,15 +1126,16 @@ static void finalizeProgramHeaders(std::vector<Elf64_Phdr> &progHdrs) {
     //}
 }
 
-bool patchPs4Lib(ElfPatcherContext &Ctx, std::string elfPath) {
+bool patchPs4Lib(ElfPatcherContext &Ctx, const std::string elfPath) {
     std::vector<Elf64_Phdr> progHdrs;
     // in a Ps4 module, these Dyn Ents are in the DYNAMIC segment/.dynamic section,
     // and describe the DYNLIBDATA segment
     std::vector<Elf64_Dyn> oldPs4DynEnts;
     std::vector<Elf64_Dyn> newElfDynEnts;
     // index of the strtab in the shEntries
+    PatchedElfInfo elfInfo;
 
-    TheDebugContext.currentPs4Lib = elfPath;
+    Ctx.currentPs4Lib = elfPath;
 
     FILE *f = fopen(elfPath.c_str(), "r+");
     if (!f) {
@@ -1142,7 +1148,24 @@ bool patchPs4Lib(ElfPatcherContext &Ctx, std::string elfPath) {
     assert (1 == fread(&elfHdr, sizeof(elfHdr), 1, f));
 
     elfHdr.e_ident[EI_OSABI] = ELFOSABI_SYSV;
-    elfHdr.e_type = ET_DYN;
+
+    elfInfo.elfType = (EtType) elfHdr.e_type;
+    switch(elfHdr.e_type) {
+        case ET_SCE_EXEC:
+            elfHdr.e_type = ET_EXEC;
+            break;
+        case ET_SCE_DYNAMIC:
+        // Pretty sure DYNEXEC is PIE
+        case ET_SCE_DYNEXEC:
+            // technically eboot.bin (executable) should become ET_EXEC.
+            // DF_1_PIE in DT_FLAGS_1 should indicate whether an EXEC is PIE.
+            // We will dlopen eboot.bin from the Emu process (for simplicity), so just mark it
+            // ET_DYN here
+            // (if some game's exe isn't PIE, then we won't be able to do this, and will need to
+            // manually do relocations and map its segments to the exact addresses)
+            elfHdr.e_type = ET_DYN;
+            break;
+    }
 
     Elf64_Shdr sHdr;
 
@@ -1258,6 +1281,21 @@ bool patchPs4Lib(ElfPatcherContext &Ctx, std::string elfPath) {
     fsync(fileno(f));
     fclose(f);
 
+    // dump info about lib to json (including addresses of init/fini functions)
+    elfInfo.path = elfPath;
+
+    if ( !getFileHash(elfPath, elfInfo.hash)) {
+        return false;
+    }
+    elfInfo.initFiniInfo = Ctx.initFiniInfo;
+    // et type set above
+
+    fs::path jsonPath = elfPath;
+    jsonPath += ".json";
+    if ( !dumpPatchedElfInfoToJson(jsonPath, elfInfo)) {
+        return false;
+    }
+
     return true;
 }
 
@@ -1316,4 +1354,62 @@ bool findDependencies(fs::path patchedElf, std::vector<std::string> &deps) {
     }
 
     return true;
+}
+
+// etype is return param for ELF64_Ehdr.e_type
+bool isPieElf(fs::path patchedElf, Elf64_Half *etype) {
+    const Elf64_Ehdr *elfHdr;
+
+    boost::iostreams::mapped_file_source file;
+    try {
+        file.open(patchedElf.c_str());
+    } catch (const std::ios_base::failure& e) {
+        fprintf(stderr, "Couldn't open %s: %s\n", patchedElf.c_str(), e.what());
+        return false;
+    }
+
+    const unsigned char *data = (const unsigned char *) file.data();
+    elfHdr = reinterpret_cast<const Elf64_Ehdr *>(data);
+
+    if (etype != nullptr) {
+        *etype = elfHdr->e_type;
+    }
+    if (elfHdr->e_type == ET_DYN) {
+        return true;
+    }
+
+    // TODO check for DF_1_PIE in DT_FLAGS_1 in DYNENT
+}
+
+bool rebasePieElf(fs::path patchedElf, Elf64_Addr baseVA) {
+    const Elf64_Ehdr *elfHdr;
+    const Elf64_Shdr *sHdrs;
+
+    // Rebase a ELF_DYN Elf so the lowest base VA corresponding to file contents (ie the text section)
+    // begins at address baseVA
+
+    // Can think of these things I need to do:
+    //  -Add baseVA diff to segments with PT_LOAD
+    //  -Add baseVA diff to sections with SHF_ALLOC
+    //  -Add baseVA diff to symtab/dynsym entries (for certain types)
+    //  -Add baseVA diff to relocations' r_offset'
+    // (baseVA diff means difference between old baseVA and new baseVA)
+
+    boost::iostreams::mapped_file_source file;
+    try {
+        file.open(patchedElf.c_str());
+    } catch (const std::ios_base::failure& e) {
+        fprintf(stderr, "Couldn't open %s: %s\n", patchedElf.c_str(), e.what());
+        return false;
+    }
+
+    const unsigned char *data = (const unsigned char *) file.data();
+    elfHdr = reinterpret_cast<const Elf64_Ehdr *>(data);
+    sHdrs = reinterpret_cast<const Elf64_Shdr *>(data + elfHdr->e_shoff);
+    if (elfHdr->e_type != ET_DYN) {
+        return false;
+    }
+
+    // TODO
+    return false;
 }

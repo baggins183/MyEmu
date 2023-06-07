@@ -2,6 +2,9 @@
 #include <map>
 #include <string>
 
+#include <nlohmann/json.hpp>
+using json = nlohmann::json;
+
 // Sony SCE ELF types
 
 // define some enums for debugging convenience
@@ -51,6 +54,12 @@ static std::map<EtType, const char *> et_strings_map = {
 #undef STRING_OP
 };
 
+#define SERIALIZE_OP(name, value) { name, #name },
+NLOHMANN_JSON_SERIALIZE_ENUM(EtType, {
+    ET_TABLE(SERIALIZE_OP)
+    ET_SCE_TABLE(SERIALIZE_OP)
+})
+#undef SERIALIZE_OP
 
 
 #undef PT_NULL

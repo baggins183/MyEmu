@@ -1,4 +1,6 @@
-#include "sce_pthread_common.h"
+#if 0
+
+#include "sce_pthread_common
 
 extern "C" {
 
@@ -19,3 +21,5 @@ int PS4FUN(scePthreadCondWait)(void) { raise(SIGTRAP); return SCE_OK; }
 #endif
 
 }
+
+#endif // #if 0
