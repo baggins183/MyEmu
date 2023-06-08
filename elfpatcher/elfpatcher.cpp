@@ -448,18 +448,8 @@ static bool fixDynlibData(ElfPatcherContext &Ctx, FILE *elf, std::vector<Elf64_P
         if (ent.st_name) {
             ent.st_name = appendToStrtab(sections[sMap.dynstrIdx], newStrings[i].c_str());
         }
-        //ent.st_info = ELF64_ST_INFO(0, 0);
-        //ent.st_info;
-        //ent.st_other;
-        //ent.st_value;
-
-        // I think shndx doesn't matter for dynamic linking, and that st_value is just used as a VA
-        // I think it's only relevant for static linking, when sections from multiple objects are being rearranged
-        // and stitched into linked objects. In that case, providing the shndx is indirection that lets you keep the location
-        // section_base + st_value consistent with the real location, because the section contents are moved by the static linker
-        //
         // Even though it shouldn't affect dynamic linking, it seems to mess with the debugger
-        // Also 0 (SHT_NULL) does actually seem to mess with dlopen()
+        // Also 0 (SHT_NULL) does actually mess with dlopen()
         if (ent.st_shndx >= SHN_LORESERVE && ent.st_shndx <= SHN_LORESERVE) {
             if (false) {
                 printf("Symbol has reserved symbol shndx\n");
@@ -468,9 +458,6 @@ static bool fixDynlibData(ElfPatcherContext &Ctx, FILE *elf, std::vector<Elf64_P
             // GDB needs shndx to point to .text to show function names correctly
             ent.st_shndx = sMap.textIdx;
         }
-        //ent.st_value; // TODO - ensure all pointer values are in LOAD segments that haven't been rebased or removed
-        // For example, the got and plt
-        //ent.st_size;
 
         if (firstNonLocalIdx < 0 && ELF64_ST_BIND(ent.st_info) != STB_LOCAL) {
             firstNonLocalIdx = i;
@@ -594,7 +581,7 @@ static bool fixDynlibData(ElfPatcherContext &Ctx, FILE *elf, std::vector<Elf64_P
 
     newDynEnts.push_back({
         DT_HASH,
-        {sections[sMap.hashIdx].getAddr()} // TODO
+        {sections[sMap.hashIdx].getAddr()}
     });
 
     newDynEnts.push_back({
@@ -694,7 +681,7 @@ static bool fixDynamicInfoForLinker(ElfPatcherContext &Ctx, FILE *elf, std::vect
     sHdr = {
         .sh_name = appendToStrtab(sections[sMap.shstrtabIdx], ".dynstr"),
         .sh_type = SHT_STRTAB,
-        .sh_flags = SHF_STRINGS | SHF_ALLOC, // TODO check this, confusingly ELFs I've seen don't set SHF_STRINGS
+        .sh_flags = SHF_STRINGS | SHF_ALLOC,
         .sh_addralign = static_cast<Elf64_Xword>(PGSZ),
     };
     sections.emplace_back(sHdr);
@@ -717,7 +704,7 @@ static bool fixDynamicInfoForLinker(ElfPatcherContext &Ctx, FILE *elf, std::vect
         .sh_flags = SHF_ALLOC,
         .sh_link = sMap.dynsymIdx,
         .sh_addralign = 8,
-        .sh_entsize = 0, // TODO?
+        .sh_entsize = 0,
     };
     sections.emplace_back(sHdr);
 
@@ -744,13 +731,9 @@ static bool fixDynamicInfoForLinker(ElfPatcherContext &Ctx, FILE *elf, std::vect
                 // "Additionally, DT_NEEDED tags are created for each dynamic library used by the application.
                 // The value is set to the offset of the library's name in the string table. Each DT_NEEDED tag 
                 // should also have a corresponding DT_SCE_IMPORT_LIB and DT_SCE_IMPORT_LIB_ATTR tag."
-                // Need to change strings to their legal ELF counterparts.
-                // Find out which strtab this should use
                 dynInfo.neededLibs.push_back(dyn->d_un.d_val);
                 break;
             case DT_SONAME:
-                // TODO
-                //fprintf(stderr, "Warning: unhandled DynEnt DT_SONAME\n");
                 break;
 
             case DT_REL:
@@ -759,8 +742,6 @@ static bool fixDynamicInfoForLinker(ElfPatcherContext &Ctx, FILE *elf, std::vect
             {
                 std::string name = to_string(tag);
                 printf("Warning: unhandled DynEnt %s\n", name.c_str());
-                assert(false); // We will add empty DT_REL* tags for executables,
-                // so assume DT_RELA* are the only ones given until seeing otherwise
                 break;
             }
                 
@@ -911,10 +892,6 @@ static bool fixDynamicInfoForLinker(ElfPatcherContext &Ctx, FILE *elf, std::vect
                 break;
             case DT_SCE_SYMTAB:
                 // Convert to DT_SYMTAB
-                // find new string offsets based on DT_SCE_STRTAB
-                // Make new SHT_DYNSYM section, link to .dynsym/whatever DT_SCE_STRTAB maps to
-                // TODO, look at sh_info requirement for that section
-                // Special Sections at https://docs.oracle.com/cd/E19683-01/817-3677/6mj8mbtc9/index.html#chapter6-79797
                 dynInfo.symtabOff = dyn->d_un.d_val;
                 break;
             case DT_SCE_SYMENT:
@@ -974,11 +951,6 @@ static bool fixDynamicInfoForLinker(ElfPatcherContext &Ctx, FILE *elf, std::vect
         .sh_flags = SHF_ALLOC | SHF_WRITE,
         .sh_addr = dynInfo.pltgotAddr,
         .sh_offset = relroFileOff + (dynInfo.pltgotAddr - relroVA),
-        // TODO try (pltrelsz / relaentSz) x8, x16
-        // In example ELF, entsize is 8
-        // Can probably be conservative (too large)
-        // dunno if .got.plt is just array of slots, or if theres metadata
-        // should try to find out using example .got.plt
         .sh_size = (dynInfo.pltrelsz / dynInfo.relaEntSz) * 8,
         .sh_addralign = 8,
         .sh_entsize = 8,
@@ -1055,30 +1027,10 @@ static bool fixDynamicInfoForLinker(ElfPatcherContext &Ctx, FILE *elf, std::vect
     };
     sections.emplace_back(sHdr);
 
-    // TODO add sections for gotplt, relro, other sections that aren't changing location but are needed
-
-    // TODO place extra dynamic ents with tags
-    // DT_RELA
-    // etc
-    // Add sections used in relocs, loading dynamic dependencies, etc
-    // These are sections we've moved out of the original dynlibdata segment
-
-    //Elf64_Dyn dyn;
-
-
-
     return true;
 }
 
 static void finalizeProgramHeaders(std::vector<Elf64_Phdr> &progHdrs) {
-    //printf("before:\n");
-    //for (Elf64_Phdr &pHdr: progHdrs) {
-        //printf("\t%s\n", to_string((ProgramSegmentType) pHdr.p_type).c_str());
-    //}
-
-    // TODO look into which SCE segments need to be kept or converted to PT_LOAD
-
-    // Convert certain SCE Segments
     for (Elf64_Phdr &pHdr: progHdrs) {
         switch(pHdr.p_type) {
             case PT_SCE_RELRO:	
@@ -1086,7 +1038,7 @@ static void finalizeProgramHeaders(std::vector<Elf64_Phdr> &progHdrs) {
                 pHdr.p_type = PT_LOAD;
                 break;
             case PT_GNU_EH_FRAME:
-            case PT_SCE_PROCPARAM:	
+            case PT_SCE_PROCPARAM:
             case PT_SCE_MODULEPARAM:
             case PT_SCE_LIBVERSION:
             case PT_SCE_RELA:	
@@ -1114,16 +1066,12 @@ static void finalizeProgramHeaders(std::vector<Elf64_Phdr> &progHdrs) {
                 finalSegments.push_back(pHdr);
         }
     }
-    progHdrs = finalSegments;
 
-    for (Elf64_Phdr &pHdr: progHdrs) {
+    for (Elf64_Phdr &pHdr: finalSegments) {
+        // TODO set permissions per segment, don't do this
         pHdr.p_flags = PF_X | PF_W | PF_R;
     }
-
-    //printf("final headers:\n");
-    //for (Elf64_Phdr &pHdr: progHdrs) {
-        //printf("\t%s\n", to_string((ProgramSegmentType) pHdr.p_type).c_str());
-    //}
+    progHdrs = finalSegments;
 }
 
 bool patchPs4Lib(ElfPatcherContext &Ctx, const std::string elfPath) {
@@ -1173,7 +1121,8 @@ bool patchPs4Lib(ElfPatcherContext &Ctx, const std::string elfPath) {
     fseek(f, elfHdr.e_phoff, SEEK_SET);
     assert(elfHdr.e_phnum == fread(progHdrs.data(), sizeof(Elf64_Phdr), elfHdr.e_phnum, f));
 
-    // Section headers accumulate here
+    // Section headers accumulate here.
+    // Ps4 elfs seem to have their section table stripped, so create them so dlopen can work.
     std::vector<Section> sections;
     SectionMap sMap;
 
@@ -1227,15 +1176,9 @@ bool patchPs4Lib(ElfPatcherContext &Ctx, const std::string elfPath) {
     if ( !fixDynamicInfoForLinker(Ctx, f, progHdrs, sections, sMap)) {
         return false;
     }
-    // Change OS specific type
-    // I don't think this should be loaded currently. p_vaddr and p_memsz are 0
-    // I think plt/got are in different section which is already PT_LOAD
-    //progHdrs[findPhdr(progHdrs, PT_SCE_DYNLIBDATA)].p_type = PT_NULL;
 
-    // For now, pack the extra sections into their own segment
-    // in order to append them. The data is all that matters.
-    // Want to make sure they own their own parts of the ELF and
-    // future segments see that their region is owned when using rebaseSegment
+    // Reserve space + fixup offset info for shstrtab section, with CreateSegment.
+    // The segment will be deleted during finalizeProgramHeaders.
     std::vector<uint> extraSections {
         sMap.shstrtabIdx
     };
@@ -1354,31 +1297,6 @@ bool findDependencies(fs::path patchedElf, std::vector<std::string> &deps) {
     }
 
     return true;
-}
-
-// etype is return param for ELF64_Ehdr.e_type
-bool isPieElf(fs::path patchedElf, Elf64_Half *etype) {
-    const Elf64_Ehdr *elfHdr;
-
-    boost::iostreams::mapped_file_source file;
-    try {
-        file.open(patchedElf.c_str());
-    } catch (const std::ios_base::failure& e) {
-        fprintf(stderr, "Couldn't open %s: %s\n", patchedElf.c_str(), e.what());
-        return false;
-    }
-
-    const unsigned char *data = (const unsigned char *) file.data();
-    elfHdr = reinterpret_cast<const Elf64_Ehdr *>(data);
-
-    if (etype != nullptr) {
-        *etype = elfHdr->e_type;
-    }
-    if (elfHdr->e_type == ET_DYN) {
-        return true;
-    }
-
-    // TODO check for DF_1_PIE in DT_FLAGS_1 in DYNENT
 }
 
 bool rebasePieElf(fs::path patchedElf, Elf64_Addr baseVA) {

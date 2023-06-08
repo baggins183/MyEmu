@@ -1,5 +1,4 @@
 #include <iterator>
-#define LOGGER_IMPL
 #include "Common.h"
 #include "Elf/elf-sce.h"
 #include "nid_hash/nid_hash.h"

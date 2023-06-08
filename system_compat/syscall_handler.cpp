@@ -467,6 +467,8 @@ static greg_t handle_dynlib_get_proc_param(mcontext_t *mcontext) {
     // arg2 possibly unused by _ps4__sceKernelGetProcParam? Does another caller variant exist which does the syscall
     // but actually uses *arg2?
 
+    // TODO look into PT_SCE_PROCPARAM and PT_SCE_MODULEPARAM elf segments
+
     return -EINVAL;
 }
 
