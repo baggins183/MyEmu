@@ -234,6 +234,8 @@ std::optional<fs::path> findPathToSceLib(fs::path ps4LibName, ElfPatcherContext 
 // To be able to dlopen() or exec() this, all the recursive dependencies should be patched beforehand 
 bool patchPs4Lib(ElfPatcherContext &Ctx, std::string elfPath);
 
+bool rebasePieElf(fs::path patchedElf, Elf64_Addr baseVA);
+
 bool findDependencies(fs::path patchedElf, std::vector<std::string> &deps);
 
 // TODO add dependencies (original names of ps4 elfs)

@@ -384,6 +384,13 @@ static bool runPs4Thread(Ps4EntryThreadArgs &entryThreadArgs) {
     return true;
 }
 
+static bool cleanup_previous_run() {
+    // TODO
+    // Delete semaphores opened previously
+    // /dev/shm
+    return true;
+}
+
 int main(int argc, char **argv) {
     void *dl;
 
@@ -395,16 +402,17 @@ int main(int argc, char **argv) {
         return -1;
     }
 
+    if ( !cleanup_previous_run()) {
+        return -1;
+    }
+
     std::error_code ec;
     fs::create_directory(CmdArgs.patchedElfDir, ".", ec);
     if (ec) {
         std::string m = ec.message();
         fprintf(stderr, "Failed to create directory %s: %s\n", CmdArgs.patchedElfDir.c_str(), m.c_str());
         return -1;
-    }    
-
-    std::map<std::string, std::set<std::string>> dependsOn;
-    std::map<std::string, InitFiniInfo> initFiniInfos;
+    }
 
     if (CmdArgs.genElfs) {
         // Patch ps4 modules, starting with the entry executable (eboot.bin) and working through
@@ -440,11 +448,7 @@ int main(int argc, char **argv) {
                 return -1;
             }
 
-            std::string nativeName = nativePath.filename();
-            initFiniInfos[nativeName] = Ctx.initFiniInfo;
-            for (auto &dep: Ctx.deps) {
-                dependsOn[nativeName].insert(getNativeLibName(dep));
-            }
+            //if ( !rebasePieElf(nativePath, 0x00100000)) { return -1; }
 
             for (auto &dep: Ctx.deps) {
                 if (inWorklist.find(getNativeLibName(dep)) == inWorklist.end()) {
@@ -456,43 +460,45 @@ int main(int argc, char **argv) {
             Ctx.reset();
         }
     }
-    else {
-        fs::path prefix = CmdArgs.patchedElfDir;
-        std::deque<std::string> worklist = { getNativeLibName(CmdArgs.entryModule) };
-        std::set<std::string> inWorklist;
-        inWorklist.insert(worklist[0]);         
-        while ( !worklist.empty()) {
-            std::string nativeName = worklist.front();
-            worklist.pop_front();
-            fs::path nativePath = prefix;
-            nativePath /= nativeName;
-            std::vector<std::string> deps;
-            findDependencies(nativePath, deps);
-
-            // Get info about the lib (currently the addresses of init/finilization functions)
-            fs::path elfJsonPath = nativePath;
-            elfJsonPath += ".json";
-            std::optional<PatchedElfInfo> elfInfo;
-            if ( !(elfInfo = parsePatchedElfInfoFromJson(elfJsonPath))) {
-                return -1;
-            }
-            initFiniInfos[nativeName] = elfInfo.value().initFiniInfo;
-
-            for (auto &dep: deps) {
-                dependsOn[nativeName].insert(getNativeLibName(dep));
-            }
-
-            for (auto &dep: deps) {
-                if (inWorklist.find(getNativeLibName(dep)) == inWorklist.end()) {
-                    worklist.push_back(dep);
-                    inWorklist.insert(getNativeLibName(dep));
-                }
-            }
-        }
-    }
 
     if (CmdArgs.onlyPatch) {
         return 0;
+    }    
+
+    std::map<std::string, std::set<std::string>> dependsOn;
+    std::map<std::string, InitFiniInfo> initFiniInfos;
+
+    fs::path prefix = CmdArgs.patchedElfDir;
+    std::deque<std::string> worklist = { getNativeLibName(CmdArgs.entryModule) };
+    std::set<std::string> inWorklist;
+    inWorklist.insert(worklist[0]);         
+    while ( !worklist.empty()) {
+        std::string nativeName = worklist.front();
+        worklist.pop_front();
+        fs::path nativePath = prefix;
+        nativePath /= nativeName;
+        std::vector<std::string> deps;
+        findDependencies(nativePath, deps);
+
+        // Get info about the lib (currently the addresses of init/finilization functions)
+        fs::path elfJsonPath = nativePath;
+        elfJsonPath += ".json";
+        std::optional<PatchedElfInfo> elfInfo;
+        if ( !(elfInfo = parsePatchedElfInfoFromJson(elfJsonPath))) {
+            return -1;
+        }
+        initFiniInfos[nativeName] = elfInfo.value().initFiniInfo;
+
+        for (auto &dep: deps) {
+            dependsOn[nativeName].insert(getNativeLibName(dep));
+        }
+
+        for (auto &dep: deps) {
+            if (inWorklist.find(getNativeLibName(dep)) == inWorklist.end()) {
+                worklist.push_back(dep);
+                inWorklist.insert(getNativeLibName(dep));
+            }
+        }
     }
 
     // Setup trampoline to handle syscalls coming from inside sce code

@@ -8,6 +8,7 @@
 #include <sqlite3.h>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <boost/iostreams/device/mapped_file.hpp>
 
 std::optional<fs::path> LibSearcher::findLibrary(fs::path name) {
@@ -1299,9 +1300,14 @@ bool findDependencies(fs::path patchedElf, std::vector<std::string> &deps) {
     return true;
 }
 
+// Trying to get ghidra debugger to work
+// This doesn't completely work yet. Seeing jumps to bad addresses. Jump slot solution might
+// not be right.
 bool rebasePieElf(fs::path patchedElf, Elf64_Addr baseVA) {
     const Elf64_Ehdr *elfHdr;
-    const Elf64_Shdr *sHdrs;
+    Elf64_Phdr *pHdrs;
+    Elf64_Shdr *sHdrs;
+    Elf64_Off vaDiff; 
 
     // Rebase a ELF_DYN Elf so the lowest base VA corresponding to file contents (ie the text section)
     // begins at address baseVA
@@ -1309,11 +1315,12 @@ bool rebasePieElf(fs::path patchedElf, Elf64_Addr baseVA) {
     // Can think of these things I need to do:
     //  -Add baseVA diff to segments with PT_LOAD
     //  -Add baseVA diff to sections with SHF_ALLOC
-    //  -Add baseVA diff to symtab/dynsym entries (for certain types)
-    //  -Add baseVA diff to relocations' r_offset'
+    //  -Add baseVA diff to symtab/dynsym entries
+    //  -Add baseVA diff to relocations' r_offset
+    //  -Add baseVA diff to some dynamic ents
     // (baseVA diff means difference between old baseVA and new baseVA)
 
-    boost::iostreams::mapped_file_source file;
+    boost::iostreams::mapped_file file;
     try {
         file.open(patchedElf.c_str());
     } catch (const std::ios_base::failure& e) {
@@ -1321,13 +1328,231 @@ bool rebasePieElf(fs::path patchedElf, Elf64_Addr baseVA) {
         return false;
     }
 
-    const unsigned char *data = (const unsigned char *) file.data();
+    unsigned char *data = reinterpret_cast<unsigned char *>(file.data());
     elfHdr = reinterpret_cast<const Elf64_Ehdr *>(data);
-    sHdrs = reinterpret_cast<const Elf64_Shdr *>(data + elfHdr->e_shoff);
+    pHdrs = reinterpret_cast<Elf64_Phdr *>(data + elfHdr->e_phoff);
+    sHdrs = reinterpret_cast<Elf64_Shdr *>(data + elfHdr->e_shoff);
     if (elfHdr->e_type != ET_DYN) {
         return false;
     }
 
-    // TODO
-    return false;
+    Elf64_Addr oldBaseVA = std::numeric_limits<Elf64_Addr>::max();
+    if (elfHdr->e_phnum <= 0) {
+        return false;
+    }
+
+    {
+        const Elf64_Phdr *ph = pHdrs;
+        for (auto i = 0; i < elfHdr->e_phnum; i++) {
+            if (ph->p_flags & PT_LOAD) {
+                oldBaseVA = std::min(oldBaseVA, ph->p_vaddr);
+            }
+            ph = reinterpret_cast<const Elf64_Phdr *>(reinterpret_cast<const unsigned char *>(ph) + elfHdr->e_phentsize);
+        }
+    }
+
+    vaDiff = baseVA - oldBaseVA;
+
+    std::vector<Elf64_Shdr *> symtabs;
+    std::vector<Elf64_Shdr *> relSections;
+    std::vector<Elf64_Shdr *> relaSections;
+    std::vector<Elf64_Shdr *> relrSections;
+    Elf64_Shdr *dynSHdr = nullptr;
+    Elf64_Shdr *pltgotSHdr = nullptr;
+
+    Elf64_Off shstrabShOff = elfHdr->e_shstrndx * elfHdr->e_shentsize;
+    const Elf64_Shdr *shstrtabShdr = reinterpret_cast<Elf64_Shdr *>(reinterpret_cast<unsigned char *>(sHdrs) + shstrabShOff);
+    const char *shstrtab = reinterpret_cast<char *>(data + shstrtabShdr->sh_offset);
+
+    {
+        Elf64_Shdr *sh = sHdrs;
+        for (auto i = 0; i < elfHdr->e_shnum; i++) {
+            if (sh->sh_type == SHT_SYMTAB) {
+                symtabs.push_back(sh);
+            } else if (sh->sh_type == SHT_REL) {
+                relSections.push_back(sh);
+            } else if (sh->sh_type == SHT_RELA) {
+                relaSections.push_back(sh);
+            } else if (sh->sh_type == SHT_RELR) {
+                relrSections.push_back(sh);
+            } else if (sh->sh_type == SHT_DYNAMIC) {
+                if (dynSHdr) {
+                    fprintf(stderr, "Multiple .dynamic sections in file %s\n", patchedElf.c_str());
+                    return false;
+                }
+                dynSHdr = sh;
+            } else if ( !strcmp(&shstrtab[sh->sh_name], ".got.plt")) {
+                if (pltgotSHdr) {
+                    fprintf(stderr, "Multiple .got.plt sections in file %s\n", patchedElf.c_str());
+                    return false;
+                }                
+                pltgotSHdr = sh;
+            }
+            sh = reinterpret_cast<Elf64_Shdr *>(reinterpret_cast<unsigned char *>(sh) + elfHdr->e_shentsize);
+        }
+    }
+
+    if ( !dynSHdr) {
+        fprintf(stderr, "Couldn't find .dynamic section in file %s\n", patchedElf.c_str());
+        return false;
+    }
+    if ( !dynSHdr) {
+        fprintf(stderr, "Couldn't find .got.plt section in file %s\n", patchedElf.c_str());
+        return false;
+    }    
+
+    for (Elf64_Shdr *sh: symtabs) {
+        Elf64_Sym *sym = reinterpret_cast<Elf64_Sym *>(data + sh->sh_offset);
+        for (auto i = 0; i < sh->sh_size / sh->sh_entsize; i++) {
+            if (sym->st_shndx != SHN_UNDEF && sym->st_shndx != SHN_ABS) {
+                // SHN_UNDEF means symbol is undefined
+                // SHN_ABS means the symbol is not a virtual address
+                sym->st_value += vaDiff;
+            }
+            sym = reinterpret_cast<Elf64_Sym *>(reinterpret_cast<unsigned char *>(sym) + sh->sh_entsize);
+        }
+    }
+
+    for (Elf64_Shdr *sh: relSections) {
+        Elf64_Rel *rel = reinterpret_cast<Elf64_Rel *>(data + sh->sh_offset);
+        for (auto i = 0; i < sh->sh_size / sh->sh_entsize; i++) {
+            rel->r_offset += vaDiff;
+            rel = reinterpret_cast<Elf64_Rel *>(reinterpret_cast<unsigned char *>(rel) + sh->sh_entsize);
+        }
+    }
+
+    for (Elf64_Shdr *sh: relaSections) {
+        Elf64_Rela *rela = reinterpret_cast<Elf64_Rela *>(data + sh->sh_offset);
+        for (auto i = 0; i < sh->sh_size / sh->sh_entsize; i++) {
+            if (ELF64_R_TYPE(rela->r_info) == R_X86_64_JUMP_SLOT) {
+                Elf64_Off slot_offset = rela->r_offset - pltgotSHdr->sh_addr;
+                Elf64_Addr *slot = reinterpret_cast<Elf64_Addr *>(data + pltgotSHdr->sh_offset + slot_offset);
+                *slot += vaDiff;
+                // Before the dynamic loader locates the function, the pltgot slot holds the address of the
+                // dynamic linker stub which locates the function.
+                // The file contents of the slot should be the address of the stub, relative to base VA 0x0.
+                // The dynamic loader initializes the pltgot by adding the runtime load address of the library to each
+                // slot to create the absolute address of the stub.
+                // The stub happens to be the instruction after "jmp [SLOT_ADDR]" in rela.plt. ie:
+
+                // 7FFFF64C4318: FF 25 7A BA 0D 00          jmpq   *0xdba7a(%rip)  <- indirect jump into pltgot slot
+                // 7FFFF64C431E: 68 25 00 00 00             pushq  $0x25           <- slot initially points here with lazy binding.
+                //                                                                    0x25 is probably the symbol index into .dynsym?
+                //                                                                    doesn't seem to match, idk.
+                // 7FFFF64C4323: E9 90 FD FF FF             jmp    0x7ffff64c40b8  <- symbol lookup handler
+                // 7FFFF64C4328: FF 25 72 BA 0D 00          jmpq   *0xdba72(%rip)  <- start of next thunk
+                // 7FFFF64C432E: 68 26 00 00 00             pushq  $0x26
+                // 7FFFF64C4333: E9 80 FD FF FF             jmp    0x7ffff64c40b8
+            }
+            rela->r_offset += vaDiff;
+            rela = reinterpret_cast<Elf64_Rela *>(reinterpret_cast<unsigned char *>(rela) + sh->sh_entsize);
+        }
+    }
+
+    for (Elf64_Shdr *sh: relrSections) {
+        Elf64_Relr *relr = reinterpret_cast<Elf64_Relr *>(data + sh->sh_offset);
+        for (auto i = 0; i < sh->sh_size / sh->sh_entsize; i++) {
+            // relr ents contain an address for the linker to use.
+            // The linker adds the addend, stored at that address, to the module's load address in memory
+            *relr += vaDiff;
+            relr = reinterpret_cast<Elf64_Relr *>(reinterpret_cast<unsigned char *>(relr) + sh->sh_entsize);
+        }
+    }
+
+    if (dynSHdr) {
+        Elf64_Dyn *dyn = reinterpret_cast<Elf64_Dyn *>(data + dynSHdr->sh_offset);
+        for (auto i = 0; i < dynSHdr->sh_size / dynSHdr->sh_entsize; i++) {
+            bool end = false;
+            switch (dyn->d_tag) {
+                case DT_NULL:
+                    end = true;
+                    break;
+
+                case DT_PLTGOT:
+                case DT_HASH:
+                case DT_STRTAB:
+                case DT_SYMTAB:
+                case DT_RELA:
+                case DT_INIT:
+                case DT_FINI:
+                case DT_REL:
+                case DT_DEBUG:
+                case DT_JMPREL:
+                case DT_INIT_ARRAY:
+                case DT_FINI_ARRAY:
+                case DT_PREINIT_ARRAY:
+                case DT_CONFIG:
+                case DT_DEPAUDIT:
+                case DT_AUDIT:
+                case DT_PLTPAD:
+                case DT_MOVETAB:
+                case DT_SYMINFO:
+                case DT_VERDEF:
+                case DT_VERNEED:
+                    dyn->d_un.d_ptr += vaDiff;
+                    break;
+
+                default:
+                    break;
+            }
+            if (end) {
+                break;
+            }
+            dyn = reinterpret_cast<Elf64_Dyn *>(reinterpret_cast<unsigned char *>(dyn) + dynSHdr->sh_entsize);
+        }        
+    }
+
+    {
+        Elf64_Phdr *ph = pHdrs;
+        for (auto i = 0; i < elfHdr->e_phnum; i++) {
+            if ((ph->p_flags & PT_LOAD) || ph->p_vaddr > 0) {
+                ph->p_vaddr += vaDiff;
+                ph->p_paddr += vaDiff;
+            }
+            ph = reinterpret_cast<Elf64_Phdr *>(reinterpret_cast<unsigned char *>(ph) + elfHdr->e_phentsize);
+        }
+    }
+
+    {
+        Elf64_Shdr *sh = sHdrs;
+        for (auto i = 0; i < elfHdr->e_shnum; i++) {
+            if ((sh->sh_flags & SHF_ALLOC) || sh->sh_addr > 0) {
+                sh->sh_addr += vaDiff;
+            }
+            sh = reinterpret_cast<Elf64_Shdr *>(reinterpret_cast<unsigned char *>(sh) + elfHdr->e_shentsize);
+        }
+    }
+
+    fs::path elfJson = patchedElf;
+    elfJson += ".json";
+    auto elfInfo = parsePatchedElfInfoFromJson(elfJson);
+    if ( !elfInfo) {
+        return false;
+    }
+
+    for (Elf64_Addr &fn: elfInfo->initFiniInfo.dt_preinit_array) {
+        fn += vaDiff;
+    }
+
+    if (elfInfo->initFiniInfo.dt_init) {
+        elfInfo->initFiniInfo.dt_init.value() += vaDiff;
+    }
+
+    for (Elf64_Addr &fn: elfInfo->initFiniInfo.dt_init_array) {
+        fn += vaDiff;
+    }
+
+    if (elfInfo->initFiniInfo.dt_fini) {
+        elfInfo->initFiniInfo.dt_fini.value() += vaDiff;
+    }
+
+    for (Elf64_Addr &fn: elfInfo->initFiniInfo.dt_fini_array) {
+        fn += vaDiff;
+    }
+
+    if ( !dumpPatchedElfInfoToJson(elfJson, elfInfo.value())) {
+        return false;
+    }
+
+    return true;
 }
