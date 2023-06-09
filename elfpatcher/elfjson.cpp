@@ -1,4 +1,5 @@
 #include "Common.h"
+#include "Elf/elf-sce.h"
 #include "elfpatcher/elfpatcher.h"
 #include <cstdint>
 #include <cstdio>
@@ -43,6 +44,28 @@ void from_json(const json& j, InitFiniInfo& info) {
     }
     if (j.contains("dt_fini_array")) {
         j["dt_fini_array"].get_to<std::vector<Elf64_Addr>>(info.dt_fini_array);
+    }
+}
+
+void to_json(json& j, const PatchedElfInfo& info) {
+    j = json({
+     { "path", json(info.path) },
+     { "initFiniInfo", json(info.initFiniInfo) },
+     { "hash", json(info.hash) },
+     { "elfType", json(info.elfType) }
+    });
+    if (info.procParam) {
+        j["procParam"] = info.procParam.value();
+    }
+}
+
+void from_json(const json& j, PatchedElfInfo& info) {
+    j.at("path").get_to<fs::path>(info.path);
+    j.at("initFiniInfo").get_to<InitFiniInfo>(info.initFiniInfo);
+    j.at("hash").get_to<uint64_t>(info.hash);
+    j.at("elfType").get_to<EtType>(info.elfType);
+    if (j.contains("procParam")) {
+        info.procParam = j.at("procParam").get<Elf64_Addr>();
     }
 }
 

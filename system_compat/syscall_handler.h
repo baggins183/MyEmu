@@ -4,7 +4,7 @@
 extern "C" {
 #endif
 
-void orbis_syscall_handler(int num, siginfo_t *info, void *ucontext);
+void ps4_syscall_handler(int num, siginfo_t *info, void *ucontext);
 
 #ifdef __cplusplus
 }

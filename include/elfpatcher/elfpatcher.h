@@ -244,8 +244,7 @@ struct PatchedElfInfo {
     InitFiniInfo initFiniInfo;
     uint64_t hash;
     EtType elfType;
-
-    NLOHMANN_DEFINE_TYPE_INTRUSIVE(PatchedElfInfo, path, initFiniInfo, hash, elfType)
+    std::optional<Elf64_Addr> procParam;
 };
 
 bool dumpPatchedElfInfoToJson(fs::path jsonPath, const PatchedElfInfo &elfInfo);

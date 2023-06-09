@@ -39,6 +39,7 @@
 #include <deque>
 
 #include "elfpatcher/elfpatcher.h"
+#include "system_compat/globals.h"
 #include "system_compat/ps4_region.h"
 
 namespace fs = std::filesystem;
@@ -50,16 +51,17 @@ struct {
 } TheDebugContext;
 
 struct CmdConfig {
-    std::string entryModule; // TODO remove, this implied pkgdumpPath/eboot.bin
-    std::string hashdbPath;
-    std::string patchedElfDir;
-    std::string pkgdumpPath;
-    std::string ps4libsPath;
-    std::string preloadDirPath;
+    fs::path entryModule;
+    fs::path hashdbPath;
+    fs::path patchedElfDir;
+    fs::path pkgdumpPath;
+    fs::path ps4libsPath;
+    fs::path preloadDirPath;
     bool genElfs;
     bool onlyPatch;
+    bool rebaseElfs;
 
-    CmdConfig(): patchedElfDir("./elfdump/"), genElfs(false), onlyPatch(false) {}
+    CmdConfig(): patchedElfDir("./elfdump/"), genElfs(false), onlyPatch(false), rebaseElfs(false) {}
 };
 
 CmdConfig CmdArgs;
@@ -85,6 +87,8 @@ bool parseCmdArgs(int argc, char **argv) {
             CmdArgs.genElfs = true;
         } else if (!strcmp(argv[i], "--only_patch")) {
             CmdArgs.onlyPatch = true;
+        } else if (!strcmp(argv[i], "--rebase")) {
+            CmdArgs.rebaseElfs = true;  
         } else {
             fprintf(stderr, "Unrecognized cmd arg: %s\n", argv[i]);
             return false;
@@ -119,7 +123,7 @@ bool mapEntryModuleIntoMemory(fs::path nativeExecutablePath) {
 // since dlopen would call ps4 code, and at that point you'd have to flip the syscall
 // intercept switch, and you can't flip the switch before dlopen because dlopen seems to
 // do syscalls instructions outside of libc wrappers. 
-static bool callInitFunctions(std::string ps4Name, InitFiniInfo &initFiniInfo) {
+static bool callInitFunctions(std::string ps4Name, const InitFiniInfo &initFiniInfo) {
     bool success = true;
     const char *argv[] = {
         // TODO use .so name? Or entry name?
@@ -326,21 +330,21 @@ static bool init_filesystem() {
     return true;
 }
 
-struct Ps4EntryThreadArgs {
+struct Ps4EntryWrapperArgs {
     std::map<std::string, InitFiniInfo> initFiniInfos;
     std::vector<std::string> initLibOrder;
 
-    // eboot.bin entry point arguments
-    PFUNC_GameTheadEntry game_entry;
-    void *game_arg;
-    PFUNC_ExitFunction game_exit;
+    // eboot.bin entry point.
+    PFUNC_GameTheadEntry entry_function;
+    void *entry_arg;
+    PFUNC_ExitFunction exit_function;
 };
 
-void *ps4_entry_thread(void *entry_thread_arg) {
+void *ps4_entry_wrapper(void *entry_thread_arg) {
     // setup sysctl values (or in main thread)
     // Call init functions
     //
-    Ps4EntryThreadArgs *entryThreadArgs = (Ps4EntryThreadArgs *) entry_thread_arg;
+    Ps4EntryWrapperArgs *entryWrapperArgs = (Ps4EntryWrapperArgs *) entry_thread_arg;
 
     assert(thread_init_syscall_user_dispatch());
 
@@ -349,20 +353,29 @@ void *ps4_entry_thread(void *entry_thread_arg) {
         "libSceNet.prx.so",
     };
 
-    for (uint i = 0; i < entryThreadArgs->initLibOrder.size(); i++) {
-        fs::path nativeLibName = getNativeLibName(entryThreadArgs->initLibOrder[i]);
+    const auto &initFiniMap = entryWrapperArgs->initFiniInfos;
+    for (uint i = 0; i < entryWrapperArgs->initLibOrder.size(); i++) {
+        fs::path nativeLibName = getNativeLibName(entryWrapperArgs->initLibOrder[i]);
         if (std::find(begin(initBlackList), end(initBlackList), nativeLibName) != end(initBlackList)) {
             printf("module %s blacklisted\n", nativeLibName.c_str());
             continue;
         }
 
-        callInitFunctions(entryThreadArgs->initLibOrder[i], entryThreadArgs->initFiniInfos[nativeLibName]);
+        const auto &it = initFiniMap.find(nativeLibName);
+        assert(it != initFiniMap.end());
+        const InitFiniInfo &initFiniInfo = it->second;
+        callInitFunctions(entryWrapperArgs->initLibOrder[i], initFiniInfo);
     }
+
+    enter_ps4_region();
+    // Call eboot.bin entry point
+    entryWrapperArgs->entry_function(entryWrapperArgs->entry_arg, entryWrapperArgs->exit_function);
+    leave_ps4_region();
 
     return NULL;
 }
 
-static bool runPs4Thread(Ps4EntryThreadArgs &entryThreadArgs) {
+static bool createPs4EntryThread(Ps4EntryWrapperArgs &entryThreadArgs) {
     pthread_t ps4Thread;
     pthread_attr_t attr;
 
@@ -378,7 +391,7 @@ static bool runPs4Thread(Ps4EntryThreadArgs &entryThreadArgs) {
 
     pthread_attr_setstack(&attr, stack, stack_size);
 
-    pthread_create(&ps4Thread, &attr, ps4_entry_thread, (void *) &entryThreadArgs);
+    pthread_create(&ps4Thread, &attr, ps4_entry_wrapper, (void *) &entryThreadArgs);
     pthread_join(ps4Thread, NULL);
 
     return true;
@@ -448,7 +461,13 @@ int main(int argc, char **argv) {
                 return -1;
             }
 
-            //if ( !rebasePieElf(nativePath, 0x00100000)) { return -1; }
+            if (CmdArgs.rebaseElfs) {
+                const Elf64_Addr baseVA = 0x00100000;
+                if (!rebasePieElf(nativePath, baseVA)) {
+                    fprintf(stderr, "Couldn't rebase %s to %lx\n", nativePath.c_str(), baseVA);
+                    return -1; 
+                }
+            }
 
             for (auto &dep: Ctx.deps) {
                 if (inWorklist.find(getNativeLibName(dep)) == inWorklist.end()) {
@@ -537,7 +556,7 @@ int main(int argc, char **argv) {
     }
     for (std::string depName: immediateDeps) {
         fs::path depPath = CmdArgs.patchedElfDir;
-        depPath /= depName;
+        // TODO save handle for dlclose
         dl = dlopen(depName.c_str(), RTLD_LAZY);
         if (!dl) {
             char *err;
@@ -546,6 +565,46 @@ int main(int argc, char **argv) {
             }
             return -1;
         }
+    }
+
+    auto entryInfoPath = CmdArgs.patchedElfDir;
+    entryInfoPath /= getNativeLibName(CmdArgs.entryModule.filename());
+    entryInfoPath += ".json";
+    auto elfEntryInfo = parsePatchedElfInfoFromJson(entryInfoPath);
+    if ( !elfEntryInfo) {
+        fprintf(stderr, "main: couldn't load entry module info\n");
+        return -1;
+    }
+
+    if (elfEntryInfo->elfType == ET_SCE_DYNAMIC || elfEntryInfo->elfType == ET_SCE_DYNEXEC) {
+        fs::path patchedName = getNativeLibName(CmdArgs.entryModule.filename());
+        // TODO save handle for dlclose
+        dl = dlopen(patchedName.c_str(), RTLD_LAZY);
+        if (!dl) {
+            char *err;
+            while ((err = dlerror())) {
+                fprintf(stderr, "Couldn't open entry module as shared library: (dlopen): %s\n", err);
+            }
+            return -1;
+        }
+
+        struct link_map *l;
+        if ( dlinfo(dl, RTLD_DI_LINKMAP, &l)) {
+            fprintf(stderr, "Couldn't get entry module link map\n");
+            return -1;
+        }
+
+        if ( !elfEntryInfo->procParam) {
+            fprintf(stderr, "Couldn't get entry module proc param\n");
+            return -1;
+        }
+        Elf64_Addr dynProcParamAddr = l->l_addr + elfEntryInfo->procParam.value();
+        // Globally set proc param so syscall handler can handle 
+        setProcParam(reinterpret_cast<void *>(dynProcParamAddr));
+    } else {
+        fprintf(stderr, "main: entry module isn't PIE. TODO\n");
+        // Need to mmap the module's segments to it's static addresses
+        return -1;
     }
 
     // Find initialization order for all sce libraries.
@@ -558,10 +617,10 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    Ps4EntryThreadArgs args;
+    Ps4EntryWrapperArgs args;
     args.initFiniInfos = initFiniInfos;
     args.initLibOrder = topologicalLibOrder;
-    runPs4Thread(args);
+    createPs4EntryThread(args);
 
     // Shutdown
     for (auto handle: preloadHandles) {

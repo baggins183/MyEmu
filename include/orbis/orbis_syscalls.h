@@ -425,9 +425,7 @@ static std::map<OrbisSyscallNr, const char *> bsd_syscall_strings_map = {
 #undef STRING_OP
 };
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wunused-function"
-static std::string to_string(OrbisSyscallNr nr) {
+static inline std::string to_string(OrbisSyscallNr nr) {
 	const auto &it = bsd_syscall_strings_map.find(nr);
 	if (it == bsd_syscall_strings_map.end()) {
 		return std::string("UNKNOWN_SYSCALL ") + "(" + std::to_string((uint) nr) + ")";
@@ -435,4 +433,3 @@ static std::string to_string(OrbisSyscallNr nr) {
 		return it->second;
 	}
 }
-#pragma GCC diagnostic pop // -Wunused-function

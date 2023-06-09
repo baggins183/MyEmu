@@ -19,6 +19,7 @@
 #include <cassert>
 #include <fcntl.h>
 #include <filesystem>
+#include "system_compat/globals.h"
 #include "system_compat/ps4_region.h"
 #include "freebsd9.0/sys/rtprio.h"
 #include "exported_wrappers.h"
@@ -445,6 +446,8 @@ static greg_t handle_rtprio_thread(mcontext_t *mcontext) {
 }
 
 static greg_t handle_dynlib_get_proc_param(mcontext_t *mcontext) {
+    greg_t rv;
+
     auto *arg1 = ARG1<uint64_t *>(mcontext);
     auto *arg2 = ARG2<uint64_t *>(mcontext);
     
@@ -463,13 +466,26 @@ static greg_t handle_dynlib_get_proc_param(mcontext_t *mcontext) {
 
     // arg1: 0x00007ffff6315c88
     // arg2: 0x00007ffff6315c80
-    // 2 stack variable pointers: return parameters, since they are uninitialized before syscall in caller.
+    // 2 stack variable pointers: must be return params, since they are uninitialized before syscall in caller.
     // arg2 possibly unused by _ps4__sceKernelGetProcParam? Does another caller variant exist which does the syscall
     // but actually uses *arg2?
 
     // TODO look into PT_SCE_PROCPARAM and PT_SCE_MODULEPARAM elf segments
 
-    return -EINVAL;
+    // PT_SCE_PROCPARAM's vaddr is pointer to proc param
+    // eboot's procparam? Or does argument specify lib?
+    // Should return module's load address + phdr->p_vaddr
+
+    // global proc param should be set after loading eboot.bin
+    void *procParam = getProcParam();
+    if (procParam) {
+        rv = *reinterpret_cast<greg_t *>(&procParam);
+    } else {
+        // EINVAL?
+        rv = -EINVAL;
+    }
+
+    return rv;
 }
 
 static greg_t handle_mname(mcontext_t *mcontext) {
@@ -686,6 +702,7 @@ static greg_t handle_get_authinfo(mcontext_t *mcontext) {
     authinfo->flags = 0;
 
     return 0;
+    //return -EINVAL;
 }
 
 static std::set<OrbisSyscallNr> green_syscalls = {
@@ -706,7 +723,6 @@ static std::set<OrbisSyscallNr> red_syscalls = {
     SYS_evf_create,
 	SYS_dmem_container,
 	SYS_get_authinfo,
-	SYS_dynlib_get_proc_param,
 	SYS_mdbg_service,
     SYS_randomized_path,
 	SYS_budget_get_ptype,
@@ -726,11 +742,12 @@ static std::set<OrbisSyscallNr> yellow_syscalls = {
 	SYS_osem_create,
 	SYS_osem_delete,
     SYS___sysctl,
+    SYS_dynlib_get_proc_param,    
 };
 
 extern "C" {
 
-void orbis_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
+void ps4_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
     HostRegionScope __scope;
 
     ucontext_t *ucontext = (ucontext_t *) ucontext_arg;
@@ -770,9 +787,9 @@ void orbis_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
             break; \
         }
 
-        // Declare case statements for each bsd -> native syscall mapping
-        // Only do this for the syscalls that map 1:1 with no intervention needed
-        DIRECT_SYSCALL_MAP(DIRECT_SYSCALL_CASE)
+// Declare case statements for each bsd -> native syscall mapping
+// Only do this for the syscalls that map 1:1 with no intervention needed
+DIRECT_SYSCALL_MAP(DIRECT_SYSCALL_CASE)
 
 #undef DIRECT_SYSCALL_CASE
 
@@ -969,10 +986,11 @@ void orbis_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
     }
 
     // before this point, rv should be -errno if there was an error
-    // change to bsd conventions here (rax holds result or positive errno, CF means error)
+    // change to bsd conventions here (rax holds result or positive errno, carry flag==1 means error)
     if (rv < 0) {
         // TODO? Convert linux errno to SCE_KERNEL_* errno?
-        rv = -rv;
+        //rv = -rv;
+        rv = errnoToSceError(-rv);
         // Set carry flag. ps4/bsd code expects carry flag to be 1 on errors
         mcontext->gregs[REG_EFL] |= 1;
     } else {

@@ -1036,10 +1036,12 @@ static void finalizeProgramHeaders(std::vector<Elf64_Phdr> &progHdrs) {
         switch(pHdr.p_type) {
             case PT_SCE_RELRO:	
                 //pHdr.p_type = PT_GNU_RELRO;
+                // TODO need this?
                 pHdr.p_type = PT_LOAD;
                 break;
-            case PT_GNU_EH_FRAME:
             case PT_SCE_PROCPARAM:
+                // TODO convert to LOAD?
+            case PT_GNU_EH_FRAME:
             case PT_SCE_MODULEPARAM:
             case PT_SCE_LIBVERSION:
             case PT_SCE_RELA:	
@@ -1096,6 +1098,9 @@ bool patchPs4Lib(ElfPatcherContext &Ctx, const std::string elfPath) {
     fseek(f, 0, SEEK_SET);
     assert (1 == fread(&elfHdr, sizeof(elfHdr), 1, f));
 
+    assert(sizeof(Elf64_Phdr) == elfHdr.e_phentsize);
+    // assert(sizeof(Elf64_Shdr) == elfHdr.e_shentsize); // this is 0
+
     elfHdr.e_ident[EI_OSABI] = ELFOSABI_SYSV;
 
     elfInfo.elfType = (EtType) elfHdr.e_type;
@@ -1121,6 +1126,17 @@ bool patchPs4Lib(ElfPatcherContext &Ctx, const std::string elfPath) {
     progHdrs.resize(elfHdr.e_phnum);
     fseek(f, elfHdr.e_phoff, SEEK_SET);
     assert(elfHdr.e_phnum == fread(progHdrs.data(), sizeof(Elf64_Phdr), elfHdr.e_phnum, f));
+
+    for (unsigned int i = 0; i < elfHdr.e_phnum; i++) {
+        Elf64_Phdr *phdr = &progHdrs[i];
+        switch (phdr->p_type) {
+            case PT_SCE_PROCPARAM:
+                elfInfo.procParam = phdr->p_vaddr;
+                break;
+            default:
+                break;
+        }
+    }
 
     // Section headers accumulate here.
     // Ps4 elfs seem to have their section table stripped, so create them so dlopen can work.

@@ -2,6 +2,7 @@
 
 // sce kernel error codes
 
+#include <cstdio>
 #define SCE_KERNEL_ERROR_UNKNOWN				0x80020000
 #define SCE_KERNEL_ERROR_EPERM					-2147352575  //0x80020001
 #define SCE_KERNEL_ERROR_ENOENT					-2147352574  //0x80020002
@@ -107,3 +108,46 @@
 #define SCE_KERNEL_ERROR_ESTART				-2147352476  //0x80020064
 #define SCE_KERNEL_ERROR_ESTOP				-2147352475  //0x80020065
 
+#include <errno.h>
+static inline int errnoToSceError(int err) {
+    switch (err) {
+        case EPERM: return SCE_KERNEL_ERROR_EPERM;
+        case ENOENT: return SCE_KERNEL_ERROR_ENOENT;
+        case ESRCH: return SCE_KERNEL_ERROR_ESRCH;
+        case EINTR: return SCE_KERNEL_ERROR_EINTR;
+        case EIO: return SCE_KERNEL_ERROR_EIO;
+        case ENXIO: return SCE_KERNEL_ERROR_ENXIO;
+        case E2BIG: return SCE_KERNEL_ERROR_E2BIG;
+        case ENOEXEC: return SCE_KERNEL_ERROR_ENOEXEC;
+        case EBADF: return SCE_KERNEL_ERROR_EBADF;
+        case ECHILD: return SCE_KERNEL_ERROR_ECHILD;
+        case EAGAIN: return SCE_KERNEL_ERROR_EAGAIN;
+        case ENOMEM: return SCE_KERNEL_ERROR_ENOMEM;
+        case EACCES: return SCE_KERNEL_ERROR_EACCES;
+        case EFAULT: return SCE_KERNEL_ERROR_EFAULT;
+        case ENOTBLK: return SCE_KERNEL_ERROR_ENOTBLK;
+        case EBUSY: return SCE_KERNEL_ERROR_EBUSY;
+        case EEXIST: return SCE_KERNEL_ERROR_EEXIST;
+        case EXDEV: return SCE_KERNEL_ERROR_EXDEV;
+        case ENODEV: return SCE_KERNEL_ERROR_ENODEV;
+        case ENOTDIR: return SCE_KERNEL_ERROR_ENOTDIR;
+        case EISDIR: return SCE_KERNEL_ERROR_EISDIR;
+        case EINVAL: return SCE_KERNEL_ERROR_EINVAL;
+        case ENFILE: return SCE_KERNEL_ERROR_ENFILE;
+        case EMFILE: return SCE_KERNEL_ERROR_EMFILE;
+        case ENOTTY: return SCE_KERNEL_ERROR_ENOTTY;
+        case ETXTBSY: return SCE_KERNEL_ERROR_ETXTBSY;
+        case EFBIG: return SCE_KERNEL_ERROR_EFBIG;
+        case ENOSPC: return SCE_KERNEL_ERROR_ENOSPC;
+        case ESPIPE: return SCE_KERNEL_ERROR_ESPIPE;
+        case EROFS: return SCE_KERNEL_ERROR_EROFS;
+        case EMLINK: return SCE_KERNEL_ERROR_EMLINK;
+        case EPIPE: return SCE_KERNEL_ERROR_EPIPE;
+        case EDOM: return SCE_KERNEL_ERROR_EDOM;
+        case ERANGE: return SCE_KERNEL_ERROR_ERANGE;
+
+        default:
+            fprintf(stderr, "errnoToSceError: warning: unhandled error value\n");
+            return SCE_KERNEL_ERROR_UNKNOWN;
+    }
+}

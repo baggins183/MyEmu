@@ -121,7 +121,7 @@ static bool setupSyscallTrampoline(uint64_t &addr_start, uint64_t &addr_end) {
 
 	struct sigaction action;
     (void)memset(&action, 0, sizeof action);
-	action.sa_sigaction = orbis_syscall_handler;
+	action.sa_sigaction = ps4_syscall_handler;
 	(void)sigemptyset(&action.sa_mask);
 	(void)sigfillset(&action.sa_mask);
 	(void)sigdelset(&action.sa_mask, SIGSYS);
