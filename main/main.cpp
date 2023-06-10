@@ -601,6 +601,11 @@ int main(int argc, char **argv) {
         Elf64_Addr dynProcParamAddr = l->l_addr + elfEntryInfo->procParam.value();
         // Globally set proc param so syscall handler can handle 
         setProcParam(reinterpret_cast<void *>(dynProcParamAddr));
+
+        // I tried mmapping procparam segment in sonic's eboot.bin to it's static address in the segment header.
+        // That caused a crash, when _ps4__malloc_init tries to deref a pointer stored within the procparam. Using l_laddr + proc_param addr works.
+        // Is there reloc which fixes the rebased procparam?
+        // > Yes : for sonic eboot.bin, there is a reloc at 0x31c038, which is proc_param + 0x38, which _ps4__malloc_init dereferences.
     } else {
         fprintf(stderr, "main: entry module isn't PIE. TODO\n");
         // Need to mmap the module's segments to it's static addresses

@@ -448,11 +448,8 @@ static greg_t handle_rtprio_thread(mcontext_t *mcontext) {
 static greg_t handle_dynlib_get_proc_param(mcontext_t *mcontext) {
     greg_t rv;
 
-    auto *arg1 = ARG1<uint64_t *>(mcontext);
+    auto *pProcParam = ARG1<void **>(mcontext);
     auto *arg2 = ARG2<uint64_t *>(mcontext);
-    
-    // arg 1 is really a return parameter for a pointer
-    // so procparam_t *
 
     // syscall seems to operate on two addresses.
 
@@ -464,22 +461,18 @@ static greg_t handle_dynlib_get_proc_param(mcontext_t *mcontext) {
     //              returns 8 bytes - ptr?
     // _ps4___malloc_init (in libc.prx.so INI)
 
-    // arg1: 0x00007ffff6315c88
-    // arg2: 0x00007ffff6315c80
     // 2 stack variable pointers: must be return params, since they are uninitialized before syscall in caller.
     // arg2 possibly unused by _ps4__sceKernelGetProcParam? Does another caller variant exist which does the syscall
     // but actually uses *arg2?
 
-    // TODO look into PT_SCE_PROCPARAM and PT_SCE_MODULEPARAM elf segments
-
-    // PT_SCE_PROCPARAM's vaddr is pointer to proc param
-    // eboot's procparam? Or does argument specify lib?
-    // Should return module's load address + phdr->p_vaddr
-
     // global proc param should be set after loading eboot.bin
+    // procparam contains other pointers, but there are relocations inside the procparam contents which
+    // handle this. So we can load eboot.bin, if position-independent, at an arbitrary base address with dlopen().
+    // getProcParam should return the correct address after main loads eboot.bin as a dynamic library.
     void *procParam = getProcParam();
     if (procParam) {
-        rv = *reinterpret_cast<greg_t *>(&procParam);
+        rv = 0;
+        *pProcParam = procParam;
     } else {
         // EINVAL?
         rv = -EINVAL;
