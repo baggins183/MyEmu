@@ -1,6 +1,6 @@
 #if 0
 
-#include "sce_pthread_common.h"
+#include "ps4lib_overloads/SceLibKernel/sce_pthread_common.h"
 #include <mutex>
 
 // For some reason this crashes when using MutexNames, unless it's explicitly initialized
@@ -238,7 +238,7 @@ int PS4FUN(scePthreadMutexattrSetpshared)(void) { raise(SIGTRAP); return SCE_OK;
 int PS4FUN(scePthreadMutexGetspinloops)(void) { raise(SIGTRAP); return SCE_OK; }
 int PS4FUN(scePthreadMutexGetyieldloops)(void) { raise(SIGTRAP); return SCE_OK; }
 //int PS4FUN(scePthreadMutexInit)(void) { raise(SIGTRAP); return SCE_OK; }
-int PS4FUN(scePthreadMutexInitForInternalLibc)(void) { raise(SIGTRAP); return SCE_OK; }
+int PS4FUN(scePthreadMutexInitForInternalLibc)(void) { raise(SIGTRAP); return SCE_OK; } // called by libSceNpTus.prx.so init
 int PS4FUN(scePthreadMutexIsowned)(void) { raise(SIGTRAP); return SCE_OK; }
 //int PS4FUN(scePthreadMutexLock)(void) { raise(SIGTRAP); return SCE_OK; }
 int PS4FUN(scePthreadMutexSetprioceiling)(void) { raise(SIGTRAP); return SCE_OK; }

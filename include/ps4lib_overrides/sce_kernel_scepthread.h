@@ -99,8 +99,6 @@ typedef struct sce_pthread_attr_t*  ScePthreadAttr;
 // we still need to use the above trick.
 
 typedef pthread_t             ScePthread;
-typedef pthread_condattr_t    ScePthreadCondattr;
-typedef pthread_cond_t        ScePthreadCond;
 typedef pthread_barrier_t     ScePthreadBarrier;
 typedef pthread_barrierattr_t ScePthreadBarrierattr;
 typedef pthread_mutexattr_t   ScePthreadMutexattr;

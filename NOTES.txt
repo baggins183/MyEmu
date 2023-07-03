@@ -1,0 +1,5 @@
+================================================================
+libSceNpTus.prx.so crashes during init
+_ps4__scePthreadMutexDestroy
+
+_ps4__scePthreadMutexattrInitForInternalLibc

@@ -1,4 +1,6 @@
-#include "sce_pthread_common.h"
+#if 0
+
+#include "ps4lib_overloads/SceLibKernel/sce_pthread_common.h"
 
 #include <assert.h>
 #include <bits/types/struct_sched_param.h>
@@ -266,3 +268,5 @@ int PS4FUN(scePthreadYield)(void) { raise(SIGTRAP); return SCE_OK; }
 #endif
 
 }
+
+#endif // #if 0

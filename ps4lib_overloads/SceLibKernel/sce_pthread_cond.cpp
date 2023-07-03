@@ -1,6 +1,6 @@
 #if 0
 
-#include "sce_pthread_common
+#include "sce_pthread_common.h"
 
 extern "C" {
 

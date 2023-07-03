@@ -293,17 +293,8 @@ static greg_t handle_sysctl(mcontext_t *mcontext) {
     auto *oldp = ARG3<void *>(mcontext);
     auto *oldlenp = ARG4<size_t *>(mcontext);
     auto *newp = ARG5<void *>(mcontext);
+    auto newlen = ARG6<size_t>(mcontext);
     bool is_write = newp != NULL;
-
-    printf("\tname: %d.%d.%d.%d\n"
-        "\tnamelen: %d\n"
-        "\toldlenp: %zu\n"
-        "\twrite? : %s\n",
-        name[0], name[1], name[2], name[3],
-        namelen,
-        *oldlenp,
-        newp ? "yes" : "no"
-    );
 
     // ??? = 1.37.64 (length 2)    - CTL_KERN.KERN_ARND
     // "kern.proc.ptc" = 0.3       - CTL_UNSPEC.?
@@ -313,10 +304,25 @@ static greg_t handle_sysctl(mcontext_t *mcontext) {
     //                from gnmdriver
     // 6.7                         - CTL_HW.HW_PAGESIZE
 
-    // "kern.smp.cpus" - somewhere in scePthreadCreate 
+    // "kern.smp.cpus" - 0.3.0.0, len 2 (not 3). also "kern.sched.cpusetsize"
 
     greg_t rv = -ENOENT;
     switch(name[0]) {
+        case 0:
+        {
+            switch (name[1]) {
+                case 3:
+                {
+                    rv = 0; // TODO
+                    break;
+                }
+                default:
+                {
+                    //sizeof(cpu_set_t)
+                    break;
+                }
+            }
+        }
         case CTL_KERN:
         {
             switch(name[1]) {
@@ -331,6 +337,7 @@ static greg_t handle_sysctl(mcontext_t *mcontext) {
                 }
                 case KERN_USRSTACK:
                 {
+                    fprintf(stderr, GRN "sysctl name: CTL_HW.KERN_USRSTACK\n" RESET);
                     // TODO:
                     // pthread_attr stack address has lowest addressable byte.
                     // should this return highest addressable byte? - do this for now
@@ -351,6 +358,7 @@ static greg_t handle_sysctl(mcontext_t *mcontext) {
                     break;
                 }
                 case KERN_ARND:
+                    fprintf(stderr, GRN "sysctl name: CTL_KERN.KERN_ARND\n" RESET);
                     assert(!is_write);
                     assert(oldlenp);
                     arc4random_buf(oldp, *oldlenp);
@@ -366,6 +374,7 @@ static greg_t handle_sysctl(mcontext_t *mcontext) {
             switch(name[1]) {
                 case HW_PAGESIZE:
                 {
+                    fprintf(stderr, GRN "sysctl name: CTL_KERN.HW_PAGESIZE\n" RESET);
                     assert(!is_write);
                     size_t pagesize = sysconf(_SC_PAGE_SIZE);
                     if (*oldlenp == 0 || *oldlenp == 4) {
@@ -392,6 +401,15 @@ static greg_t handle_sysctl(mcontext_t *mcontext) {
 
     if (rv) {
         fprintf(stderr, RED "SYSCALL_HANDLER: sysctl error\n" RESET);
+        fprintf(stderr, "\tname: %d.%d.%d.%d\n"
+            "\tnamelen: %d\n"
+            "\toldlenp: %zu\n"
+            "\twrite? : %s\n",
+            name[0], name[1], name[2], name[3],
+            namelen,
+            *oldlenp,
+            newp ? "yes" : "no"
+        );        
     }
     return rv;
 }
@@ -698,6 +716,19 @@ static greg_t handle_get_authinfo(mcontext_t *mcontext) {
     //return -EINVAL;
 }
 
+static greg_t handle_namedobj_create(mcontext_t *mcontext) {
+    auto *name = ARG1<const char *>(mcontext);
+    auto *object = ARG2<void *>(mcontext);
+    // arg3 is some kind of flags
+    auto arg3 = ARG3<uint64_t>(mcontext);
+
+    // libc init: arg2 is address of calloc'd sce_pthread_mutex
+    greg_t rv = 0;
+    // 0xffffffff means errror
+    return rv;
+}
+
+
 static std::set<OrbisSyscallNr> green_syscalls = {
     //SYS_write,
     SYS_read,
@@ -726,7 +757,9 @@ static std::set<OrbisSyscallNr> red_syscalls = {
     SYS_osem_wait,
     SYS_osem_trywait,
     SYS_osem_post,
-    SYS_osem_cancel
+    SYS_osem_cancel,
+    // set architectural register? e.g. fs segment reg
+    SYS_sysarch,
 };
 
 // handler may/may not be correct
@@ -735,7 +768,8 @@ static std::set<OrbisSyscallNr> yellow_syscalls = {
 	SYS_osem_create,
 	SYS_osem_delete,
     SYS___sysctl,
-    SYS_dynlib_get_proc_param,    
+    SYS_dynlib_get_proc_param,
+    SYS_namedobj_create
 };
 
 extern "C" {
@@ -929,7 +963,12 @@ DIRECT_SYSCALL_MAP(DIRECT_SYSCALL_CASE)
         {
             rv = handle_osem_cancel(mcontext);
             break;
-        }        
+        }
+        case SYS_namedobj_create:
+        {
+            rv = handle_namedobj_create(mcontext);
+            break;
+        }      
         case SYS_dmem_container:
             rv = -EINVAL;
             break;

@@ -4,6 +4,7 @@
 #include "nid_hash/nid_hash.h"
 
 #include <elf.h>
+#include <semaphore.h>
 #include <sstream>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -41,6 +42,7 @@
 #include "elfpatcher/elfpatcher.h"
 #include "system_compat/globals.h"
 #include "system_compat/ps4_region.h"
+#include "ps4lib_overloads/SceLibKernel/sce_pthread_common.h"
 
 namespace fs = std::filesystem;
 
@@ -379,8 +381,6 @@ static bool createPs4EntryThread(Ps4EntryWrapperArgs &entryThreadArgs) {
     pthread_t ps4Thread;
     pthread_attr_t attr;
 
-    pthread_attr_init(&attr);
-
     constexpr size_t stack_size = 2048 * 1024;
     assert(stack_size > (unsigned) __sysconf (__SC_THREAD_STACK_MIN_VALUE));
     void *stack = malloc(stack_size);
@@ -389,10 +389,23 @@ static bool createPs4EntryThread(Ps4EntryWrapperArgs &entryThreadArgs) {
         return false;
     }
 
+    pthread_attr_init(&attr);
     pthread_attr_setstack(&attr, stack, stack_size);
-
     pthread_create(&ps4Thread, &attr, ps4_entry_wrapper, (void *) &entryThreadArgs);
     pthread_join(ps4Thread, NULL);
+
+//    ScePthread ps4SceThread;
+//    ScePthreadAttr attr2;
+//    void *libkernel = dlopen("libkernel.prx.so", RTLD_LAZY);
+//    typedef int (*PFN_SCEPTHREADCREATE) (ScePthread *, const ScePthreadAttr *, void *(PS4API *) (void *), void *, const char *);
+//    PFN_SCEPTHREADCREATE scePthreadCreate = (PFN_SCEPTHREADCREATE) dlsym(libkernel, "_ps4__scePthreadCreate");
+//    {
+//        Ps4RegionScope __scope;
+//        scePthreadCreate(&ps4SceThread, NULL, ps4_entry_wrapper, (void *) &entryThreadArgs, "MAINTHREAD");
+//    }
+//    typedef int (*PFN_SCEPTHREADJOIN) (ScePthread *, void **);
+//    PFN_SCEPTHREADJOIN scePthreadJoin = (PFN_SCEPTHREADJOIN) dlsym(RTLD_NEXT, "_ps4__scePthreadJoin");
+//    scePthreadJoin(&ps4SceThread, NULL);
 
     return true;
 }
@@ -401,6 +414,7 @@ static bool cleanup_previous_run() {
     // TODO
     // Delete semaphores opened previously
     // /dev/shm
+    sem_unlink("SceNpTusGame");
     return true;
 }
 

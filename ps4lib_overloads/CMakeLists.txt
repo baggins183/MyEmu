@@ -1,1 +1,2 @@
 add_subdirectory(SceLibKernel)
+add_subdirectory(SceLibcInternal)

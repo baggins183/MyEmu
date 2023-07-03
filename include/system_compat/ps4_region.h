@@ -16,6 +16,11 @@ struct HostRegionScope {
     ~HostRegionScope() { enter_ps4_region(); }
 };
 
+struct Ps4RegionScope {
+    Ps4RegionScope()  { enter_ps4_region(); }
+    ~Ps4RegionScope() { leave_ps4_region(); }
+};
+
 void set_chroot_path(const char *path);
 
 std::string get_chroot_path();

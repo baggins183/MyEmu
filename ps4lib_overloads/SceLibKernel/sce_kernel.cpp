@@ -1,3 +1,5 @@
+#if 0
+
 #include <orbis/sce_errors/sce_errors.h>
 #include "Common.h"
 
@@ -51,3 +53,5 @@ int PS4FUN(sceKernelGetCompiledSdkVersion)(void) {
 }
 
 }
+
+#endif // #if 0
