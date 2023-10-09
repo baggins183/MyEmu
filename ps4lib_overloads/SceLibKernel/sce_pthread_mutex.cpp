@@ -1,4 +1,5 @@
-#if 0
+#include "system_compat/ps4_region.h"
+#if 1
 
 #include "ps4lib_overloads/SceLibKernel/sce_pthread_common.h"
 #include <mutex>
@@ -37,6 +38,7 @@ extern "C" {
 
 int PS4FUN(scePthreadMutexattrInit)(ScePthreadMutexattr *attr)
 {
+	HostRegionScope __scope;
 	int err = pthread_mutexattr_init(attr);
 	if (err) {
 		raise(SIGTRAP);
@@ -221,29 +223,29 @@ int PS4FUN(scePthreadMutexTrylock)(ScePthreadMutex *mutex)
 
 #if 1
 //int PS4FUN(scePthreadMutexattrDestroy)(void) { raise(SIGTRAP); return SCE_OK; }
-int PS4FUN(scePthreadMutexattrGetkind)(void) { raise(SIGTRAP); return SCE_OK; }
-int PS4FUN(scePthreadMutexattrGetprioceiling)(void) { raise(SIGTRAP); return SCE_OK; }
-int PS4FUN(scePthreadMutexattrGetprotocol)(void) { raise(SIGTRAP); return SCE_OK; }
-int PS4FUN(scePthreadMutexattrGetpshared)(void) { raise(SIGTRAP); return SCE_OK; }
-int PS4FUN(scePthreadMutexattrGettype)(void) { raise(SIGTRAP); return SCE_OK; }
+int PS4FUN(scePthreadMutexattrGetkind)(void) { exit(-1); }
+int PS4FUN(scePthreadMutexattrGetprioceiling)(void) { exit(-1); }
+int PS4FUN(scePthreadMutexattrGetprotocol)(void) { exit(-1); }
+int PS4FUN(scePthreadMutexattrGetpshared)(void) { exit(-1); }
+int PS4FUN(scePthreadMutexattrGettype)(void) { exit(-1); }
 //int PS4FUN(scePthreadMutexattrInit)(void) { raise(SIGTRAP); return SCE_OK; }
-int PS4FUN(scePthreadMutexattrInitForInternalLibc)(void) { raise(SIGTRAP); return SCE_OK; }
-int PS4FUN(scePthreadMutexattrSetkind)(void) { raise(SIGTRAP); return SCE_OK; }
-int PS4FUN(scePthreadMutexattrSetprioceiling)(void) { raise(SIGTRAP); return SCE_OK; }
+int PS4FUN(scePthreadMutexattrInitForInternalLibc)(void) { exit(-1); }
+int PS4FUN(scePthreadMutexattrSetkind)(void) { exit(-1); }
+int PS4FUN(scePthreadMutexattrSetprioceiling)(void) { exit(-1); }
 //int PS4FUN(scePthreadMutexattrSetprotocol)(void) { raise(SIGTRAP); return SCE_OK; }
-int PS4FUN(scePthreadMutexattrSetpshared)(void) { raise(SIGTRAP); return SCE_OK; }
+int PS4FUN(scePthreadMutexattrSetpshared)(void) { exit(-1); }
 //int PS4FUN(scePthreadMutexattrSettype)(void) { raise(SIGTRAP); return SCE_OK; }
 //int PS4FUN(scePthreadMutexDestroy)(void) { raise(SIGTRAP); return SCE_OK; }
 //int PS4FUN(scePthreadMutexGetprioceiling)(void) { raise(SIGTRAP); return SCE_OK; }
-int PS4FUN(scePthreadMutexGetspinloops)(void) { raise(SIGTRAP); return SCE_OK; }
-int PS4FUN(scePthreadMutexGetyieldloops)(void) { raise(SIGTRAP); return SCE_OK; }
+int PS4FUN(scePthreadMutexGetspinloops)(void) { exit(-1); }
+int PS4FUN(scePthreadMutexGetyieldloops)(void) { exit(-1); }
 //int PS4FUN(scePthreadMutexInit)(void) { raise(SIGTRAP); return SCE_OK; }
-int PS4FUN(scePthreadMutexInitForInternalLibc)(void) { raise(SIGTRAP); return SCE_OK; } // called by libSceNpTus.prx.so init
-int PS4FUN(scePthreadMutexIsowned)(void) { raise(SIGTRAP); return SCE_OK; }
+int PS4FUN(scePthreadMutexInitForInternalLibc)(void) { exit(-1); } // called by libSceNpTus.prx.so init
+int PS4FUN(scePthreadMutexIsowned)(void) { exit(-1); }
 //int PS4FUN(scePthreadMutexLock)(void) { raise(SIGTRAP); return SCE_OK; }
-int PS4FUN(scePthreadMutexSetprioceiling)(void) { raise(SIGTRAP); return SCE_OK; }
-int PS4FUN(scePthreadMutexSetspinloops)(void) { raise(SIGTRAP); return SCE_OK; }
-int PS4FUN(scePthreadMutexSetyieldloops)(void) { raise(SIGTRAP); return SCE_OK; }
+int PS4FUN(scePthreadMutexSetprioceiling)(void) { exit(-1); }
+int PS4FUN(scePthreadMutexSetspinloops)(void) { exit(-1); }
+int PS4FUN(scePthreadMutexSetyieldloops)(void) { exit(-1); }
 //int PS4FUN(scePthreadMutexTimedlock)(void) { raise(SIGTRAP); return SCE_OK; }
 //int PS4FUN(scePthreadMutexTrylock)(void) { raise(SIGTRAP); return SCE_OK; }
 //int PS4FUN(scePthreadMutexUnlock)(void) { raise(SIGTRAP); return SCE_OK; }

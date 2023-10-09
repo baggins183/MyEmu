@@ -1,6 +1,6 @@
-#if 0
+#if 1
 
-#include "sce_pthread_common.h"
+#include "ps4lib_overloads/SceLibKernel/sce_pthread_common.h"
 
 #include <assert.h>
 #include <bits/types/struct_sched_param.h>

@@ -314,11 +314,12 @@ static greg_t handle_sysctl(mcontext_t *mcontext) {
                 case 3:
                 {
                     rv = 0; // TODO
+                    *reinterpret_cast<int *>(oldp) = 8;
+                    *oldlenp = 1;
                     break;
                 }
                 default:
                 {
-                    //sizeof(cpu_set_t)
                     break;
                 }
             }
@@ -573,6 +574,10 @@ private:
     size_t maxSceHandle = 0;
 };
 
+// The ps4 app/libs expect a OSem's to have a 32 bit handle.
+// On linux, the handle is a sem_t *pointer.
+// For ps4 functions that interact with OSem's, let the app pass around 32 bit handles,
+// while the compatability layer maps these to linux sem_t's 
 typedef Ps4HandleMap<32, sem_t *> OsemHandleMap;
 static OsemHandleMap _OsemHandles;
 
@@ -608,6 +613,7 @@ static greg_t handle_osem_create(mcontext_t *mcontext) {
         rv = -errno;
     } else {
         OsemHandleMap::sce_type sceHandle = _OsemHandles.getNewHandle(sem);
+        // TODO handle error
         rv = sceHandle;
         printf(MAG "osem create: %lu -> %p\n", sceHandle, sem);
     }
@@ -731,46 +737,63 @@ static greg_t handle_namedobj_create(mcontext_t *mcontext) {
 
 static std::set<OrbisSyscallNr> green_syscalls = {
     //SYS_write,
-    SYS_read,
-    SYS_open,
-    SYS_close,
-    SYS_getpid,
-    SYS_ioctl,
-    SYS_rtprio_thread,
-    SYS_thr_self,
-    SYS_mmap,
-    SYS_clock_gettime,
+
 };
 
-static std::set<OrbisSyscallNr> red_syscalls = {
-    SYS_netcontrol,
-    SYS_evf_create,
-	SYS_dmem_container,
-	SYS_get_authinfo,
-	SYS_mdbg_service,
-    SYS_randomized_path,
-	SYS_budget_get_ptype,
-	SYS_get_proc_type_info,
-    SYS_regmgr_call,
-    SYS_osem_open,
-    SYS_osem_close,
-    SYS_osem_wait,
-    SYS_osem_trywait,
-    SYS_osem_post,
-    SYS_osem_cancel,
-    // set architectural register? e.g. fs segment reg
-    SYS_sysarch,
-};
+static void logSyscall(OrbisSyscallNr ps4_syscall_nr) {
+    std::string bsdName = to_string((OrbisSyscallNr) ps4_syscall_nr);
 
-// handler may/may not be correct
-static std::set<OrbisSyscallNr> yellow_syscalls = {
-    SYS_mname,
-	SYS_osem_create,
-	SYS_osem_delete,
-    SYS___sysctl,
-    SYS_dynlib_get_proc_param,
-    SYS_namedobj_create
-};
+    switch (ps4_syscall_nr) {
+        case SYS_read:
+        case SYS_open:
+        case SYS_close:
+        case SYS_getpid:
+        case SYS_ioctl:
+        case SYS_rtprio_thread:
+        case SYS_thr_self:
+        case SYS_mmap:
+        case SYS_clock_gettime:
+        {
+            // green
+            printf(GRN "freebsd_syscall_handler: handling %s%s\n", bsdName.c_str(), RESET);            
+            break;
+        }
+        case SYS_mname:
+	    case SYS_osem_create:
+	    case SYS_osem_delete:
+        case SYS___sysctl:
+        case SYS_dynlib_get_proc_param:
+        case SYS_namedobj_create:
+        {
+            printf(YEL "freebsd_syscall_handler: handling %s%s\n", bsdName.c_str(), RESET);
+            break;
+        }
+        case SYS_netcontrol:
+        case SYS_evf_create:
+	    case SYS_dmem_container:
+	    case SYS_get_authinfo:
+	    case SYS_mdbg_service:
+        case SYS_randomized_path:
+	    case SYS_budget_get_ptype:
+	    case SYS_get_proc_type_info:
+        case SYS_regmgr_call:
+        case SYS_osem_open:
+        case SYS_osem_close:
+        case SYS_osem_wait:
+        case SYS_osem_trywait:
+        case SYS_osem_post:
+        case SYS_osem_cancel:
+        case SYS_sysarch:
+        {
+            // red
+            fprintf(stderr, RED "freebsd_syscall_handler: handling %s\n" RESET, bsdName.c_str());
+            break;
+        }
+
+        default:
+            break;
+    }
+}
 
 extern "C" {
 
@@ -795,13 +818,7 @@ void ps4_syscall_handler(int num, siginfo_t *info, void *ucontext_arg) {
     greg_t arg6 = mcontext->gregs[REG_R9];
 #pragma GCC diagnostic pop
 
-    if (red_syscalls.find((OrbisSyscallNr) ps4_syscall_nr) != red_syscalls.end()) {
-        fprintf(stderr, RED "freebsd_syscall_handler: handling %s\n" RESET, bsdName.c_str());
-    } else if (green_syscalls.find((OrbisSyscallNr) ps4_syscall_nr) != green_syscalls.end()) {
-        printf(GRN "freebsd_syscall_handler: handling %s%s\n", bsdName.c_str(), RESET);
-    } else if (yellow_syscalls.find((OrbisSyscallNr) ps4_syscall_nr) != yellow_syscalls.end()) {
-        printf(YEL "freebsd_syscall_handler: handling %s%s\n", bsdName.c_str(), RESET);
-    }
+    logSyscall(OrbisSyscallNr(ps4_syscall_nr));
 
     switch (ps4_syscall_nr) {
 // For some syscall that is 1:1 orbis to native host (linux), create a case statement

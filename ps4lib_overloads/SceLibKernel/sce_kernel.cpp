@@ -1,4 +1,4 @@
-#if 0
+#if 1
 
 #include <orbis/sce_errors/sce_errors.h>
 #include "Common.h"
@@ -24,6 +24,8 @@ struct sce_module_info_request_t {
 
 extern "C" {
 
+#if 1
+
 // Note: I saw this crash on a code path through libSceSysModule's DT_INIT function
 // Implementing this leaves a crash in sceKernelGetModuleInfo
 sce_module_handle_t PS4FUN(sceKernelGetExecutableModuleHandle)(void) {
@@ -47,10 +49,14 @@ int PS4FUN(sceKernelGetModuleInfo2)(void) {
     return 0;
 }
 
+#endif
+
+#if 1
 int PS4FUN(sceKernelGetCompiledSdkVersion)(void) {
-    raise(SIGTRAP);
+    // raise(SIGTRAP);
     return 0;
 }
+#endif
 
 }
 
