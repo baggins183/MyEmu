@@ -3,6 +3,9 @@
 #include <cassert>
 #include <cstring>
 #include <fstream>
+#include <llvm/MC/MCInst.h>
+#include <llvm/Support/raw_ostream.h>
+#include <sstream>
 #include <sys/types.h>
 #include <vector>
 #include <fcntl.h>
@@ -11,6 +14,8 @@ namespace fs = std::filesystem;
 #include <byteswap.h>
 #include <arpa/inet.h>
 #include <llvm/ADT/ArrayRef.h>
+
+#include "spirv.hpp"
 
 // Some taken from llvm-mc
 
@@ -138,8 +143,30 @@ void print_bininfo(const ShaderBinaryInfo &bininfo) {
 #include "llvm/Support/ToolOutputFile.h"
 #include "llvm/Support/WithColor.h"
 
+//#include "llvm/lib/Target/AMDGPU/Disassembler/AMDGPUDisassembler.h"
+#include "llvm/MC/MCDisassembler/MCDisassembler.h"
+
+#define GET_INSTRINFO_ENUM 1
+#include "AMDGPUGenInstrInfo.inc"
+#include "SIDefines.h"
+
 
 using namespace llvm;
+
+bool convertGcnMachineCodeToSpirv(const std::vector<MCInst> &machineCode, std::vector<uint8_t> spirvModule) {
+    for (const MCInst &MI : machineCode) {
+        uint op = MI.getOpcode();
+        switch (MI.getOpcode()) {
+            case AMDGPU::S_MOV_B32_gfx6_gfx7:
+                printf("here\n");
+            default:
+                break;
+
+        }
+    }
+
+    return true;
+}
 
 int llvm_mc_main(int argc, char ** argv, const std::vector<unsigned char> &gcnBytecode) {
     //llvm::InitializeAllTargetInfos();
@@ -149,8 +176,10 @@ int llvm_mc_main(int argc, char ** argv, const std::vector<unsigned char> &gcnBy
 
     LLVMInitializeAMDGPUTargetInfo();
     LLVMInitializeAMDGPUTargetMC();
+    LLVMInitializeAMDGPUDisassembler();
 
     const char *tripleName = "amdgcn-unknown-linux-gnu";
+    //const char *mcpu = "fiji";
     const char *mcpu = "bonaire";
     const char *features = "";
 
@@ -177,8 +206,47 @@ int llvm_mc_main(int argc, char ** argv, const std::vector<unsigned char> &gcnBy
 
     MCInstPrinter *IP = TheTarget->createMCInstPrinter(Triple(tripleName), 0, *MAI, *MCII, *MRI);
 
-    //llvm_shutdown();
-    return 0;
+    std::unique_ptr<MCAsmInfo> AsmInfo(
+        TheTarget->createMCAsmInfo(*MRI, TheTriple.getTriple(), MCTargetOptions()));
+
+    std::unique_ptr<MCContext> Ctx(
+        new MCContext(TheTriple, AsmInfo.get(), MRI.get(), STI.get()));
+
+    std::unique_ptr<MCDisassembler> DisAsm(
+        TheTarget->createMCDisassembler(*STI, *Ctx));
+
+    uint64_t size;
+    uint64_t addr = 0;
+
+    ArrayRef byteView(gcnBytecode.data(), gcnBytecode.size());
+
+
+    llvm::outs() << "\n";
+    std::vector<MCInst> machineCode;
+    while (addr < byteView.size()) {
+        MCInst MI;
+        MCDisassembler::DecodeStatus Res = DisAsm->getInstruction(MI, size, byteView.slice(addr), addr, llvm::nulls());
+
+        switch (Res) {
+            case MCDisassembler::DecodeStatus::Success:
+                break;
+            case MCDisassembler::DecodeStatus::Fail:
+            case MCDisassembler::DecodeStatus::SoftFail:
+                printf("Failed decoding instruction\n");
+                return 1;
+        }
+        IP->printInst(&MI, 0, "", *STI, llvm::outs());
+        llvm::outs() << "\n";
+
+        machineCode.push_back(std::move(MI));
+        addr += size;
+    }
+
+    std::vector<uint8_t> spirvModule;
+    bool success = convertGcnMachineCodeToSpirv(machineCode, spirvModule);
+
+    llvm_shutdown();
+    return success ? 0 : 1;
 }
 
 int main(int argc, char **argv) {
@@ -236,7 +304,7 @@ int main(int argc, char **argv) {
             progStartOff = i;
             foundProgStart = true;
             fileIsLittleEndian = true;
-        } else if ( *reinterpret_cast<uint32_t *>(&buf[i]) == 0xff03ebbe) {
+        } else if ( *reinterpret_cast<uint32_t *>(&buf[i]) == 0xff03ebbe) { // s_mov_b32 vcc_hi, #imm
             printf("found first instr: offset: 0x%zx\n", progStartOff);
             printf("was reversed on disk (big endian)\n");
             progStartOff = i;

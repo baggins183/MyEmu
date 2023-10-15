@@ -1,0 +1,61 @@
+diff --git a/llvm/lib/Target/AMDGPU/Disassembler/AMDGPUDisassembler.cpp b/llvm/lib/Target/AMDGPU/Disassembler/AMDGPUDisassembler.cpp
+index 6ad59e026003..0d5bc862726d 100644
+--- a/llvm/lib/Target/AMDGPU/Disassembler/AMDGPUDisassembler.cpp
++++ b/llvm/lib/Target/AMDGPU/Disassembler/AMDGPUDisassembler.cpp
+@@ -51,7 +51,7 @@ AMDGPUDisassembler::AMDGPUDisassembler(const MCSubtargetInfo &STI,
+   TargetMaxInstBytes(Ctx.getAsmInfo()->getMaxInstLength(&STI)) {
+ 
+   // ToDo: AMDGPUDisassembler supports only VI ISA.
+-  if (!STI.hasFeature(AMDGPU::FeatureGCN3Encoding) && !isGFX10Plus())
++  if (!STI.hasFeature(AMDGPU::FeatureGCN3Encoding) && !isGFX10Plus() && !isCI())
+     report_fatal_error("Disassembly not yet supported for subtarget");
+ }
+ 
+@@ -516,6 +516,13 @@ DecodeStatus AMDGPUDisassembler::getInstruction(MCInst &MI, uint64_t &Size,
+     // Try decode 32-bit instruction
+     if (Bytes.size() < 4) break;
+     const uint32_t DW = eatBytes<uint32_t>(Bytes);
++
++    Res = tryDecodeInst(DecoderTableGFX732, MI, DW, Address, CS);
++    if (Res) break;
++
++    Res = tryDecodeInst(DecoderTableGFX6GFX732, MI, DW, Address, CS);
++    if (Res) break;
++
+     Res = tryDecodeInst(DecoderTableGFX832, MI, DW, Address, CS);
+     if (Res) break;
+ 
+@@ -557,6 +564,12 @@ DecodeStatus AMDGPUDisassembler::getInstruction(MCInst &MI, uint64_t &Size,
+         break;
+     }
+ 
++    Res = tryDecodeInst(DecoderTableGFX764, MI, QW, Address, CS);
++    if (Res) break;
++
++    Res = tryDecodeInst(DecoderTableGFX6GFX764, MI, QW, Address, CS);
++    if (Res) break;
++
+     Res = tryDecodeInst(DecoderTableGFX864, MI, QW, Address, CS);
+     if (Res) break;
+ 
+@@ -1604,6 +1617,8 @@ bool AMDGPUDisassembler::isVI() const {
+   return STI.hasFeature(AMDGPU::FeatureVolcanicIslands);
+ }
+ 
++bool AMDGPUDisassembler::isCI() const { return AMDGPU::isCI(STI); }
++
+ bool AMDGPUDisassembler::isGFX9() const { return AMDGPU::isGFX9(STI); }
+ 
+ bool AMDGPUDisassembler::isGFX90A() const {
+diff --git a/llvm/lib/Target/AMDGPU/Disassembler/AMDGPUDisassembler.h b/llvm/lib/Target/AMDGPU/Disassembler/AMDGPUDisassembler.h
+index 490eb14c3396..67c94db8ad0d 100644
+--- a/llvm/lib/Target/AMDGPU/Disassembler/AMDGPUDisassembler.h
++++ b/llvm/lib/Target/AMDGPU/Disassembler/AMDGPUDisassembler.h
+@@ -228,6 +228,7 @@ public:
+ 
+   const MCInstrInfo *getMCII() const { return MCII.get(); }
+ 
++  bool isCI() const;
+   bool isVI() const;
+   bool isGFX9() const;
+   bool isGFX90A() const;
