@@ -1,3 +1,4 @@
+#include "llvm/ADT/StringRef.h"
 #include <cstdint>
 #include <cstdio>
 #include <cassert>
@@ -153,12 +154,122 @@ void print_bininfo(const ShaderBinaryInfo &bininfo) {
 
 using namespace llvm;
 
-bool convertGcnMachineCodeToSpirv(const std::vector<MCInst> &machineCode, std::vector<uint8_t> spirvModule) {
+class SpirvVisitor;
+
+class SpirvType {
+
+};
+
+class SpirvOperand {
+public:
+    virtual void visit(SpirvVisitor *visitor);
+};
+
+class SpirvInstruction : public SpirvOperand {
+public:
+    spv::Op opcode();
+    SpirvInstruction *getOperand(uint idx);
+    const SpirvType *getResultType();
+};
+
+class SpirvLiteral : public SpirvOperand {
+public:
+
+private:
+};
+
+class SpirvFunction {
+    
+};
+
+class SpirvBuilder {
+private:
+    std::vector<spv::Capability> capabilities;
+    std::vector<std::string> extensions;
+
+    spv::MemoryModel memoryModel;
+    spv::AddressingModel addressingModel;
+
+    // Entry point related fields
+    spv::ExecutionModel executionModel; // shader stage type (V, F, ...)
+    // entry point always "main"
+    SpirvInstruction *entryPoint;
+    // "Interface is a list of <id> of global OpVariable instructions"
+    std::vector<SpirvInstruction *> interfaces;
+
+    std::vector<SpirvInstruction *> executionModes;
+
+    // debug instructions
+    // annotation/decorations (have decorations as attribute of OpVariable instead?)
+
+    std::vector<std::unique_ptr<SpirvType>> types;
+    // TODO SpirvFunction type?
+    std::vector<std::unique_ptr<SpirvFunction>> functions;
+
+public:
+    // Create everything but the functions and bodies
+    bool createPreamble();
+    const SpirvFunction *createFunction(llvm::StringRef name);
+    void setInsertPoint(const SpirvFunction *function);
+    void addCall(const SpirvFunction *function, llvm::SmallVector<SpirvOperand, 4> args);
+    void createOp(spv::Op opcode, llvm::SmallVector<SpirvInstruction *, 4> args);
+    void createOp(spv::Op opcode, const SpirvType *resultType, llvm::SmallVector<SpirvInstruction *, 4> args);
+    const SpirvInstruction *loadVGpr(uint regNo);
+    const SpirvInstruction *storeVGpr(uint regNo, const SpirvInstruction *val);
+    const SpirvInstruction *loadVCC();
+    const SpirvInstruction *StoreVCC(SpirvOperand val);
+    const SpirvInstruction *createBitcast(const SpirvType *type, const SpirvInstruction *from);
+
+    // Should we preserve carry out behavior?
+    // set flag (per instruction) to track if carry out is live/dead
+    // Then after module create (no emit yet), run dataflow to decide whether to write to VCC/SGPR
+    // Then emit code w/ checks when carry out register is live
+    // Option 2: Create precise spirv instuctions (objects) including carry-out writes, then remove dead code manually
+    //      -Do yourself
+    //      -run spirv-opt
+    //      -let driver do it
+    // Probably optimize ourself because we'll have to emit weird code in case carry out is needed
+
+    const SpirvType *getF32Type();
+    const SpirvType *getF64Type();
+    const SpirvType *getI32Type();
+    const SpirvType *getI64Type();
+    const SpirvType *getU32Type();
+    const SpirvType *getU64Type();
+    const SpirvType *getBoolType();
+
+    SpirvOperand makeLiteral();
+};
+
+class SpirvVisitor {
+public:
+    virtual void visit(SpirvInstruction *instruction) = 0;
+    virtual void visit(SpirvLiteral *literal) = 0;
+};
+
+class SpirvEmitter : public SpirvVisitor {
+public:
+
+private:
+};
+
+bool convertGcnMachineCodeToSpirv(const std::vector<MCInst> &machineCode, std::vector<uint8_t> spirvModule, MCInstPrinter *IP, const MCRegisterInfo *MRI) {
     for (const MCInst &MI : machineCode) {
         uint op = MI.getOpcode();
         switch (MI.getOpcode()) {
             case AMDGPU::S_MOV_B32_gfx6_gfx7:
-                printf("here\n");
+                break;
+            case AMDGPU::V_MUL_F32_e32_gfx6_gfx7:
+            {
+//                printf("V_MUL_F32: %d operands\n", MI.getNumOperands());
+//                for (uint i = 0; i < MI.getNumOperands(); i++) {
+//                    uint regNo = MI.getOperand(i).getReg();
+//                    const MCRegisterDesc &regDesc = MRI->get(regNo);
+//                    outs() << MRI->getName(regNo) << "\n";
+//                }
+
+                break;
+            }
             default:
                 break;
 
@@ -243,7 +354,7 @@ int llvm_mc_main(int argc, char ** argv, const std::vector<unsigned char> &gcnBy
     }
 
     std::vector<uint8_t> spirvModule;
-    bool success = convertGcnMachineCodeToSpirv(machineCode, spirvModule);
+    bool success = convertGcnMachineCodeToSpirv(machineCode, spirvModule, IP, MRI.get());
 
     llvm_shutdown();
     return success ? 0 : 1;

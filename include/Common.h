@@ -68,4 +68,28 @@ static inline uint64_t pjwHash(const unsigned char *data, size_t length)
    return hash;
 }
 
+static inline uint64_t updatePjwHash32(const unsigned char *data, size_t length, uint32_t hash) {
+   uint64_t x    = 0;
+   size_t   i    = 0;
+
+   for (i = 0; i < length; ++data, ++i)
+   {
+      hash = (hash << 4) + (*data);
+
+      if ((x = hash & 0xF0000000) != 0)
+      {
+         hash ^= (x >> 24);
+      }
+
+      hash &= ~x;
+   }
+
+   return hash;
+}
+
+static inline uint32_t pjwHash32(const unsigned char *data, size_t length)
+{
+   return updatePjwHash32(data, length, 0);
+}
+
 #endif
