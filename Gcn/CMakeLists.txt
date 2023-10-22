@@ -5,5 +5,5 @@ include_directories("${LLVM_INCLUDE_DIR}")
 
 include_directories("${SPIRV-Headers_SOURCE_DIR}/include/spirv/unified1")
 
-add_executable(gcn-dis disassembler.cpp SpirvVisitor.cpp)
+add_executable(gcn-dis disassembler.cpp SpirvVisitor.cpp SpirvOperands.cpp SpirvBuilder.cpp)
 target_link_libraries(gcn-dis LLVM)
