@@ -146,6 +146,9 @@ bool convertGcnMachineCodeToSpirv(const std::vector<MCInst> &machineCode, std::v
     std::unique_ptr<SpirvContext> Ctx = std::make_unique<SpirvContext>();
     SpirvBuilder Builder(Ctx.get());
 
+    Ctx->setAddressingModel(spv::AddressingModel::AddressingModelLogical);
+    Ctx->setMemoryModel(spv::MemoryModel::MemoryModelVulkan);
+
     for (const MCInst &MI : machineCode) {
         //uint op = MI.getOpcode();
         switch (MI.getOpcode()) {
@@ -160,6 +163,7 @@ bool convertGcnMachineCodeToSpirv(const std::vector<MCInst> &machineCode, std::v
 //                    outs() << MRI->getName(regNo) << "\n";
 //                }
 
+                
                 break;
             }
             default:
@@ -167,6 +171,9 @@ bool convertGcnMachineCodeToSpirv(const std::vector<MCInst> &machineCode, std::v
 
         }
     }
+
+    Ctx->createPredicatedControlFlow();
+    Ctx->createPreamble();
 
     return true;
 }
@@ -300,6 +307,10 @@ int main(int argc, char **argv) {
             printf("\n");
             print_bininfo(bininfo);
             foundBinInfo = true;
+            assert(foundProgStart);
+            std::vector<unsigned char> programBinary(bininfo.m_length);
+            memcpy(programBinary.data(), &buf[progStartOff], bininfo.m_length);
+            llvm_mc_main(argc, argv, programBinary);
         } else if ( *reinterpret_cast<uint32_t *>(&buf[i]) == 0xbeeb03ff) {
             // host is little endian. Reverse when we
             printf("found first instr: offset: 0x%zx\n", progStartOff);
@@ -327,7 +338,6 @@ int main(int argc, char **argv) {
         return -1;
     }
 
-    std::vector<unsigned char> programBinary(bininfo.m_length);
 
 //    size_t bytesRead = 0;
 //    while (bytesRead < bininfo.m_length) {
@@ -344,19 +354,6 @@ int main(int argc, char **argv) {
 //
 //        bytesRead += 4;
 //    }
-
-    memcpy(programBinary.data(), &buf[progStartOff], bininfo.m_length);
-    llvm_mc_main(argc, argv, programBinary);
-
-    if ( !outBinPath.empty()) {
-        FILE *fOut = fopen(outBinPath.c_str(), "w");
-        if (!fOut) {
-            fprintf(stderr, "couldnt open out path\n");
-            return -1;
-        }
-
-        assert(1 == fwrite(programBinary.data(), programBinary.size(), 1, fOut));
-    }
 
     return 0;
 }
