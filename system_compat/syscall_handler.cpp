@@ -890,7 +890,7 @@ DIRECT_SYSCALL_MAP(DIRECT_SYSCALL_CASE)
         case 511:
         case 512:
         {
-            bsdName = to_string(SYS_shmctl);
+            bsdName = to_string((OrbisSyscallNr) SYS_shmctl);
             rv = -EINVAL;
             break;
         }
@@ -1034,7 +1034,7 @@ DIRECT_SYSCALL_MAP(DIRECT_SYSCALL_CASE)
         }
     }
 
-    // before this point, rv should be -errno if there was an error
+    // before this point, rv should be -errno if there was an error (linux convention)
     // change to bsd conventions here (rax holds result or positive errno, carry flag==1 means error)
     if (rv < 0) {
         // TODO? Convert linux errno to SCE_KERNEL_* errno?

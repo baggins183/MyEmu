@@ -1,82 +1,62 @@
-#include "Gcn2Spirv.h"
+#include "SpirvBuilder.h"
+#include "SpirvCommon.h"
+#include "SpirvInstruction.h"
+#include "SpirvType.h"
 #include "spirv.hpp"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
 
-SpirvType *SpirvBuilder::makeF32Type() {
-    SpirvLiteral *bits = context->makeLiteral(32);
-    OperandVec operands = { bits };
-    SpirvType type(spv::OpTypeFloat, operands);
+SpirvFloatType *SpirvBuilder::makeF32Type() {
+    SpirvFloatType type(32);
     return context->getOrInsertType(type);
 }
 
-SpirvType *SpirvBuilder::makeF64Type() {
-    SpirvLiteral *bits = context->makeLiteral(64);
-    OperandVec operands = { bits };
-    SpirvType type(spv::OpTypeFloat, operands);
+SpirvFloatType *SpirvBuilder::makeF64Type() {
+    SpirvFloatType type(64);
     return context->getOrInsertType(type);
 }
 
-SpirvType *SpirvBuilder::makeI32Type() {
-    SpirvLiteral *bits = context->makeLiteral(32);
-    SpirvLiteral *sign = context->makeLiteral(1);
-    OperandVec operands = { bits, sign };
-    SpirvType type(spv::OpTypeInt, operands);
+SpirvIntType *SpirvBuilder::makeI32Type() {
+    SpirvIntType type(32, true);
     return context->getOrInsertType(type);
 }
 
-SpirvType *SpirvBuilder::makeI64Type() {
-    SpirvLiteral *bits = context->makeLiteral(64);
-    SpirvLiteral *sign = context->makeLiteral(1);
-    OperandVec operands = { bits, sign };
-    SpirvType type(spv::OpTypeInt, operands);
+SpirvIntType *SpirvBuilder::makeI64Type() {
+    SpirvIntType type(64, true);
     return context->getOrInsertType(type);
 }
 
-SpirvType *SpirvBuilder::makeU32Type() {
-    SpirvLiteral *bits = context->makeLiteral(32);
-    SpirvLiteral *sign = context->makeLiteral(0);
-    OperandVec operands = { bits, sign };
-    SpirvType type(spv::OpTypeInt, operands);
+SpirvIntType *SpirvBuilder::makeU32Type() {
+    SpirvIntType type(32, false);
     return context->getOrInsertType(type);
 }
 
-SpirvType *SpirvBuilder::makeU64Type() {
-    SpirvLiteral *bits = context->makeLiteral(64);
-    SpirvLiteral *sign = context->makeLiteral(0);
-    OperandVec operands = { bits, sign };
-    SpirvType type(spv::OpTypeInt, operands);
+SpirvIntType *SpirvBuilder::makeU64Type() {
+    SpirvIntType type(64, false);
     return context->getOrInsertType(type);
 }
 
-SpirvType *SpirvBuilder::makeBoolType() {
-    SpirvType type(spv::OpTypeBool);
+SpirvBoolType *SpirvBuilder::makeBoolType() {
+    SpirvBoolType type;
     return context->getOrInsertType(type);
 }
 
-SpirvType *SpirvBuilder::makeStructType(OperandVec memberTypes) {
-    SpirvType type(spv::OpTypeStruct, memberTypes);
+SpirvStructType *SpirvBuilder::makeStructType(const llvm::ArrayRef<SpirvType *> memberTypes) {
+    SpirvStructType type(memberTypes);
     return context->getOrInsertType(type);
 }
 
-SpirvType *SpirvBuilder::makePointerType(spv::StorageClass storage, SpirvType *objectType) {
-    SpirvLiteral *storageWord = context->makeLiteral(storage);
-    OperandVec operands = { storageWord, objectType };
-    SpirvType type(spv::OpTypePointer, operands);
+SpirvPointerType *SpirvBuilder::makePointerType(spv::StorageClass storage, SpirvType *dataType) {
+    SpirvPointerType type(dataType, storage);
     return context->getOrInsertType(type);
 }
 
-SpirvInstruction *SpirvBuilder::makeVariable(SpirvType *objectType, spv::StorageClass storage, llvm::StringRef name = "") {
-    SpirvLiteral *storageWord = context->makeLiteral(storage);
-    SpirvType *resultType = makePointerType(storage, objectType);
-    OperandVec operands = { resultType, storageWord };
-    SpirvInstruction *rv = context->allocateInstruction(SpirvInstruction(spv::OpVariable, resultType, operands));
-
-    if ( !name.empty()) {
-        // TODO add decoration
-    }
-    return rv;
+SpirvVariable *SpirvBuilder::makeVariable(SpirvType *type, spv::StorageClass storage, llvm::StringRef name) {
+    SpirvPointerType *pointerType = makePointerType(storage, type);
+    SpirvVariable var(pointerType);
+    // TODO decorate with name (and handle name collision)
+    return context->allocateInstruction(var);
 }
 
 void SpirvBuilder::initVGpr(uint regno) {
@@ -87,7 +67,7 @@ void SpirvBuilder::initVGpr(uint regno) {
     llvm::SmallString<5> regName;
     regName += "v";
     regName += std::to_string(regno);
-    SpirvInstruction *variable = makeVariable(type, spv::StorageClass::StorageClassFunction, regName);
+    SpirvVariable *variable = makeVariable(type, spv::StorageClass::StorageClassFunction, regName);
     usedVgprs[regno] = variable;
 }
 
@@ -98,10 +78,10 @@ void SpirvBuilder::initSGpr(uint regno) {
     SpirvType *uniType = makeU32Type();
     llvm::SmallString<8> regName;
     regName = "s" + std::to_string(regno) + ".uni";
-    SpirvInstruction *uniVar = makeVariable(uniType, spv::StorageClass::StorageClassFunction, regName);    
+    SpirvVariable *uniVar = makeVariable(uniType, spv::StorageClass::StorageClassFunction, regName);    
     SpirvType *sccType = makeBoolType();
     regName = "s" + std::to_string(regno) + ".cc";
-    SpirvInstruction *scc = makeVariable(sccType, spv::StorageClass::StorageClassFunction, regName);
+    SpirvVariable *scc = makeVariable(sccType, spv::StorageClass::StorageClassFunction, regName);
     usedSGprs[regno] = {
         .uni = uniVar,
         .cc = scc
@@ -113,9 +93,9 @@ void SpirvBuilder::initVCC() {
         return;
     }
     SpirvType *uniType = makeU32Type();
-    SpirvInstruction *uniVar = makeVariable(uniType, spv::StorageClass::StorageClassFunction, "VCC.uni");
+    SpirvVariable *uniVar = makeVariable(uniType, spv::StorageClass::StorageClassFunction, "VCC.uni");
     SpirvType *sccType = makeBoolType();
-    SpirvInstruction *scc = makeVariable(sccType, spv::StorageClass::StorageClassFunction, "VCC.cc");
+    SpirvVariable *scc = makeVariable(sccType, spv::StorageClass::StorageClassFunction, "VCC.cc");
     VCC = {
         .uni = uniVar,
         .cc = scc
@@ -130,37 +110,23 @@ void SpirvBuilder::initSCC() {
     SCC = makeVariable(type, spv::StorageClass::StorageClassFunction, "SCC");
 }
 
-SpirvInstruction *SpirvBuilder::makeLoad(SpirvInstruction *variable, uint32_t memoryOperand = 0) {
-    OperandVec operands;
-    const SpirvType *pointerType = variable->getResultType();
-    // TODO get named operand convenience? OpVariable, object type -> idx 1
-    auto *resultType = dynamic_cast<const SpirvType *>(pointerType->getOperand(1));
-    operands = { variable };
-    if (memoryOperand) {
-        SpirvLiteral *memoryLit = context->makeLiteral(memoryOperand);
-        operands.push_back(memoryLit);
-    }
-    return context->allocateInstruction(SpirvInstruction(spv::OpLoad, predicated, operands, resultType));
+SpirvLoad *SpirvBuilder::makeLoad(SpirvInstruction *variable, uint32_t memoryOperand = 0) {
+    SpirvLoad load(variable, memoryOperand);
+    return context->allocateInstruction(load);
 }
 
-SpirvInstruction *SpirvBuilder::makeStore(SpirvInstruction *variable, SpirvInstruction *val, uint32_t memoryOperand = 0) {
-    OperandVec operands;
-    // TODO get named operand convenience? OpVariable, object type -> idx 1
-    operands = { variable, val };
-    if (memoryOperand) {
-        SpirvLiteral *memoryLit = context->makeLiteral(memoryOperand);
-        operands.push_back(memoryLit);
-    }
-    return context->allocateInstruction(SpirvInstruction(spv::OpStore, predicated, operands));
+SpirvStore *SpirvBuilder::makeStore(SpirvInstruction *variable, SpirvInstruction *val, uint memoryOperand = 0) {
+    SpirvStore store(variable, val, memoryOperand);
+    return context->allocateInstruction(store);
 }
 
-SpirvInstruction *SpirvBuilder::loadVGpr(uint regno) {
+SpirvLoad *SpirvBuilder::loadVGpr(uint regno) {
     initVGpr(regno);
     SpirvInstruction *variable = usedVgprs[regno];
     return makeLoad(variable);
 }
 
-SpirvInstruction *SpirvBuilder::storeVGpr(uint regno, SpirvInstruction *val) {
+SpirvStore *SpirvBuilder::storeVGpr(uint regno, SpirvInstruction *val) {
     initVGpr(regno);
     SpirvInstruction *variable = usedVgprs[regno];
     return makeStore(variable, val);
@@ -176,6 +142,7 @@ SpirvInstruction *SpirvBuilder::StoreVCC_CC(SpirvInstruction *val) {
     return makeStore(VCC.cc, val);
 }
 
-SpirvInstruction *SpirvBuilder::makeBitcast(SpirvType *type, SpirvInstruction *from) {
-    return context->allocateInstruction(SpirvInstruction(spv::OpBitcast, predicated, { from }));
+SpirvInstruction *SpirvBuilder::makeBitcast(SpirvType *to, SpirvInstruction *val) {
+    SpirvBitcast bitcast(predicated, to, val);
+    return context->allocateInstruction(bitcast);
 }

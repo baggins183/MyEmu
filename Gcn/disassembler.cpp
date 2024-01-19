@@ -1,3 +1,5 @@
+#include "SpirvContext.h"
+#include "SpirvBuilder.h"
 #include "llvm/ADT/StringRef.h"
 #include <cstdint>
 #include <cstdio>
@@ -263,7 +265,7 @@ int main(int argc, char **argv) {
     assert(argc > 0);
 
     fs::path binPath(argv[1]);
-    bool search = false;
+    //bool search = false;
 
     fs::path outBinPath;
     for (int i = 1; i < argc; i++) {
@@ -271,7 +273,7 @@ int main(int argc, char **argv) {
             assert(i + 1 < argc);
             outBinPath = argv[++i];
         } else if ( std::string(argv[i]) == "-s") { // search file for GCN. Dump to working directory
-            search = true;
+            //search = true;
         } else {
             binPath = argv[i];
         }
