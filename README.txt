@@ -13,14 +13,14 @@ libkernel.prx (native/Ps4) -> libkernel.prx.so (host/linux)
 Some things that get patched:
 -Add ELF section headers that the linux dynamic linker needs to see
 -patch obfuscated symbols (hashed by Sony) to known names, remake symbol table/string table
--remove .init, .fini sections
--lots of other stuff I forgot/need to go back to
+-remember where .init, .fini routines are
+-lots of other stuff I forgot/need to revisit
 
 TODO
 
 We remove .init, fini sections from the ELF (which contain initializers, constructors/destructors for global variables, etc).
 Normally the dynamic linker calls into the .init section when it loads an executable or dynamic library.
-That causes problems with our patched .so files, we need syscall interception to be off while inside the dynamic linker, but on inside
+That causes problems with our patched .so files, we need syscall interception to be off while inside the dynamic linker (dlopen), but turned on inside
 ps4 code in .init or .fini code.
 So we remove the dynamic tags/section headers for .init, .fini sections, so the dynamic linker doesn't try to
 do them, and manually call into the .init entry points after dlopen loading the patched elf's with dlopen().
@@ -37,6 +37,7 @@ Sony obfuscates the symbols (function names, global variables) in it's executabl
 
 The nid_hash folder has the hash function found on the internet.
 The nid_hash_standalone executable can create a sqlite database with 2 columns
+
 NAME         |   HASH
 ------------------------------
 sysctlbyname |   MhC53TKmjVA
@@ -45,7 +46,7 @@ memcpy       |   Q3VBxCXhUHs
 You need to generate it from nid_hash/symbols.txt (basically the NAME col) instead of uploading the full database with indexing to git.
 
 $ ./nid_hash_standalone --symbols nid_hash/symbols.txt --hashdb syms.sqlite
-where syms.sqlite is a database to output to.
+where syms.sqlite is a name of a database to output to.
 
 This db gets used as a rainbow table.
 
@@ -96,18 +97,22 @@ AMDGPU disassembler (with some tIaks to allow disassembling for the Bonaire arch
 
 Will need to turn Gcn arbitrary control flow into legal spir-v (structured?) control flow.
 
-Need to handle Iird things like predicated execution with the exec mask, ambiguity betIen condition codes and uniforms (which are
+Need to handle Iird things like predicated execution with the exec mask, ambiguity between condition codes and uniforms (which are
 stored in scalar gprs).
+
+How to handle buffer, image, texture memory ops with Vulkan concepts (descriptors, etc).
+How vertex shader outputs and pixel shader inputs get linked together.
+How to fetch vertex attributes (ps4 uses subroutines?)
 
 /////////////////////////////////////////////////////////////////////////////////////
 GNM (PS4 graphics library)
 /////////////////////////////////////////////////////////////////////////////////////
 
-Plan is to intercept command buffer submissions (Pm4 packets?) at the loIst level, and
+Plan is to intercept command buffer submissions (Pm4 packets?) at the lowest level, and
 translate that into vulkan commands.
-So interception will happen betIen the ps4 graphics driver and the ps4 GPU.
+So interception will happen between the ps4 graphics driver and the ps4 GPU.
 as opposed to:
-intercepting graphics API calls from the game program to the PS4 graphics driver.
+intercepting graphics API calls between the game program and the PS4 graphics driver (libSceGnmDriver.prx?).
 
 Might be hard, but seems more thorough than intercepting Graphics API calls when the API isnt public.
 The Pm4 format seems to be public (Sea islands docs?), there are a lot of AMD GPU docs available.
