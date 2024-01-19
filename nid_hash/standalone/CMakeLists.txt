@@ -1,0 +1,2 @@
+add_executable(nid_hash_standalone standalone.cpp)
+target_link_libraries(nid_hash_standalone nid_hash sqlite3)
