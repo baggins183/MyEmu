@@ -9,8 +9,6 @@
 #include <pthread.h>
 #include <set>
 #include <sys/mman.h>
-#include <unistd.h>
-#include <asm/unistd_64.h>
 #include <stdio.h>
 #include "syscall_handler.h"
 #include "orbis/orbis_syscalls.h"
@@ -30,10 +28,10 @@
 #include "orbis/sce_file.h"
 
 #define DIRECT_SYSCALL_MAP(OP) \
-    OP(SYS_getpid, __NR_getpid, ZERO_ARGS) \
-    OP(SYS_read, __NR_read, THREE_ARGS) \
-    OP(SYS_write, __NR_write, THREE_ARGS) \
-    OP(SYS_clock_gettime, __NR_clock_gettime, TWO_ARGS)
+    OP(OrbisSyscallNr::ORB_SYS_getpid, __NR_getpid, ZERO_ARGS) \
+    OP(OrbisSyscallNr::ORB_SYS_read, __NR_read, THREE_ARGS) \
+    OP(OrbisSyscallNr::ORB_SYS_write, __NR_write, THREE_ARGS) \
+    OP(OrbisSyscallNr::ORB_SYS_clock_gettime, __NR_clock_gettime, TWO_ARGS)
 
 //"system-call is done via the syscall instruction. The kernel destroys
 // registers %rcx and %r11." - https://refspecs.linuxfoundation.org/elf/x86_64-abi-0.99.pdf
@@ -736,7 +734,7 @@ static greg_t handle_namedobj_create(mcontext_t *mcontext) {
 
 
 static std::set<OrbisSyscallNr> green_syscalls = {
-    //SYS_write,
+    //OrbisSyscallNr::ORB_SYS_write,
 
 };
 
@@ -744,46 +742,46 @@ static void logSyscall(OrbisSyscallNr ps4_syscall_nr) {
     std::string bsdName = to_string((OrbisSyscallNr) ps4_syscall_nr);
 
     switch (ps4_syscall_nr) {
-        case SYS_read:
-        case SYS_open:
-        case SYS_close:
-        case SYS_getpid:
-        case SYS_ioctl:
-        case SYS_rtprio_thread:
-        case SYS_thr_self:
-        case SYS_mmap:
-        case SYS_clock_gettime:
+        case OrbisSyscallNr::ORB_SYS_read:
+        case OrbisSyscallNr::ORB_SYS_open:
+        case OrbisSyscallNr::ORB_SYS_close:
+        case OrbisSyscallNr::ORB_SYS_getpid:
+        case OrbisSyscallNr::ORB_SYS_ioctl:
+        case OrbisSyscallNr::ORB_SYS_rtprio_thread:
+        case OrbisSyscallNr::ORB_SYS_thr_self:
+        case OrbisSyscallNr::ORB_SYS_mmap:
+        case OrbisSyscallNr::ORB_SYS_clock_gettime:
         {
             // green
             printf(GRN "freebsd_syscall_handler: handling %s%s\n", bsdName.c_str(), RESET);            
             break;
         }
-        case SYS_mname:
-	    case SYS_osem_create:
-	    case SYS_osem_delete:
-        case SYS___sysctl:
-        case SYS_dynlib_get_proc_param:
-        case SYS_namedobj_create:
+        case OrbisSyscallNr::ORB_SYS_mname:
+	    case OrbisSyscallNr::ORB_SYS_osem_create:
+	    case OrbisSyscallNr::ORB_SYS_osem_delete:
+        case OrbisSyscallNr::ORB_SYS___sysctl:
+        case OrbisSyscallNr::ORB_SYS_dynlib_get_proc_param:
+        case OrbisSyscallNr::ORB_SYS_namedobj_create:
         {
             printf(YEL "freebsd_syscall_handler: handling %s%s\n", bsdName.c_str(), RESET);
             break;
         }
-        case SYS_netcontrol:
-        case SYS_evf_create:
-	    case SYS_dmem_container:
-	    case SYS_get_authinfo:
-	    case SYS_mdbg_service:
-        case SYS_randomized_path:
-	    case SYS_budget_get_ptype:
-	    case SYS_get_proc_type_info:
-        case SYS_regmgr_call:
-        case SYS_osem_open:
-        case SYS_osem_close:
-        case SYS_osem_wait:
-        case SYS_osem_trywait:
-        case SYS_osem_post:
-        case SYS_osem_cancel:
-        case SYS_sysarch:
+        case OrbisSyscallNr::ORB_SYS_netcontrol:
+        case OrbisSyscallNr::ORB_SYS_evf_create:
+	    case OrbisSyscallNr::ORB_SYS_dmem_container:
+	    case OrbisSyscallNr::ORB_SYS_get_authinfo:
+	    case OrbisSyscallNr::ORB_SYS_mdbg_service:
+        case OrbisSyscallNr::ORB_SYS_randomized_path:
+	    case OrbisSyscallNr::ORB_SYS_budget_get_ptype:
+	    case OrbisSyscallNr::ORB_SYS_get_proc_type_info:
+        case OrbisSyscallNr::ORB_SYS_regmgr_call:
+        case OrbisSyscallNr::ORB_SYS_osem_open:
+        case OrbisSyscallNr::ORB_SYS_osem_close:
+        case OrbisSyscallNr::ORB_SYS_osem_wait:
+        case OrbisSyscallNr::ORB_SYS_osem_trywait:
+        case OrbisSyscallNr::ORB_SYS_osem_post:
+        case OrbisSyscallNr::ORB_SYS_osem_cancel:
+        case OrbisSyscallNr::ORB_SYS_sysarch:
         {
             // red
             fprintf(stderr, RED "freebsd_syscall_handler: handling %s\n" RESET, bsdName.c_str());
@@ -837,28 +835,28 @@ DIRECT_SYSCALL_MAP(DIRECT_SYSCALL_CASE)
 
 #undef DIRECT_SYSCALL_CASE
 
-        case SYS_open:
+        case OrbisSyscallNr::ORB_SYS_open:
         {
             rv = handle_open(mcontext);
             break;
         }
 
-        case SYS_close:
+        case OrbisSyscallNr::ORB_SYS_close:
         {
             rv = handle_close(mcontext);
             break;
         }
 
-        case SYS_ioctl:
+        case OrbisSyscallNr::ORB_SYS_ioctl:
         {
             rv = handle_ioctl(mcontext);
             break;
         }
 
-        case SYS_netbsd_msync:
+        case OrbisSyscallNr::ORB_SYS_netbsd_msync:
         case 277:
         {
-            bsdName = to_string(SYS_netbsd_msync);
+            bsdName = to_string(OrbisSyscallNr::ORB_SYS_netbsd_msync);
             rv = -EINVAL;
         }
 
@@ -872,7 +870,7 @@ DIRECT_SYSCALL_MAP(DIRECT_SYSCALL_CASE)
             break;
         }
 
-        case SYS_shmctl:
+        case OrbisSyscallNr::ORB_SYS_shmctl:
         case 169:
         case 170:
         case 171:
@@ -890,18 +888,18 @@ DIRECT_SYSCALL_MAP(DIRECT_SYSCALL_CASE)
         case 511:
         case 512:
         {
-            bsdName = to_string((OrbisSyscallNr) SYS_shmctl);
+            bsdName = to_string((OrbisSyscallNr) OrbisSyscallNr::ORB_SYS_shmctl);
             rv = -EINVAL;
             break;
         }
 
-        case SYS___sysctl:
+        case OrbisSyscallNr::ORB_SYS___sysctl:
         {
             rv = handle_sysctl(mcontext);
             break;
         }
 
-        case SYS_lkmnosys:
+        case OrbisSyscallNr::ORB_SYS_lkmnosys:
         case 211:
         case 212:
         case 213:
@@ -912,123 +910,123 @@ DIRECT_SYSCALL_MAP(DIRECT_SYSCALL_CASE)
         case 218:
         case 219:
         {
-            bsdName = to_string(SYS_lkmnosys);
-            // SYS_lkmnosys
+            bsdName = to_string(OrbisSyscallNr::ORB_SYS_lkmnosys);
+            // OrbisSyscallNr::ORB_SYS_lkmnosys
             rv = -EINVAL;
             break;
         }
 
-        case SYS_netbsd_lchown:
+        case OrbisSyscallNr::ORB_SYS_netbsd_lchown:
         case 275:
         {
-            bsdName = to_string(SYS_netbsd_lchown);
+            bsdName = to_string(OrbisSyscallNr::ORB_SYS_netbsd_lchown);
             rv = -EINVAL;
             break;
         }
 
-        case SYS_rtprio_thread:
+        case OrbisSyscallNr::ORB_SYS_rtprio_thread:
         {
             rv = handle_rtprio_thread(mcontext);
             break;
         }
-        case SYS_thr_self:
+        case OrbisSyscallNr::ORB_SYS_thr_self:
         {
             rv = gettid();
             break;
         }
-        case SYS_mmap:
+        case OrbisSyscallNr::ORB_SYS_mmap:
         {
             rv = handle_mmap(mcontext);
             break;
         }
-        case SYS_osem_create:
+        case OrbisSyscallNr::ORB_SYS_osem_create:
         {
             rv = handle_osem_create(mcontext);            
             break;
         }
-        case SYS_osem_delete:
+        case OrbisSyscallNr::ORB_SYS_osem_delete:
         {
             rv = handle_osem_delete(mcontext);
             break;
         }
-        case SYS_osem_open:
+        case OrbisSyscallNr::ORB_SYS_osem_open:
         {
             rv = handle_osem_open(mcontext);
             break;
         }
-        case SYS_osem_close:
+        case OrbisSyscallNr::ORB_SYS_osem_close:
         {
             rv = handle_osem_close(mcontext);
             break;
         }
-        case SYS_osem_wait:
+        case OrbisSyscallNr::ORB_SYS_osem_wait:
         {
             rv = handle_osem_wait(mcontext);
             break;
         }
-        case SYS_osem_trywait:
+        case OrbisSyscallNr::ORB_SYS_osem_trywait:
         {
             rv = handle_osem_trywait(mcontext);
             break;
         }
-        case SYS_osem_post:
+        case OrbisSyscallNr::ORB_SYS_osem_post:
         {
             rv = handle_osem_post(mcontext);
             break;
         }
-        case SYS_osem_cancel:
+        case OrbisSyscallNr::ORB_SYS_osem_cancel:
         {
             rv = handle_osem_cancel(mcontext);
             break;
         }
-        case SYS_namedobj_create:
+        case OrbisSyscallNr::ORB_SYS_namedobj_create:
         {
             rv = handle_namedobj_create(mcontext);
             break;
         }      
-        case SYS_dmem_container:
+        case OrbisSyscallNr::ORB_SYS_dmem_container:
             rv = -EINVAL;
             break;
-        case SYS_get_authinfo:
+        case OrbisSyscallNr::ORB_SYS_get_authinfo:
             // get_authinfo
             // ScePthread: Fatal error 'Can't allocate initial thread' (errno = 22)            
             rv = handle_get_authinfo(mcontext);
             break;
-        case SYS_mname:
+        case OrbisSyscallNr::ORB_SYS_mname:
         {
             rv = handle_mname(mcontext);
             break;
         }
-        case SYS_dynlib_get_proc_param:
+        case OrbisSyscallNr::ORB_SYS_dynlib_get_proc_param:
         {
             rv = handle_dynlib_get_proc_param(mcontext);
             break;
         }
-        case SYS_mdbg_service:
+        case OrbisSyscallNr::ORB_SYS_mdbg_service:
             // mdbg_service
             rv = -EINVAL;
             break;
-        case SYS_randomized_path:
+        case OrbisSyscallNr::ORB_SYS_randomized_path:
             // ... syscall handler
-            // libkernel : _ps4____sys_randomized_path
+            // libkernel : _ps4____OrbisSyscallNr::ORB_SYS_randomized_path
             // libkernel : _ps4__sceKernelGetFsSandboxRandomWord
             // libSceDiscMap init
             //
             // prints "[DiskMap BitmapInfo] get path failed"
             rv = -EINVAL;
             break;
-        case SYS_budget_get_ptype:
+        case OrbisSyscallNr::ORB_SYS_budget_get_ptype:
             rv = -EINVAL;
             break;
-        case SYS_get_proc_type_info:
+        case OrbisSyscallNr::ORB_SYS_get_proc_type_info:
             // nG-FYqFutUo
             rv = -EINVAL;
             break;
 
         default:
         {
-            std::string bsdName = to_string((OrbisSyscallNr) ps4_syscall_nr);
-            fprintf(stderr, RED "Unhandled syscall : %lli (%s)\n" RESET, ps4_syscall_nr, bsdName.c_str());
+            std::string ps4Name = to_string((OrbisSyscallNr) ps4_syscall_nr);
+            fprintf(stderr, RED "Unhandled syscall : %lli (%s)\n" RESET, ps4_syscall_nr, ps4Name.c_str());
             rv = -EINVAL;
             break;
         }

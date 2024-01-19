@@ -8,7 +8,7 @@ we patch executables/dynamic libraries, dumped from the ps4, into .so files that
 with dlopen().
 
 Naming convention goes like
-libkernel.prx (native/Ps4) -> libkernel.prx.so (host/linux)
+libkernel.prx (Ps4) -> libkernel.prx.so (host/linux)
 
 Some things that get patched:
 -Add ELF section headers that the linux dynamic linker needs to see
@@ -61,17 +61,17 @@ and get precedence when the dynamic linker is trying to resolve a library call (
 
 For now, "_ps4__" gets prepended to all the patched symbols (if the original name of the hash is known), so youd need to
 define "_ps4__memcpy".
-Then when native ps4 code tries to call _ps4__memcpy outside of its own unit (executable or dyn lib),
+Then when ps4 code tries to call _ps4__memcpy outside of its own unit (executable or dyn lib),
 the host (linux) dynamic linker will resolve the symbol to our own implementation in the compatibility layer.
 
 /////////////////////////////////////////////////////////////////////////////////////
 Intercepting syscalls
 /////////////////////////////////////////////////////////////////////////////////////
 Currently have working syscall handlers, using "syscall user dispatch" (https://docs.kernel.org/admin-guide/syscall-user-dispatch.html)
-This registers a handler for when native ps4 code executes syscall instruction, which the ps4 kernel is meant to handle.
+This registers a handler for when ps4 code executes syscall instruction, which the ps4 kernel is meant to handle.
 Then we basically enter a switch statement where we can have our own handler from each
 ps4 syscall number (see include/orbis/orbis_syscalls.h for the list of ps4 syscalls, which is like FreeBSD).
-Syscall user dispatch needs to be toggled on/off when we "enter" or "leave" native ps4 code. When turned "off",
+Syscall user dispatch needs to be toggled on/off when we "enter" or "leave" ps4 code. When turned "off",
 syscalls will pass directly to the linux kernel, which is what we want when making syscalls from our own code.
 
 Alternatively, we could intercept library calls to the syscall "wrapper" functions,

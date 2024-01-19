@@ -224,13 +224,6 @@ static void visitToBuildTopoOrder(const std::string &lib, const std::map<std::st
 // The sce libs can have cyclic dependencies, so return an order s.t. libA comes before libB if libA is a transitive dependency of libB but
 // libB is not a transitive dependency of libA
 static std::vector<std::string> findTopologicalLibOrder(const std::map<std::string, std::set<std::string>> &dependsOn) {
-}
-
-static std::vector<std::string> getLibInitOrder(const std::map<std::string, std::set<std::string>> &dependsOn) {
-
-#if 1
-
-#else
     // Do topological sort
     // Only direct dependencies, not transitive
     std::map<std::string, std::set<std::string>> dependsOnOneWay;
@@ -256,8 +249,6 @@ static std::vector<std::string> getLibInitOrder(const std::map<std::string, std:
 
     std::reverse(sorted.begin(), sorted.end());
     return sorted;
-#endif
-
 }
 
 static bool create_dir_structure(fs::path &chroot_path) {
@@ -652,8 +643,7 @@ int main(int argc, char **argv) {
 
     Ps4EntryWrapperArgs args;
     args.initFiniInfos = initFiniInfos;
-    //args.initLibOrder = topologicalLibOrder;
-    args.initLibOrder;
+    args.initLibOrder = topologicalLibOrder;
     createPs4EntryThread(args);
 
     // Shutdown
