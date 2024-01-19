@@ -3,8 +3,6 @@
 find_package(LLVM PATHS "$ENV{HOME}/programming/llvm-project/build/install/lib/cmake/llvm/" NO_DEFAULT_PATH REQUIRED CONFIG)
 include_directories("${LLVM_INCLUDE_DIR}")
 
-include_directories("${SPIRV-Headers_SOURCE_DIR}/include/spirv/unified1")
-
 FILE(GLOB SOURCES *.cpp *.c)
 add_executable(gcn-dis ${SOURCES})
 target_link_libraries(gcn-dis LLVM)

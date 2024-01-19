@@ -3,7 +3,7 @@
 #include "SpirvType.h"
 #include "SpirvInstruction.h"
 #include "SpirvContext.h"
-#include "spirv.hpp"
+#include "spirv/spirv.hpp"
 #include "llvm/ADT/StringRef.h"
 
 struct SGprVars {

@@ -2,7 +2,7 @@
 
 #include "SpirvCommon.h"
 #include "SpirvType.h"
-#include "spirv.hpp"
+#include "spirv/spirv.hpp"
 #include "llvm/Support/Allocator.h"
 
 class SpirvInstruction;

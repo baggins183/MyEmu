@@ -2,7 +2,7 @@
 #include "SpirvCommon.h"
 #include "SpirvInstruction.h"
 #include "SpirvType.h"
-#include "spirv.hpp"
+#include "spirv/spirv.hpp"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"

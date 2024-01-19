@@ -1,7 +1,7 @@
 #pragma once
 
 #include "SpirvCommon.h"
-#include "spirv.hpp"
+#include "spirv/spirv.hpp"
 #include "llvm/ADT/ArrayRef.h"
 
 class SpirvEmitter;

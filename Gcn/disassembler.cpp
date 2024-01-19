@@ -18,7 +18,7 @@ namespace fs = std::filesystem;
 #include <arpa/inet.h>
 #include <llvm/ADT/ArrayRef.h>
 
-#include "spirv.hpp"
+#include "spirv/spirv.hpp"
 
 // Some taken from llvm-mc
 

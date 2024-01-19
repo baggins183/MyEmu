@@ -1,5 +1,5 @@
 #include "SpirvContext.h"
-#include "spirv.hpp"
+#include "spirv/spirv.hpp"
 
 void SpirvContext::setMemoryModel(spv::MemoryModel memModel) {
     switch(memModel) {
