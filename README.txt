@@ -1,31 +1,58 @@
 Just notes for now
 
 /////////////////////////////////////////////////////////////////////////////////////
-Generate elf symbol rainbow table:
+Patching .prx, .sprx dynamic libraries, main executables
 /////////////////////////////////////////////////////////////////////////////////////
 
-$ ./nid_hash_standalone --symbols nid_hash/symbols.txt --hashdb syms.sqlite
-syms.sqlite is a database to output to.
+we patch executables/dynamic libraries, dumped from the ps4, into .so files that can be loaded by the (linux) host
+with dlopen().
 
-Maps symbol name -> hash found in .prx/.sprx symbol tables
-example:
-NAME         |   HASH
-------------------------------
-sysctlbyname |   MhC53TKmjVA
-memcpy       |   Q3VBxCXhUHs
+Naming convention goes like
+libkernel.prx (native/Ps4) -> libkernel.prx.so (host/linux)
 
+Some things that get patched:
+-Add ELF section headers that the linux dynamic linker needs to see
+-patch obfuscated symbols (hashed by Sony) to known names, remake symbol table/string table
+-remove .init, .fini sections
+-lots of other stuff I forgot/need to go back to
+
+TODO
+
+We remove .init, fini sections from the ELF (which contain initializers, constructors/destructors for global variables, etc).
+Normally the dynamic linker calls into the .init section when it loads an executable or dynamic library.
+That causes problems with our patched .so files, we need syscall interception to be off while inside the dynamic linker, but on inside
+ps4 code in .init or .fini code.
+So we remove the dynamic tags/section headers for .init, .fini sections, so the dynamic linker doesn't try to
+do them, and manually call into the .init entry points after dlopen loading the patched elf's with dlopen().
+we store info about each patched ELF, including the address of .init/.fini entry points in a json file, e.g. libkernel.prx.so.json.
+we need to call the init routines in order of library dependecies. Havent really bothered yet, we should just set up a static
+order for all the system libraries (libkernel.prx.so, libSceLibcInternal.prx.so, etc) and figure out a specific game's dependencies
+on the fly.
 
 /////////////////////////////////////////////////////////////////////////////////////
 ELF symbols / intercepting library calls
 /////////////////////////////////////////////////////////////////////////////////////
 
-Sony obfuscates the symbols (function names, global variables) by using a custom hash function.
+Sony obfuscates the symbols (function names, global variables) in it's executables/dynamic libraries by using a custom hash function.
 
-This Emu patches the .prx/.sprx dynamic libraries (libraries dumped from the ps4) to plain .so (shared object) files 
-that can be loaded on linux with dlopen().
-While we patch, if we see "Q3VBxCXhUHs" in a symbol table, we know that's memcpy so we put 'memcpy' in
+The nid_hash folder has the hash function found on the internet.
+The nid_hash_standalone executable can create a sqlite database with 2 columns
+NAME         |   HASH
+------------------------------
+sysctlbyname |   MhC53TKmjVA
+memcpy       |   Q3VBxCXhUHs
+
+You need to generate it from nid_hash/symbols.txt (basically the NAME col) instead of uploading the full database with indexing to git.
+
+$ ./nid_hash_standalone --symbols nid_hash/symbols.txt --hashdb syms.sqlite
+where syms.sqlite is a database to output to.
+
+This db gets used as a rainbow table.
+
+While we patch Ps4 ELF's, if we see "Q3VBxCXhUHs" in a symbol table, we know that's memcpy so we put 'memcpy' in
 the patched elf instead.
-That make debugging easier.
+That make debugging way easier. Since we patch the symbol tables and load it's library with dlopen(), GDB/LLDB can show callstacks with the readable names instead
+of the garbage hashed names.
 
 To intercept a library function call,
 implement it in one of the dynamic libraries in the ps4lib_overloads folder, which will be preloaded by the emu program
@@ -65,20 +92,20 @@ Compiler
 Plan is to translate Gcn bytecode to spir-v.
 Gcn seems to all be public.
 Already supported in LLVM: can disassemble gcn code found in games using
-AMDGPU disassembler (with some tweaks to allow disassembling for the Bonaire arch, see Gcn/llvm_patch.diff).
+AMDGPU disassembler (with some tIaks to allow disassembling for the Bonaire arch, see Gcn/llvm_patch.diff).
 
 Will need to turn Gcn arbitrary control flow into legal spir-v (structured?) control flow.
 
-Need to handle weird things like predicated execution with the exec mask, ambiguity between condition codes and uniforms (which are
+Need to handle Iird things like predicated execution with the exec mask, ambiguity betIen condition codes and uniforms (which are
 stored in scalar gprs).
 
 /////////////////////////////////////////////////////////////////////////////////////
 GNM (PS4 graphics library)
 /////////////////////////////////////////////////////////////////////////////////////
 
-Plan is to intercept command buffer submissions (Pm4 packets?) at the lowest level, and
+Plan is to intercept command buffer submissions (Pm4 packets?) at the loIst level, and
 translate that into vulkan commands.
-So interception will happen between the ps4 graphics driver and the ps4 GPU.
+So interception will happen betIen the ps4 graphics driver and the ps4 GPU.
 as opposed to:
 intercepting graphics API calls from the game program to the PS4 graphics driver.
 
@@ -86,9 +113,23 @@ Might be hard, but seems more thorough than intercepting Graphics API calls when
 The Pm4 format seems to be public (Sea islands docs?), there are a lot of AMD GPU docs available.
 
 /////////////////////////////////////////////////////////////////////////////////////
+Thread local storage (TLS)
+/////////////////////////////////////////////////////////////////////////////////////
 
+TODO, been a year since looking at this, need to figure out how ps4 TLS implementation is different than
+linux/bsd.
+Will probably be hard
+
+/////////////////////////////////////////////////////////////////////////////////////
 TODO
+/////////////////////////////////////////////////////////////////////////////////////
+
+Say where to dump game files to, command line options, environemnt variables.
+
 The names like ps4lib_overloads, system_compat suck right now. Preloading the overload libraries is also wonky and should be
 better
 
 Stuff in general is messy, no effort to clean it up yet
+
+Add helpful links everywhere
+(AMD docs, ELF format/dynamic linking)
