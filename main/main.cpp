@@ -440,7 +440,7 @@ int main(int argc, char **argv) {
     }
 
     std::error_code ec;
-    fs::create_directory(CmdArgs.patchedElfDir, ".", ec);
+    fs::create_directories(CmdArgs.patchedElfDir, ec);
     if (ec) {
         std::string m = ec.message();
         fprintf(stderr, "Failed to create directory %s: %s\n", CmdArgs.patchedElfDir.c_str(), m.c_str());

@@ -1,5 +1,13 @@
+#include "GcnDialect/GcnDialect.h"
 #include "SpirvContext.h"
 #include "SpirvBuilder.h"
+#include "mlir/Dialect/SPIRV/IR/SPIRVTypes.h"
+#include "mlir/IR/Builders.h"
+#include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/Dialect.h"
+#include "mlir/IR/Location.h"
+#include "mlir/IR/MLIRContext.h"
 #include "llvm/ADT/StringRef.h"
 #include <cstdint>
 #include <cstdio>
@@ -121,15 +129,13 @@ void print_bininfo(const ShaderBinaryInfo &bininfo) {
 #include "llvm/MC/MCTargetOptionsCommandFlags.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/CommandLine.h"
-#include "llvm/Support/Compression.h"
-#include "llvm/Support/FileUtilities.h"
-#include "llvm/Support/FormattedStream.h"
 #include "llvm/Support/InitLLVM.h"
-#include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/TargetSelect.h"
-#include "llvm/Support/ToolOutputFile.h"
-#include "llvm/Support/WithColor.h"
+
+#include "mlir/Dialect/SPIRV/IR/SPIRVDialect.h"
+#include "mlir/Dialect/SPIRV/IR/SPIRVOps.h"
+#include "mlir/IR/ImplicitLocOpBuilder.h"
 
 //#include "llvm/lib/Target/AMDGPU/Disassembler/AMDGPUDisassembler.h"
 #include "llvm/MC/MCDisassembler/MCDisassembler.h"
@@ -232,6 +238,23 @@ int llvm_mc_main(int argc, char ** argv, const std::vector<unsigned char> &gcnBy
 
     ArrayRef byteView(gcnBytecode.data(), gcnBytecode.size());
 
+    mlir::MLIRContext mlirContext;
+    mlirContext.getOrLoadDialect<mlir::gcn::GcnDialect>();
+    mlirContext.getOrLoadDialect<mlir::spirv::SPIRVDialect>();
+
+    mlir::ImplicitLocOpBuilder builder(mlir::UnknownLoc::get(&mlirContext), &mlirContext);
+
+    //mlir::spirv::ConstantOp::getOne(mlir::spirv::ScalarType:, loc, builder);
+    //auto floatTy = mlir::Float32Type::get(&mlirContext);
+    auto floatTy = builder.getF32Type();
+    auto boolTy = builder.getIntegerType(1);
+
+    //builder.create<mlir::spirv::ConstantOp>(5);
+    mlir::spirv::ConstantOp::getZero(floatTy, mlir::UnknownLoc::get(&mlirContext), builder);
+    auto floatConst = builder.create<mlir::spirv::ConstantOp>(floatTy, builder.getF32FloatAttr(5.0f));
+    auto boolConst = builder.create<mlir::spirv::ConstantOp>(boolTy, builder.getBoolAttr(true));
+
+    //builder.create<mlir::spirv::BitcastOp>();
 
     llvm::outs() << "\n";
     std::vector<MCInst> machineCode;
@@ -250,7 +273,15 @@ int llvm_mc_main(int argc, char ** argv, const std::vector<unsigned char> &gcnBy
         IP->printInst(&MI, 0, "", *STI, llvm::outs());
         llvm::outs() << "\n";
 
+        switch (MI.getOpcode()) {
+            case AMDGPU::S_MOV_B32_gfx6_gfx7:
+                break;
+            default:
+                break;
+        }
+
         machineCode.push_back(std::move(MI));
+
         addr += size;
     }
 

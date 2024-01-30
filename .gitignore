@@ -13,3 +13,4 @@ elfdump/
 test.log
 *.sqlite
 .vscode/
+.clangd
