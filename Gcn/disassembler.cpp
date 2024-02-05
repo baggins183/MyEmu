@@ -1,13 +1,17 @@
 #include "GcnDialect/GcnDialect.h"
-#include "SpirvContext.h"
-#include "SpirvBuilder.h"
+#include "mlir/Dialect/SPIRV/IR/SPIRVAttributes.h"
+#include "mlir/Dialect/SPIRV/IR/SPIRVEnums.h"
 #include "mlir/Dialect/SPIRV/IR/SPIRVTypes.h"
+#include "mlir/IR/Attributes.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Dialect.h"
 #include "mlir/IR/Location.h"
 #include "mlir/IR/MLIRContext.h"
+#include "mlir/IR/Visitors.h"
+#include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringRef.h"
 #include <cstdint>
 #include <cstdio>
@@ -25,8 +29,6 @@ namespace fs = std::filesystem;
 #include <byteswap.h>
 #include <arpa/inet.h>
 #include <llvm/ADT/ArrayRef.h>
-
-#include "spirv/spirv.hpp"
 
 // Some taken from llvm-mc
 
@@ -134,56 +136,407 @@ void print_bininfo(const ShaderBinaryInfo &bininfo) {
 #include "llvm/Support/TargetSelect.h"
 
 #include "mlir/Dialect/SPIRV/IR/SPIRVDialect.h"
+#include "mlir/Target/SPIRV/Serialization.h"
 #include "mlir/Dialect/SPIRV/IR/SPIRVOps.h"
 #include "mlir/IR/ImplicitLocOpBuilder.h"
 
 //#include "llvm/lib/Target/AMDGPU/Disassembler/AMDGPUDisassembler.h"
 #include "llvm/MC/MCDisassembler/MCDisassembler.h"
 
-#define GET_INSTRINFO_ENUM 1
-#include "AMDGPUGenInstrInfo.inc"
-#undef GET_INSTRINFO_ENUM
+
+#include "AMDGPUGenInstrInfo_INSTRINFO.inc"
+#include "AMDGPUGenRegisterInfo_REGINFO.inc"
 #include "SIDefines.h"
 
 
 using namespace llvm;
+using namespace mlir::spirv;
 
-#include "Gcn2Spirv.h"
+bool isSgpr(uint regno) {
+    return regno >= AMDGPU::SGPR0 && regno <= AMDGPU::SGPR105;
+}
 
-bool convertGcnMachineCodeToSpirv(const std::vector<MCInst> &machineCode, std::vector<uint8_t> spirvModule, MCInstPrinter *IP, const MCRegisterInfo *MRI) {
-    std::unique_ptr<SpirvContext> Ctx = std::make_unique<SpirvContext>();
-    SpirvBuilder Builder(Ctx.get());
+bool isVgpr(uint regno) {
+    return regno >= AMDGPU::VGPR0 && regno <= AMDGPU::VGPR255;
+}
 
-    Ctx->setAddressingModel(spv::AddressingModel::AddressingModelLogical);
-    Ctx->setMemoryModel(spv::MemoryModel::MemoryModelVulkan);
+inline uint sgprOffset(uint regno) {
+    assert(isSgpr(regno));
+    return regno - AMDGPU::SGPR0;
+}
 
-    for (const MCInst &MI : machineCode) {
-        //uint op = MI.getOpcode();
-        switch (MI.getOpcode()) {
-            case AMDGPU::S_MOV_B32_gfx6_gfx7:
-                break;
-            case AMDGPU::V_MUL_F32_e32_gfx6_gfx7:
-            {
-//                printf("V_MUL_F32: %d operands\n", MI.getNumOperands());
-//                for (uint i = 0; i < MI.getNumOperands(); i++) {
-//                    uint regNo = MI.getOperand(i).getReg();
-//                    const MCRegisterDesc &regDesc = MRI->get(regNo);
-//                    outs() << MRI->getName(regNo) << "\n";
-//                }
+inline uint vgprOffset(uint regno) {
+    assert(isVgpr(regno));
+    return regno - AMDGPU::VGPR0;
+}
 
-                
-                break;
-            }
-            default:
-                break;
+enum GcnRegType {
+    SGpr,
+    VGpr,
+    INVALID
+};
 
+GcnRegType regnoToType(uint regno) {
+    if (isSgpr(regno)) {
+        return GcnRegType::SGpr;
+    } else if (isVgpr(regno)) {
+        return GcnRegType::VGpr;
+    }
+    return GcnRegType::INVALID;
+}
+
+typedef llvm::SmallVector<uint32_t, 0> SpirvBytecodeVector;
+
+class SpirvConvertResult {
+public:
+    enum ConvertStatus {
+        success,
+        fail,
+        empty,
+    };
+
+    operator bool() { return status != ConvertStatus::success; }
+
+    SpirvConvertResult(SpirvBytecodeVector &&spirvModule, ConvertStatus status):
+        module(std::move(spirvModule)), status(status) 
+        {}
+
+     SpirvBytecodeVector takeSpirvModule() {
+        assert(status == success);
+        return std::move(module);
+    }
+
+private:
+    SpirvBytecodeVector module;
+    ConvertStatus status;
+};
+
+class GcnToSpirvConverter {
+public:
+    GcnToSpirvConverter(const std::vector<MCInst> &machineCode, ExecutionModel shaderType, const MCSubtargetInfo *STI, MCInstPrinter *IP):
+        mlirContext(), 
+        builder(mlir::UnknownLoc::get(&mlirContext), &mlirContext),
+        shaderType(shaderType),
+        machineCode(machineCode),
+        status(SpirvConvertResult::empty),
+        mainEntryBlock(nullptr),
+        moduleOp(nullptr),
+        STI(STI),
+        IP(IP)
+    {
+        mlirContext.getOrLoadDialect<mlir::gcn::GcnDialect>();
+        mlirContext.getOrLoadDialect<mlir::spirv::SPIRVDialect>();
+    }
+
+    SpirvConvertResult convert();
+
+private:
+    bool convertGcnOp(const MCInst &MI);
+    bool buildSpirvDialect();
+    bool finalizeModule();
+    bool generateSpirvBytecode();
+
+    VariableOp initVgpr(uint vgprno) {
+        mlir::ImplicitLocOpBuilder initBuilder(builder);
+        initBuilder.setInsertionPointToStart(mainEntryBlock);
+        auto it = usedVgprs.find(vgprno);
+        if (it == usedVgprs.end()) {
+            mlir::IntegerType int32Ty = initBuilder.getI32Type();
+            auto intPtrTy = PointerType::get(int32Ty, StorageClass::Function);
+            auto initializer = initBuilder.create<ConstantOp>(int32Ty, initBuilder.getI32IntegerAttr(0));
+            auto var = initBuilder.create<VariableOp>(intPtrTy, StorageClassAttr::get(&mlirContext, StorageClass::Function), initializer);
+#if defined(_DEBUG)
+            llvm::SmallString<8> name("v_");
+            name += std::to_string(vgprno);
+            var->setDiscardableAttr(builder.getStringAttr("gcn.varname"), builder.getStringAttr(name));
+#endif
+            auto it = usedVgprs.insert(std::make_pair(vgprno, var));
+            return it.first->second;
+        } else {
+            return it->second;
+        }
+    }
+    VariableOp initSgprCC(uint sgprno) {
+        mlir::ImplicitLocOpBuilder initBuilder(builder);
+        initBuilder.setInsertionPointToStart(mainEntryBlock);
+        auto it = usedSgprsCC.find(sgprno);
+        if (it == usedSgprsCC.end()) {
+            mlir::IntegerType boolTy = initBuilder.getI1Type();
+            auto boolPtrTy = PointerType::get(boolTy, StorageClass::Function);
+            auto initializer = initBuilder.create<ConstantOp>(boolTy, initBuilder.getIntegerAttr(boolTy, 0));
+            auto var = initBuilder.create<VariableOp>(boolPtrTy, StorageClassAttr::get(&mlirContext, StorageClass::Function), initializer);
+#if defined(_DEBUG)
+            llvm::SmallString<8> name("scc_");
+            name += std::to_string(sgprno);
+            var->setDiscardableAttr(builder.getStringAttr("gcn.varname"), builder.getStringAttr(name));
+#endif
+            auto it = usedSgprsCC.insert(std::make_pair(sgprno, var));
+            return it.first->second;
+        } else {
+            return it->second;
+        }
+    }
+    VariableOp initSgprUniform(uint sgprno) {
+        mlir::ImplicitLocOpBuilder initBuilder(builder);
+        initBuilder.setInsertionPointToStart(mainEntryBlock);
+        auto it = usedSgprsUniform.find(sgprno);
+        if (it == usedSgprsUniform.end()) {
+            mlir::IntegerType int32Ty = initBuilder.getI32Type();
+            auto intPtrTy = PointerType::get(int32Ty, StorageClass::Function);
+            auto initializer = initBuilder.create<ConstantOp>(int32Ty, initBuilder.getI32IntegerAttr(0));
+            auto var = initBuilder.create<VariableOp>(intPtrTy, StorageClassAttr::get(&mlirContext, StorageClass::Function), initializer);
+#if defined(_DEBUG)
+            llvm::SmallString<8> name("s_");
+            name += std::to_string(sgprno);
+            var->setDiscardableAttr(builder.getStringAttr("gcn.varname"), builder.getStringAttr(name));
+#endif
+            auto it = usedSgprsUniform.insert(std::make_pair(sgprno, var));
+            return it.first->second;
+        } else {
+            return it->second;
         }
     }
 
-    Ctx->createPredicatedControlFlow();
-    Ctx->createPreamble();
+    mlir::Value sourceScalarGprCC(uint sgprno) {
+        VariableOp cc = initSgprCC(sgprno);
+        return builder.create<LoadOp>(cc);
+    }
+
+    mlir::Value sourceScalarGprUniform(uint sgprno) {
+        VariableOp uni = initSgprUniform(sgprno);
+        return builder.create<LoadOp>(uni);
+    }
+
+    mlir::Value sourceVectorGpr(uint vgprno) {
+        VariableOp vgpr = initVgpr(vgprno);
+        return builder.create<LoadOp>(vgpr);
+    }
+
+    mlir::spirv::ConstantOp sourceImmediate(MCOperand &operand, mlir::Type type) {
+        // Literal constant – a 32-bit value in the instruction stream. When a literal
+        // constant is used with a 64bit instruction, the literal is expanded to 64 bits by:
+        // padding the LSBs with zeros for floats, padding the MSBs with zeros for
+        // unsigned ints, and by sign-extending signed ints.
+
+        // Not sure if sign extension already happens or if you need to take MCOperand::getImm() and extend
+        // it yourself. Treat it like its unextended for now.
+        if (auto intTy = dyn_cast<mlir::IntegerType>(type)) {
+            switch (intTy.getWidth()) {
+                case 32:
+                {
+                    if (intTy.isSigned()) {
+                        int32_t imm = static_cast<int32_t>(operand.getImm() & 0xffffffff);
+                        return builder.create<ConstantOp>(type, builder.getSI32IntegerAttr(imm));
+                    } else {
+                        uint32_t imm = static_cast<uint32_t>(operand.getImm() & 0xffffffff);
+                        return builder.create<ConstantOp>(type, builder.getUI32IntegerAttr(imm));     
+                    }
+                }
+                case 64:
+                {
+                    // Not sure if operand comes sign extended or not, do it in case.
+                    uint64_t imm = operand.getImm();
+                    if (intTy.isSigned()) {
+                        if (imm & 0x80000000) {
+                            imm = (0xffffffffULL << 32) | imm; 
+                        }
+                    } else {
+                        // max 64 bit literal should be UINT32_MAX.
+                        assert((imm & ~(0xffffffff)) == 0);
+                    }
+                    return builder.create<ConstantOp>(type, builder.getI64IntegerAttr(imm));
+                }
+                default:
+                    assert(false && "unhandled int width");
+                    break;
+            }
+        } else if (auto floatTy = dyn_cast<mlir::FloatType>(type)) {
+            switch (floatTy.getWidth()) {
+                case 32:
+                {
+                    float imm = static_cast<float>(operand.getImm() & 0xffffffff);
+                    return builder.create<ConstantOp>(type, builder.getF32FloatAttr(imm));
+                }
+                case 64:
+                {
+                    uint64_t imm = operand.getImm();
+                    // extend float by padding LSBs, just in case. Same if already padded or not.
+                    imm = static_cast<double>(imm | (imm << 32));
+                    return builder.create<ConstantOp>(type, builder.getF64FloatAttr(imm));
+                }
+                default:
+                    assert(false && "unhandled float width");
+            }
+        }
+        assert(false && "unhandled immediate");
+        return nullptr;
+    }
+
+    mlir::Value sourceVectorOperand(MCOperand &operand, mlir::Type type) {
+        mlir::Value rv;
+        if (operand.isImm()) {
+            ConstantOp immConst = sourceImmediate(operand, type);
+            return immConst;
+        } 
+        
+        assert(operand.isReg());
+        uint regno = operand.getReg();
+        switch (regnoToType(regno)) {
+            case SGpr:
+                rv =  sourceScalarGprUniform(sgprOffset(regno));
+                break;
+            case VGpr:
+                rv = sourceVectorGpr(vgprOffset(regno));
+                break;
+            default:
+                assert(false && "unhandled");
+                return nullptr;
+        }
+        if (auto intTy = dyn_cast<mlir::IntegerType>(type)) {
+            if (intTy.getWidth() == 32 && intTy.isSigned()) {
+                return rv;
+            }
+        }
+        rv = builder.create<BitcastOp>(type, rv);
+        return rv;
+    }
+
+    void storeVectorResult32(MCOperand &dst, mlir::Value result) {
+        mlir::Type resultTy = result.getType();
+        assert(resultTy.getIntOrFloatBitWidth() == 32);
+        if ( !result.getType().isSignedInteger()) {
+            result = builder.create<BitcastOp>(builder.getI32Type(), result);
+        }
+
+        assert(dst.isReg() && isVgpr(dst.getReg()));
+        uint vgprno = vgprOffset(dst.getReg());
+        VariableOp vgpr = initVgpr(vgprno);
+        builder.create<StoreOp>(vgpr, result);
+    }
+
+    mlir::MLIRContext mlirContext;
+    mlir::ImplicitLocOpBuilder builder;
+    ExecutionModel shaderType;
+
+    std::vector<MCInst> machineCode;
+    SpirvBytecodeVector spirvModule;
+    SpirvConvertResult::ConvertStatus status;
+    llvm::DenseMap<uint, VariableOp> usedSgprsCC;
+    llvm::DenseMap<uint, VariableOp> usedSgprsUniform;
+    llvm::DenseMap<uint, VariableOp> usedVgprs;
+    FuncOp mainFn;
+    mlir::Block *mainEntryBlock;
+    ModuleOp moduleOp;
+
+    const MCSubtargetInfo *STI;
+    MCInstPrinter *IP;
+};
+
+bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
+    switch (MI.getOpcode()) {
+        case AMDGPU::S_MOV_B32_gfx6_gfx7:
+        {
+            
+            break;
+        }
+        case AMDGPU::V_MUL_F32_e32_gfx6_gfx7:
+        {
+            assert(MI.getNumOperands() == 3);
+            MCOperand dst, src0, vsrc1;
+            dst = MI.getOperand(0);
+            src0 = MI.getOperand(1);
+            vsrc1 = MI.getOperand(2);
+            //MCOperand src
+            mlir::Type floatTy = builder.getF32Type();
+            auto a = sourceVectorOperand(src0, floatTy);
+            auto b = sourceVectorOperand(vsrc1, floatTy);
+            // overflow, side effects?
+            auto mul = builder.create<FMulOp>(a, b);
+            mul->setDiscardableAttr(builder.getStringAttr("gcn.predicated"), builder.getBoolAttr(true));
+            dst = MI.getOperand(0);
+            storeVectorResult32(dst, mul);
+            
+            break;
+        }
+        default:
+            return false;
+            break;
+    }
+    return true;
+}
+
+bool GcnToSpirvConverter::buildSpirvDialect() {
+    bool err = true;
+    // TODO set module-level stuff (entrypoint, etc)
+    moduleOp = builder.create<ModuleOp>(AddressingModel::Logical, MemoryModel::Vulkan);
+    mlir::Region &region = moduleOp.getBodyRegion();
+    //mlir::Block &entryBlock = region.emplaceBlock();
+    assert(region.hasOneBlock());
+    builder.setInsertionPointToEnd(&(*region.begin()));
+
+    // TODO: need function arguments for global vars?
+    mlir::FunctionType mainFTy = mlir::FunctionType::get(&mlirContext, builder.getNoneType(), builder.getNoneType());
+    mainFn = builder.create<FuncOp>("main", mainFTy);
+
+    assert(mainFn->getNumRegions() == 1);
+    mlir::Region &mainRegion = mainFn->getRegion(0);
+    mainEntryBlock = &mainRegion.emplaceBlock();
+    builder.setInsertionPointToStart(mainEntryBlock);
+    mlir::Block &mainBody = mainRegion.emplaceBlock();
+    // Keep OpVariables, etc in separate block
+    builder.create<BranchOp>(&mainBody);
+    builder.setInsertionPointToStart(&mainBody);
+
+    for (const MCInst &MI: machineCode) {
+        err &= convertGcnOp(MI);
+    }
+    
+    return true;
+    // return err; // TODO
+}
+
+bool GcnToSpirvConverter::finalizeModule() {
+    mlir::Region &region = moduleOp.getBodyRegion();
+    builder.setInsertionPointToEnd(&(*region.begin()));
+    llvm::SmallVector<mlir::Attribute, 4> interfaceVars;
+    builder.create<EntryPointOp>(shaderType, mainFn, interfaceVars);
+
+    llvm::SmallVector<Capability, 8> caps = { Capability::Shader };
+    llvm::SmallVector<Extension, 4> exts;
+    auto vceTriple = VerCapExtAttr::get(Version::V_1_5, caps, exts, &mlirContext);
+    moduleOp->setAttr("vce_triple", vceTriple);
+
+    moduleOp.dump();
 
     return true;
+}
+
+bool GcnToSpirvConverter::generateSpirvBytecode() {
+    // TODO - temp
+    // strip off added attributes
+    moduleOp.walk([&](mlir::Operation *op) {
+        for (mlir::NamedAttribute attr: op->getDiscardableAttrs()) {
+            if (attr.getName().strref().starts_with("gcn.")) {
+                op->removeAttr(attr.getName());
+            }
+        }
+    });
+
+    auto res = mlir::spirv::serialize(moduleOp, spirvModule);
+    return res.succeeded();
+}
+
+SpirvConvertResult GcnToSpirvConverter::convert() {
+    if ( !buildSpirvDialect()) {
+        return SpirvConvertResult({}, SpirvConvertResult::fail);
+    }
+    if ( !finalizeModule()) {
+        return SpirvConvertResult({}, SpirvConvertResult::fail);
+    }
+    if ( !generateSpirvBytecode()) {
+        return SpirvConvertResult({}, SpirvConvertResult::fail);
+    }
+    return SpirvConvertResult(std::move(spirvModule), SpirvConvertResult::success);
 }
 
 int llvm_mc_main(int argc, char ** argv, const std::vector<unsigned char> &gcnBytecode) {
@@ -238,22 +591,6 @@ int llvm_mc_main(int argc, char ** argv, const std::vector<unsigned char> &gcnBy
 
     ArrayRef byteView(gcnBytecode.data(), gcnBytecode.size());
 
-    mlir::MLIRContext mlirContext;
-    mlirContext.getOrLoadDialect<mlir::gcn::GcnDialect>();
-    mlirContext.getOrLoadDialect<mlir::spirv::SPIRVDialect>();
-
-    mlir::ImplicitLocOpBuilder builder(mlir::UnknownLoc::get(&mlirContext), &mlirContext);
-
-    //mlir::spirv::ConstantOp::getOne(mlir::spirv::ScalarType:, loc, builder);
-    //auto floatTy = mlir::Float32Type::get(&mlirContext);
-    auto floatTy = builder.getF32Type();
-    auto boolTy = builder.getIntegerType(1);
-
-    //builder.create<mlir::spirv::ConstantOp>(5);
-    mlir::spirv::ConstantOp::getZero(floatTy, mlir::UnknownLoc::get(&mlirContext), builder);
-    auto floatConst = builder.create<mlir::spirv::ConstantOp>(floatTy, builder.getF32FloatAttr(5.0f));
-    auto boolConst = builder.create<mlir::spirv::ConstantOp>(boolTy, builder.getBoolAttr(true));
-
     //builder.create<mlir::spirv::BitcastOp>();
 
     llvm::outs() << "\n";
@@ -285,11 +622,13 @@ int llvm_mc_main(int argc, char ** argv, const std::vector<unsigned char> &gcnBy
         addr += size;
     }
 
-    std::vector<uint8_t> spirvModule;
-    bool success = convertGcnMachineCodeToSpirv(machineCode, spirvModule, IP, MRI.get());
+    ExecutionModel execModel = ExecutionModel::Vertex; // TODO
+    GcnToSpirvConverter converter(machineCode, execModel, STI.get(), IP);
+    SpirvConvertResult result = converter.convert();
+    SpirvBytecodeVector spirvModule = result.takeSpirvModule();
 
     llvm_shutdown();
-    return success ? 0 : 1;
+    return result ? 0 : 1;
 }
 
 int main(int argc, char **argv) {
