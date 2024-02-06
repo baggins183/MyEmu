@@ -9,10 +9,12 @@
 #include "mlir/IR/Dialect.h"
 #include "mlir/IR/Location.h"
 #include "mlir/IR/MLIRContext.h"
+#include "mlir/IR/Value.h"
 #include "mlir/IR/Visitors.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/bit.h"
 #include <cstdint>
 #include <cstdio>
 #include <cassert>
@@ -22,6 +24,7 @@
 #include <llvm/Support/raw_ostream.h>
 #include <sstream>
 #include <sys/types.h>
+#include <system_error>
 #include <vector>
 #include <fcntl.h>
 #include <filesystem>
@@ -140,6 +143,8 @@ void print_bininfo(const ShaderBinaryInfo &bininfo) {
 #include "mlir/Dialect/SPIRV/IR/SPIRVOps.h"
 #include "mlir/IR/ImplicitLocOpBuilder.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
+
 //#include "llvm/lib/Target/AMDGPU/Disassembler/AMDGPUDisassembler.h"
 #include "llvm/MC/MCDisassembler/MCDisassembler.h"
 
@@ -195,7 +200,7 @@ public:
         empty,
     };
 
-    operator bool() { return status != ConvertStatus::success; }
+    operator bool() { return status == ConvertStatus::success; }
 
     SpirvConvertResult(SpirvBytecodeVector &&spirvModule, ConvertStatus status):
         module(std::move(spirvModule)), status(status) 
@@ -354,15 +359,16 @@ private:
             switch (floatTy.getWidth()) {
                 case 32:
                 {
-                    float imm = static_cast<float>(operand.getImm() & 0xffffffff);
-                    return builder.create<ConstantOp>(type, builder.getF32FloatAttr(imm));
+                    uint32_t imm = operand.getImm() & 0xffffffff;
+                    float fImm = llvm::bit_cast<float>(imm);
+                    return builder.create<ConstantOp>(type, builder.getF32FloatAttr(fImm));
                 }
                 case 64:
                 {
                     uint64_t imm = operand.getImm();
                     // extend float by padding LSBs, just in case. Same if already padded or not.
-                    imm = static_cast<double>(imm | (imm << 32));
-                    return builder.create<ConstantOp>(type, builder.getF64FloatAttr(imm));
+                    double dImm = llvm::bit_cast<double>(imm | (imm << 32));
+                    return builder.create<ConstantOp>(type, builder.getF64FloatAttr(dImm));
                 }
                 default:
                     assert(false && "unhandled float width");
@@ -411,7 +417,9 @@ private:
         assert(dst.isReg() && isVgpr(dst.getReg()));
         uint vgprno = vgprOffset(dst.getReg());
         VariableOp vgpr = initVgpr(vgprno);
-        builder.create<StoreOp>(vgpr, result);
+        auto store = builder.create<StoreOp>(vgpr, result);
+        // Don't write back the result if thread is masked off by EXEC
+        store->setDiscardableAttr(builder.getStringAttr("gcn.predicated"), builder.getBoolAttr(true));
     }
 
     mlir::MLIRContext mlirContext;
@@ -433,32 +441,150 @@ private:
 };
 
 bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
+    //llvm::SmallVector<mlir::NamedAttribute, 2> attrs 
+            //= { mlir::NamedAttribute(builder.getStringAttr("gcn.predicated"), builder.getBoolAttr(true)) };
+    //llvm::SmallVector<mlir::Value, 2> args;
     switch (MI.getOpcode()) {
-        case AMDGPU::S_MOV_B32_gfx6_gfx7:
+//        case AMDGPU::S_MOV_B32_gfx6_gfx7:
+//        {
+//            break;
+//        }
+        // VOP1
+        case AMDGPU::V_FLOOR_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_FRACT_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_RCP_F32_e32_gfx6_gfx7:
         {
-            
+            MCOperand dst, src;
+            dst = MI.getOperand(0);
+            src = MI.getOperand(1);
+            mlir::Type floatTy = builder.getF32Type();
+            mlir::Value srcVal = sourceVectorOperand(src, floatTy);
+            mlir::Value result;
+            switch (MI.getOpcode()) {
+                case AMDGPU::V_FLOOR_F32_e32_gfx6_gfx7:
+                    result = builder.create<GLFloorOp>(srcVal);
+                    break;
+                case AMDGPU::V_FRACT_F32_e32_gfx6_gfx7:
+                {
+                    // V_FRACT_F32: D.f = S0.f - FLOOR(S0.f).
+                    auto floor = builder.create<GLFloorOp>(srcVal);
+                    result = builder.create<FSubOp>(srcVal, floor);
+                    break;
+                }
+                case AMDGPU::V_RCP_F32_e32_gfx6_gfx7:
+                {
+                    auto numerator = ConstantOp::getOne(floatTy, builder.getLoc(), builder);
+                    result = builder.create<FDivOp>(numerator, srcVal);
+                }
+
+            }
+            storeVectorResult32(dst, result);
             break;
         }
+
+        // VOP2
+        case AMDGPU::V_ADD_F32_e32_gfx6_gfx7:
         case AMDGPU::V_MUL_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_SUB_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_MAC_F32_e32_gfx6_gfx7:
+        //case AMDGPU::V_CVT_PKRTZ_F16_F32_e32_gfx6_gfx7:
         {
-            assert(MI.getNumOperands() == 3);
+            //assert(MI.getNumOperands() == 3);
             MCOperand dst, src0, vsrc1;
             dst = MI.getOperand(0);
             src0 = MI.getOperand(1);
             vsrc1 = MI.getOperand(2);
             //MCOperand src
             mlir::Type floatTy = builder.getF32Type();
-            auto a = sourceVectorOperand(src0, floatTy);
-            auto b = sourceVectorOperand(vsrc1, floatTy);
+            mlir::Value a = sourceVectorOperand(src0, floatTy);
+            mlir::Value b = sourceVectorOperand(vsrc1, floatTy);
             // overflow, side effects?
-            auto mul = builder.create<FMulOp>(a, b);
-            mul->setDiscardableAttr(builder.getStringAttr("gcn.predicated"), builder.getBoolAttr(true));
-            dst = MI.getOperand(0);
-            storeVectorResult32(dst, mul);
-            
+            mlir::Value result;
+            switch (MI.getOpcode()) {
+                case AMDGPU::V_ADD_F32_e32_gfx6_gfx7:
+                    result = builder.create<FAddOp>(a, b);
+                    break;
+                case AMDGPU::V_MUL_F32_e32_gfx6_gfx7:
+                    result = builder.create<FMulOp>(a, b);
+                    break;
+                case AMDGPU::V_SUB_F32_e32_gfx6_gfx7:
+                    result = builder.create<FSubOp>(a, b);
+                    break;
+                case AMDGPU::V_MAC_F32_e32_gfx6_gfx7:
+                {
+                    // Multiply a and b. Accumulate into dst
+                    assert(dst.isReg() && dst.getReg() == MI.getOperand(3).getReg());
+                    mlir::Value dstVal = sourceVectorOperand(dst, floatTy);
+                    result = builder.create<FMulOp>(a, b);
+                    result = builder.create<FAddOp>(dstVal, result);
+                    break;
+                }
+                case AMDGPU::V_CVT_PKRTZ_F16_F32_e32_gfx6_gfx7:
+                {
+                    // decorate with FPRoundingMode?
+                    // OpFConvert?
+                    // OpQuantizeToF16?
+                    // TODO use glsl.450 ext with packHalf2x16
+                }
+
+            }
+            storeVectorResult32(dst, result);            
             break;
         }
+
+        // VOP3a
+        case AMDGPU::V_MED3_F32_gfx6_gfx7:
+        {
+            // TODO check NEG, OMOD, CLAMP, ABS
+            MCOperand dst, src0, src1, src2;
+            dst = MI.getOperand(0);
+            src0 = MI.getOperand(1);
+            src1 = MI.getOperand(2);   
+            src2 = MI.getOperand(3);
+            mlir::Type floatTy = builder.getF32Type();
+            mlir::Value a = sourceVectorOperand(src0, floatTy);
+            mlir::Value b = sourceVectorOperand(src1, floatTy);
+            mlir::Value c = sourceVectorOperand(src2, floatTy);
+            mlir::Value result;
+            switch(MI.getOpcode()) {
+                case AMDGPU::V_MED3_F32_gfx6_gfx7:
+                {
+                    //If (isNan(S0.f) || isNan(S1.f) || isNan(S2.f))
+                    //  D.f = MIN3(S0.f, S1.f, S2.f)
+                    //Else if (MAX3(S0.f,S1.f,S2.f) == S0.f)
+                    //  D.f = MAX(S1.f, S2.f)
+                    //Else if (MAX3(S0.f,S1.f,S2.f) == S1.f)
+                    //  D.f = MAX(S0.f, S2.f)
+                    //Else
+                    //  D.f = MAX(S0.f, S1.f)
+
+                    // ignore NaNs for now
+                    mlir::Value cmp, max_a_b, max3, max_b_c, max_a_c;
+                    cmp = builder.create<FOrdGreaterThanEqualOp>(a, b);
+                    max_a_b = builder.create<SelectOp>(cmp, a, b);
+                    cmp = builder.create<FOrdGreaterThanEqualOp>(a, c);
+                    max_a_c = builder.create<SelectOp>(cmp, a, c);
+                    cmp = builder.create<FOrdGreaterThanEqualOp>(b, c);
+                    max_b_c = builder.create<SelectOp>(cmp, b, c);
+                    cmp = builder.create<FOrdGreaterThanEqualOp>(max_a_b, max_b_c);
+                    max3 = builder.create<SelectOp>(cmp, max_a_b, max_a_c);
+
+                    cmp = builder.create<FOrdEqualOp>(max3, a);
+                    result = builder.create<SelectOp>(cmp, max_b_c, max_a_b);
+                    cmp = builder.create<FOrdEqualOp>(max3, b);
+                    result = builder.create<SelectOp>(cmp, max_a_c, result);
+
+                    break;
+                }
+            }
+            storeVectorResult32(dst, result);
+            break;
+        }
+
         default:
+            llvm::outs() << "Unhandled instruction: \n";
+            IP->printInst(&MI, 0, "", *STI, llvm::outs());
+            llvm::outs() << "\n";
             return false;
             break;
     }
@@ -468,14 +594,14 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
 bool GcnToSpirvConverter::buildSpirvDialect() {
     bool err = true;
     // TODO set module-level stuff (entrypoint, etc)
-    moduleOp = builder.create<ModuleOp>(AddressingModel::Logical, MemoryModel::Vulkan);
+    moduleOp = builder.create<ModuleOp>(AddressingModel::Logical, MemoryModel::GLSL450);
     mlir::Region &region = moduleOp.getBodyRegion();
     //mlir::Block &entryBlock = region.emplaceBlock();
     assert(region.hasOneBlock());
     builder.setInsertionPointToEnd(&(*region.begin()));
 
     // TODO: need function arguments for global vars?
-    mlir::FunctionType mainFTy = mlir::FunctionType::get(&mlirContext, builder.getNoneType(), builder.getNoneType());
+    mlir::FunctionType mainFTy = mlir::FunctionType::get(&mlirContext, {}, builder.getNoneType());
     mainFn = builder.create<FuncOp>("main", mainFTy);
 
     assert(mainFn->getNumRegions() == 1);
@@ -490,6 +616,7 @@ bool GcnToSpirvConverter::buildSpirvDialect() {
     for (const MCInst &MI: machineCode) {
         err &= convertGcnOp(MI);
     }
+    builder.create<ReturnOp>();
     
     return true;
     // return err; // TODO
@@ -506,7 +633,15 @@ bool GcnToSpirvConverter::finalizeModule() {
     auto vceTriple = VerCapExtAttr::get(Version::V_1_5, caps, exts, &mlirContext);
     moduleOp->setAttr("vce_triple", vceTriple);
 
-    moduleOp.dump();
+    //moduleOp.dump();
+    std::error_code ec;
+    fs::path path = "output.mlir";
+    raw_fd_ostream mlirFile(path.c_str(), ec);
+    if (ec) {
+        llvm::outs() << "Couldn't open " << path << ": " << ec.message() << "\n";
+        return false;
+    }
+    moduleOp->print(mlirFile);
 
     return true;
 }
@@ -539,7 +674,7 @@ SpirvConvertResult GcnToSpirvConverter::convert() {
     return SpirvConvertResult(std::move(spirvModule), SpirvConvertResult::success);
 }
 
-int llvm_mc_main(int argc, char ** argv, const std::vector<unsigned char> &gcnBytecode) {
+int llvm_mc_main(int argc, char ** argv, const std::vector<unsigned char> &gcnBytecode, fs::path binPath) {
     //llvm::InitializeAllTargetInfos();
     //llvm::InitializeAllTargetMCs();
 
@@ -625,7 +760,18 @@ int llvm_mc_main(int argc, char ** argv, const std::vector<unsigned char> &gcnBy
     ExecutionModel execModel = ExecutionModel::Vertex; // TODO
     GcnToSpirvConverter converter(machineCode, execModel, STI.get(), IP);
     SpirvConvertResult result = converter.convert();
+    assert(result);
     SpirvBytecodeVector spirvModule = result.takeSpirvModule();
+
+    fs::path spirvPath = binPath.filename().stem();
+    spirvPath += ".spv";
+    std::error_code ec;
+    raw_fd_ostream spirvFile(spirvPath.c_str(), ec);
+    if (ec) {
+        llvm::outs() << "Couldn't open " << spirvPath << ": " << ec.message() << "\n";
+        return 1;
+    }
+    spirvFile.write(reinterpret_cast<char *>(spirvModule.data()), spirvModule.size_in_bytes());
 
     llvm_shutdown();
     return result ? 0 : 1;
@@ -682,7 +828,7 @@ int main(int argc, char **argv) {
             assert(foundProgStart);
             std::vector<unsigned char> programBinary(bininfo.m_length);
             memcpy(programBinary.data(), &buf[progStartOff], bininfo.m_length);
-            llvm_mc_main(argc, argv, programBinary);
+            llvm_mc_main(argc, argv, programBinary, binPath);
         } else if ( *reinterpret_cast<uint32_t *>(&buf[i]) == 0xbeeb03ff) {
             // host is little endian. Reverse when we
             printf("found first instr: offset: 0x%zx\n", progStartOff);
