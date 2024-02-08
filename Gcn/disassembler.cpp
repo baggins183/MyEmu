@@ -178,6 +178,9 @@ inline uint vgprOffset(uint regno) {
 enum GcnRegType {
     SGpr,
     VGpr,
+    EXEC,
+    VCC,
+    m0,
     INVALID
 };
 
@@ -187,7 +190,20 @@ GcnRegType regnoToType(uint regno) {
     } else if (isVgpr(regno)) {
         return GcnRegType::VGpr;
     }
-    return GcnRegType::INVALID;
+    switch (regno) {
+        case AMDGPU::EXEC:
+        case AMDGPU::EXEC_LO:
+        case AMDGPU::EXEC_HI:
+            return GcnRegType::EXEC;
+        case AMDGPU::VCC:
+        case AMDGPU::VCC_LO:
+        case AMDGPU::VCC_HI:
+            return GcnRegType::VCC;
+        case AMDGPU::M0:
+            return GcnRegType::m0;
+        default:
+            return GcnRegType::INVALID;
+    }
 }
 
 typedef llvm::SmallVector<uint32_t, 0> SpirvBytecodeVector;
@@ -216,6 +232,14 @@ private:
     ConvertStatus status;
 };
 
+typedef VariableOp UniformReg;
+typedef VariableOp CCReg;
+
+struct ScalarRegUnion {
+    UniformReg uniform;
+    CCReg cc;
+};
+
 class GcnToSpirvConverter {
 public:
     GcnToSpirvConverter(const std::vector<MCInst> &machineCode, ExecutionModel shaderType, const MCSubtargetInfo *STI, MCInstPrinter *IP):
@@ -231,6 +255,12 @@ public:
     {
         mlirContext.getOrLoadDialect<mlir::gcn::GcnDialect>();
         mlirContext.getOrLoadDialect<mlir::spirv::SPIRVDialect>();
+        
+        floatTy = builder.getF32Type();
+        float16Ty = builder.getF16Type();
+        intTy = builder.getI32Type();
+        int16Ty = builder.getI16Type();
+        boolTy = builder.getI1Type();
     }
 
     SpirvConvertResult convert();
@@ -246,9 +276,8 @@ private:
         initBuilder.setInsertionPointToStart(mainEntryBlock);
         auto it = usedVgprs.find(vgprno);
         if (it == usedVgprs.end()) {
-            mlir::IntegerType int32Ty = initBuilder.getI32Type();
-            auto intPtrTy = PointerType::get(int32Ty, StorageClass::Function);
-            auto initializer = initBuilder.create<ConstantOp>(int32Ty, initBuilder.getI32IntegerAttr(0));
+            auto intPtrTy = PointerType::get(intTy, StorageClass::Function);
+            auto initializer = initBuilder.create<ConstantOp>(intTy, initBuilder.getI32IntegerAttr(0));
             auto var = initBuilder.create<VariableOp>(intPtrTy, StorageClassAttr::get(&mlirContext, StorageClass::Function), initializer);
 #if defined(_DEBUG)
             llvm::SmallString<8> name("v_");
@@ -266,7 +295,6 @@ private:
         initBuilder.setInsertionPointToStart(mainEntryBlock);
         auto it = usedSgprsCC.find(sgprno);
         if (it == usedSgprsCC.end()) {
-            mlir::IntegerType boolTy = initBuilder.getI1Type();
             auto boolPtrTy = PointerType::get(boolTy, StorageClass::Function);
             auto initializer = initBuilder.create<ConstantOp>(boolTy, initBuilder.getIntegerAttr(boolTy, 0));
             auto var = initBuilder.create<VariableOp>(boolPtrTy, StorageClassAttr::get(&mlirContext, StorageClass::Function), initializer);
@@ -286,9 +314,8 @@ private:
         initBuilder.setInsertionPointToStart(mainEntryBlock);
         auto it = usedSgprsUniform.find(sgprno);
         if (it == usedSgprsUniform.end()) {
-            mlir::IntegerType int32Ty = initBuilder.getI32Type();
-            auto intPtrTy = PointerType::get(int32Ty, StorageClass::Function);
-            auto initializer = initBuilder.create<ConstantOp>(int32Ty, initBuilder.getI32IntegerAttr(0));
+            auto intPtrTy = PointerType::get(intTy, StorageClass::Function);
+            auto initializer = initBuilder.create<ConstantOp>(intTy, initBuilder.getI32IntegerAttr(0));
             auto var = initBuilder.create<VariableOp>(intPtrTy, StorageClassAttr::get(&mlirContext, StorageClass::Function), initializer);
 #if defined(_DEBUG)
             llvm::SmallString<8> name("s_");
@@ -323,32 +350,19 @@ private:
         // padding the LSBs with zeros for floats, padding the MSBs with zeros for
         // unsigned ints, and by sign-extending signed ints.
 
-        // Not sure if sign extension already happens or if you need to take MCOperand::getImm() and extend
-        // it yourself. Treat it like its unextended for now.
+        // TODO veify that signdness doesn't matter, and getImm() an already sign extended value when
+        // it matters
         if (auto intTy = dyn_cast<mlir::IntegerType>(type)) {
             switch (intTy.getWidth()) {
                 case 32:
                 {
-                    if (intTy.isSigned()) {
-                        int32_t imm = static_cast<int32_t>(operand.getImm() & 0xffffffff);
-                        return builder.create<ConstantOp>(type, builder.getSI32IntegerAttr(imm));
-                    } else {
-                        uint32_t imm = static_cast<uint32_t>(operand.getImm() & 0xffffffff);
-                        return builder.create<ConstantOp>(type, builder.getUI32IntegerAttr(imm));     
-                    }
+                    int32_t imm = static_cast<uint32_t>(operand.getImm() & 0xffffffff);
+                    return builder.create<ConstantOp>(type, builder.getI32IntegerAttr(imm));     
                 }
                 case 64:
                 {
                     // Not sure if operand comes sign extended or not, do it in case.
-                    uint64_t imm = operand.getImm();
-                    if (intTy.isSigned()) {
-                        if (imm & 0x80000000) {
-                            imm = (0xffffffffULL << 32) | imm; 
-                        }
-                    } else {
-                        // max 64 bit literal should be UINT32_MAX.
-                        assert((imm & ~(0xffffffff)) == 0);
-                    }
+                    int64_t imm = operand.getImm();
                     return builder.create<ConstantOp>(type, builder.getI64IntegerAttr(imm));
                 }
                 default:
@@ -378,6 +392,49 @@ private:
         return nullptr;
     }
 
+    mlir::Value sourceScalarOperandUniform(MCOperand &operand, mlir::Type type) {
+        mlir::Value rv;
+        if (operand.isImm()) {
+            ConstantOp immConst = sourceImmediate(operand, type);
+            return immConst;
+        }
+        assert(operand.isReg());
+        uint regno = operand.getReg();
+        switch (regnoToType(regno)) {
+            case SGpr:
+                rv =  sourceScalarGprUniform(sgprOffset(regno));
+                break;
+            default:
+                assert(false && "unhandled");
+        }
+        if (type != intTy) {
+            rv = builder.create<BitcastOp>(type, rv);
+        }
+        return rv;
+    }
+
+    mlir::Value sourceScalarOperandCC(MCOperand &operand) {
+        mlir::Value rv;
+        if (operand.isImm()) {
+            // Only support this in compute (TODO)
+            // return bool(laneID & imm)
+            assert(false && "Unhandled: condition code source can't be an immediate");
+        }
+
+        assert(operand.isReg());
+        uint regno = operand.getReg();
+        switch (regnoToType(regno)) {
+            case SGpr:
+                rv =  sourceScalarGprCC(sgprOffset(regno));
+                break;
+            default:
+                assert(false && "unhandled");
+                return nullptr;
+        }
+
+        return rv;
+    }
+
     mlir::Value sourceVectorOperand(MCOperand &operand, mlir::Type type) {
         mlir::Value rv;
         if (operand.isImm()) {
@@ -398,20 +455,41 @@ private:
                 assert(false && "unhandled");
                 return nullptr;
         }
-        if (auto intTy = dyn_cast<mlir::IntegerType>(type)) {
-            if (intTy.getWidth() == 32 && intTy.isSigned()) {
-                return rv;
-            }
+        if (type != intTy) {
+            rv = builder.create<BitcastOp>(type, rv);
         }
-        rv = builder.create<BitcastOp>(type, rv);
         return rv;
+    }
+
+    void storeScalarResult32(MCOperand &dst, mlir::Value result) {
+        mlir::Type resultTy = result.getType();
+        assert(resultTy.getIntOrFloatBitWidth() == 32);
+        if (result.getType() != intTy) {
+            result = builder.create<BitcastOp>(intTy, result);
+        }
+
+        // TODO handle special sgprs (EXEC, VCC, etc)
+        // Are all special sgprs 64 bit pairs? - then do nothing
+        assert(dst.isReg() && isSgpr(dst.getReg()));
+        uint sgprno = sgprOffset(dst.getReg());
+        VariableOp sgpr = initSgprUniform(sgprno);
+        builder.create<StoreOp>(sgpr, result);
+    }
+
+    void storeResultCC(MCOperand &dst, mlir::Value result) {
+        assert(result.getType() == boolTy);
+
+        // TODO handle special sgprs (EXEC, VCC, etc)
+        uint sgprno = sgprOffset(dst.getReg());
+        VariableOp sgpr = initSgprCC(sgprno);
+        builder.create<StoreOp>(sgpr, result);
     }
 
     void storeVectorResult32(MCOperand &dst, mlir::Value result) {
         mlir::Type resultTy = result.getType();
         assert(resultTy.getIntOrFloatBitWidth() == 32);
-        if ( !result.getType().isSignedInteger()) {
-            result = builder.create<BitcastOp>(builder.getI32Type(), result);
+        if (result.getType() != intTy) {
+            result = builder.create<BitcastOp>(intTy, result);
         }
 
         assert(dst.isReg() && isVgpr(dst.getReg()));
@@ -419,7 +497,8 @@ private:
         VariableOp vgpr = initVgpr(vgprno);
         auto store = builder.create<StoreOp>(vgpr, result);
         // Don't write back the result if thread is masked off by EXEC
-        store->setDiscardableAttr(builder.getStringAttr("gcn.predicated"), builder.getBoolAttr(true));
+        // Will need to generate control flow, TODO
+        store->setDiscardableAttr(builder.getStringAttr("gcn.predicated"), builder.getUnitAttr());
     }
 
     mlir::MLIRContext mlirContext;
@@ -429,12 +508,25 @@ private:
     std::vector<MCInst> machineCode;
     SpirvBytecodeVector spirvModule;
     SpirvConvertResult::ConvertStatus status;
+
+    llvm::DenseMap<uint, VariableOp> usedVgprs;
     llvm::DenseMap<uint, VariableOp> usedSgprsCC;
     llvm::DenseMap<uint, VariableOp> usedSgprsUniform;
-    llvm::DenseMap<uint, VariableOp> usedVgprs;
+
+    ScalarRegUnion VCCVars;
+    CCReg execVar = nullptr; // OpTypeBool only
+    
     FuncOp mainFn;
     mlir::Block *mainEntryBlock;
     ModuleOp moduleOp;
+
+    // spirv-val complains about duplicate int types, so mlir must be caching or handling signedness weird.
+    // init once and reuse these instead
+    mlir::FloatType floatTy;
+    mlir::FloatType float16Ty;
+    mlir::IntegerType intTy;
+    mlir::IntegerType int16Ty;
+    mlir::IntegerType boolTy;
 
     const MCSubtargetInfo *STI;
     MCInstPrinter *IP;
@@ -445,10 +537,43 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
             //= { mlir::NamedAttribute(builder.getStringAttr("gcn.predicated"), builder.getBoolAttr(true)) };
     //llvm::SmallVector<mlir::Value, 2> args;
     switch (MI.getOpcode()) {
-//        case AMDGPU::S_MOV_B32_gfx6_gfx7:
-//        {
-//            break;
-//        }
+        //case AMDGPU::S_MOV_B32_gfx6_gfx7:
+        {
+            // For MOV_32 it probably doesn't make sense to copy the CC bits over.
+            // The ps4 compiler would probably use MOV_64 if it wanted to move a CC result,
+            // because CC results go to an sgpr pair (64 bits)
+            // Copy the CC bits as well, and ignore odd numbered sgprs.
+            MCOperand dst, src;
+            dst = MI.getOperand(0);
+            src = MI.getOperand(1);
+
+            GcnRegType dstRegType = regnoToType(dst.getReg());
+            bool skipWrite = false;
+            
+
+            mlir::Value uni = sourceScalarOperandUniform(src, intTy);
+            storeScalarResult32(dst, uni);
+            if (src.isReg()) {
+                assert(isSgpr(src.getReg()));
+                uint sgprno = sgprOffset(src.getReg());
+                // Ignore odd numbered : TODO explain
+                if ((sgprno & 1) == 0) {
+                    mlir::Value srcCC = sourceScalarOperandCC(src);
+                    storeResultCC(dst, srcCC);
+                }
+            }
+            break;
+        }
+
+        // SOPP
+        case AMDGPU::S_WAITCNT_gfx6_gfx7:
+            // Used by AMD hardware to wait for long-latency instructions.
+            // Should be able to ignore
+            break;
+        case AMDGPU::S_ENDPGM_gfx6_gfx7:
+            // Do return here?
+            break;
+
         // VOP1
         case AMDGPU::V_FLOOR_F32_e32_gfx6_gfx7:
         case AMDGPU::V_FRACT_F32_e32_gfx6_gfx7:
@@ -475,9 +600,45 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
                 {
                     auto numerator = ConstantOp::getOne(floatTy, builder.getLoc(), builder);
                     result = builder.create<FDivOp>(numerator, srcVal);
+                    break;
                 }
-
             }
+            storeVectorResult32(dst, result);
+            break;
+        }
+        case AMDGPU::V_CVT_OFF_F32_I4_e32_gfx6_gfx7:
+        {
+            // Map 4 bit int to range of floats (increment by 0.0625)
+            // 1000 -0.5f
+            // 1001 -0.4375f
+            // 1010 -0.375f
+            // 1011 -0.3125f
+            // 1100 -0.25f
+            // 1101 -0.1875f
+            // 1110 -0.125f
+            // 1111 -0.0625f
+            // 0000 0.0f
+            // 0001 0.0625f
+            // 0010 0.125f
+            // 0011 0.1875f
+            // 0100 0.25f
+            // 0101 0.3125f
+            // 0110 0.375f
+            // 0111 0.4375f
+            
+            MCOperand dst, src;
+            dst = MI.getOperand(0);
+            src = MI.getOperand(1);
+            mlir::Value srcVal = sourceVectorOperand(src, intTy);
+            mlir::Value result;
+            // For now, just do multiplication. 0.0625 * float(sext(src[3:0]))
+            // Maybe put all constants + switch stmt in shader later
+            auto scale = builder.create<ConstantOp>(floatTy, builder.getF32FloatAttr(0.0625f));
+            auto bfOff = builder.create<ConstantOp>(intTy, builder.getI32IntegerAttr(0));
+            auto bfCount = builder.create<ConstantOp>(intTy, builder.getI32IntegerAttr(4));
+            auto srcSExt = builder.create<BitFieldSExtractOp>(srcVal, bfOff, bfCount);
+            result = builder.create<ConvertSToFOp>(floatTy, srcSExt);
+            result = builder.create<FMulOp>(result, scale);
             storeVectorResult32(dst, result);
             break;
         }
@@ -487,7 +648,7 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
         case AMDGPU::V_MUL_F32_e32_gfx6_gfx7:
         case AMDGPU::V_SUB_F32_e32_gfx6_gfx7:
         case AMDGPU::V_MAC_F32_e32_gfx6_gfx7:
-        //case AMDGPU::V_CVT_PKRTZ_F16_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CVT_PKRTZ_F16_F32_e32_gfx6_gfx7:
         {
             //assert(MI.getNumOperands() == 3);
             MCOperand dst, src0, vsrc1;
@@ -525,6 +686,18 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
                     // OpFConvert?
                     // OpQuantizeToF16?
                     // TODO use glsl.450 ext with packHalf2x16
+                    auto bF16 = builder.create<FConvertOp>(float16Ty, b);
+                    auto bI16 = builder.create<BitcastOp>(int16Ty, bF16);
+                    result = builder.create<UConvertOp>(intTy, bI16);
+                    auto shiftBy = builder.create<ConstantOp>(intTy, builder.getI32IntegerAttr(16));
+                    result = builder.create<ShiftLeftLogicalOp>(result, shiftBy);
+                    auto aF16 = builder.create<FConvertOp>(float16Ty, a);
+                    auto aI16 = builder.create<BitcastOp>(int16Ty, aF16);
+                    auto aI32 = builder.create<UConvertOp>(intTy, aI16);
+                    result = builder.create<BitwiseOrOp>(result, aI32);
+
+                    // TODO: spirv dialect doesn't support this? Need to add to binary?
+                    // bF16->setAttr("FPRoundingMode", builder.getI32IntegerAttr(1));
                 }
 
             }
@@ -560,14 +733,11 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
 
                     // ignore NaNs for now
                     mlir::Value cmp, max_a_b, max3, max_b_c, max_a_c;
-                    cmp = builder.create<FOrdGreaterThanEqualOp>(a, b);
-                    max_a_b = builder.create<SelectOp>(cmp, a, b);
-                    cmp = builder.create<FOrdGreaterThanEqualOp>(a, c);
-                    max_a_c = builder.create<SelectOp>(cmp, a, c);
-                    cmp = builder.create<FOrdGreaterThanEqualOp>(b, c);
-                    max_b_c = builder.create<SelectOp>(cmp, b, c);
-                    cmp = builder.create<FOrdGreaterThanEqualOp>(max_a_b, max_b_c);
-                    max3 = builder.create<SelectOp>(cmp, max_a_b, max_a_c);
+                    //cmp = builder.create<FOrdGreaterThanEqualOp>(a, b);
+                    max_a_b = builder.create<GLFMaxOp>(a, b);
+                    max_a_c = builder.create<GLFMaxOp>(a, c);
+                    max_b_c = builder.create<GLFMaxOp>(b, c);
+                    max3 = builder.create<GLFMaxOp>(max_a_b, max_a_c);
 
                     cmp = builder.create<FOrdEqualOp>(max3, a);
                     result = builder.create<SelectOp>(cmp, max_b_c, max_a_b);
@@ -593,14 +763,12 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
 
 bool GcnToSpirvConverter::buildSpirvDialect() {
     bool err = true;
-    // TODO set module-level stuff (entrypoint, etc)
     moduleOp = builder.create<ModuleOp>(AddressingModel::Logical, MemoryModel::GLSL450);
     mlir::Region &region = moduleOp.getBodyRegion();
     //mlir::Block &entryBlock = region.emplaceBlock();
     assert(region.hasOneBlock());
     builder.setInsertionPointToEnd(&(*region.begin()));
 
-    // TODO: need function arguments for global vars?
     mlir::FunctionType mainFTy = mlir::FunctionType::get(&mlirContext, {}, builder.getNoneType());
     mainFn = builder.create<FuncOp>("main", mainFTy);
 
@@ -628,7 +796,7 @@ bool GcnToSpirvConverter::finalizeModule() {
     llvm::SmallVector<mlir::Attribute, 4> interfaceVars;
     builder.create<EntryPointOp>(shaderType, mainFn, interfaceVars);
 
-    llvm::SmallVector<Capability, 8> caps = { Capability::Shader };
+    llvm::SmallVector<Capability, 8> caps = { Capability::Shader, Capability::Float16, Capability::Int16 };
     llvm::SmallVector<Extension, 4> exts;
     auto vceTriple = VerCapExtAttr::get(Version::V_1_5, caps, exts, &mlirContext);
     moduleOp->setAttr("vce_triple", vceTriple);
