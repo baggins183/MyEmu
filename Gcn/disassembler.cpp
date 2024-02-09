@@ -14,6 +14,7 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/Twine.h"
 #include "llvm/ADT/bit.h"
 #include <cstdint>
 #include <cstdio>
@@ -175,17 +176,89 @@ inline uint vgprOffset(uint regno) {
     return regno - AMDGPU::VGPR0;
 }
 
+// Sanity check this.
+// Add more special regs that *should* be allowed as 32 bit operands.
+// Until we see a convoluted situation where condition codes and
+// "uniforms" are mixed up and ambiguous
+bool isSpecialUniformReg(uint regno) {
+    switch (regno) {
+        case AMDGPU::EXEC_LO:
+        case AMDGPU::EXEC_HI:
+        case AMDGPU::VCC_LO:
+        case AMDGPU::VCC_HI:
+        case AMDGPU::M0:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool isSpecialCCReg(uint regno) {
+    // check if supported yet
+    switch (regno) {
+        case AMDGPU::EXEC:
+        case AMDGPU::VCC:
+            return true;
+        default:
+            return false;
+    }
+}
+
+llvm::SmallString<8> getUniformRegName(uint regno) {
+    llvm::SmallString<8> name;
+    if (isSgpr(regno)) {
+        name = "s_";
+        name += std::to_string(sgprOffset(regno));
+        return name;
+    }
+    switch (regno) {
+        case AMDGPU::EXEC_LO:
+            name = "exec_lo";
+            break;
+        case AMDGPU::EXEC_HI:
+            name = "exec_hi";
+            break;
+        case AMDGPU::VCC_LO:
+            name = "vcc_lo";
+            break;
+        case AMDGPU::VCC_HI:
+            name = "vcc_hi";
+            break;
+        case AMDGPU::M0:
+            name = "m0";
+            break;
+        default:
+            assert(false && "unhandled");
+            break;
+    }
+    return name;
+}
+
+llvm::SmallString<8> getCCRegName(uint regno) {
+    llvm::SmallString<8> name;
+    if (isSgpr(regno)) {
+        name = "scc_";
+        name += std::to_string(sgprOffset(regno));
+        return name;
+    }
+    switch (regno) {
+        case AMDGPU::EXEC:
+            name = "exec";
+            break;
+        case AMDGPU::VCC:
+            name = "vcc";
+            break;
+        default:
+            assert(false && "unhandled");
+            break;
+    }
+    return name;
+}
+
 enum GcnRegType {
     SGpr,
     VGpr,
-    Exec,
-    Exec_Lo,
-    Exec_Hi,
-    VCC,
-    VCC_Lo,
-    VCC_Hi,
-    m0,
-    INVALID
+    Special // m0, VCC, etc
 };
 
 GcnRegType regnoToType(uint regno) {
@@ -195,23 +268,18 @@ GcnRegType regnoToType(uint regno) {
         return GcnRegType::VGpr;
     }
     switch (regno) {
-        case AMDGPU::EXEC:
-            return GcnRegType::Exec;
         case AMDGPU::EXEC_LO:
-            return GcnRegType::Exec_Lo;
         case AMDGPU::EXEC_HI:
-            return GcnRegType::Exec_Hi;
+        case AMDGPU::EXEC:
         case AMDGPU::VCC:
-            return GcnRegType::VCC;
         case AMDGPU::VCC_LO:
-            return GcnRegType::VCC_Lo;
         case AMDGPU::VCC_HI:
-            return GcnRegType::VCC_Hi;
         case AMDGPU::M0:
-            return GcnRegType::m0;
+            return GcnRegType::Special;
         default:
-            return GcnRegType::INVALID;
+            assert(false && "unhandled");
     }
+    return GcnRegType::Special;
 }
 
 typedef llvm::SmallVector<uint32_t, 0> SpirvBytecodeVector;
@@ -240,14 +308,44 @@ private:
     ConvertStatus status;
 };
 
-typedef VariableOp UniformReg;
-typedef VariableOp CCReg;
-typedef VariableOp VectorReg;
+// Different register types in Gcn.
+// Because Gcn is a hardware ISA, it has a notion of SIMD.
+// We are modeling it in SPIR-V, which is basically SIMT and mostly hides that other threads exist.
+// (besides cross-workgroup ops, etc).
+// Because of this gap, it's hard to model SGPRs (scalar general puporse registers) from Gcn in spir-v.
+// In a Gcn program, two consecutive SGPRs (2 x 32 bits) could be written to by a comparison op to say,
+// for each bit, a[lane_id] < b[lane_id]
+// Then you could source the first of the two SGPRs as the value of a loop limit.
+// i.e., for (int i = 0; i < SGPR[N]; i++) { ... }
+// If you wanted to model that perfectly in spir-v, you'd need to have each thread write their comparison bit
+// to some kind of shared memory, in the correct position based on lane-id. Then, if the program sourced it as
+// a 32-bit operand (loop counter here), you'd take the 32 bits as is. If it was sourced as a bool instead (as 
+// a branch cond, for example), you'd AND it with (1 << lane_id) to get your thread's bit.
 
-struct ScalarRegUnion {
-    UniformReg uniform;
-    CCReg cc;
-};
+// I don't know if that's realistic in spir-v. I think we can assume the ps4 compiler never does stupid stuff like
+// that example, because that would imply some kind of data sharing between threads that shouldn't exist in
+// vertex and other graphics stages. Maybe there are some situations in pixel shader quads
+// (groups of 4 threads), or tesselation patches, idk. Figure that out later
+
+// So in most cases, I will represent condition codes as a single bool per thread in the SIMT model.
+// Comparison instructions might write to this "CC" register. And conditions might read it.
+
+// I will assume 32 bit scalar operands source from the "Uniform" register.
+// MOV should possibly move both the UniformReg and CCReg for a given Gcn Scalar register.
+// Bitwise instructions AND, OR, idk.
+// Figure these out on a case by case basis
+
+// Holds a single 32 bit value per 64-thread wavefront.
+// Could hold a loop counter for example
+// VariableOp holds an i32 type
+typedef VariableOp UniformReg;
+// Holds a bool per thread.
+// Could hold the result of a comparison, e.g. a < b
+// VariableOp holds an i1 type
+typedef VariableOp CCReg;
+// Holds a 32 bit value per thread
+// VariableOp holds an i32 type
+typedef VariableOp VectorReg;
 
 class GcnToSpirvConverter {
 public:
@@ -280,7 +378,8 @@ private:
     bool finalizeModule();
     bool generateSpirvBytecode();
 
-    CCReg initCcReg(llvm::StringRef name) {
+    // build a VariableOp for the CC (condition code) register, and attach a name
+    CCReg buildAndNameCCReg(llvm::StringRef name) {
         mlir::ImplicitLocOpBuilder initBuilder(builder);
         initBuilder.setInsertionPointToStart(mainEntryBlock);
         auto boolPtrTy = PointerType::get(boolTy, StorageClass::Function);
@@ -291,7 +390,9 @@ private:
 #endif
         return var;
     }
-    VariableOp init32BitReg(llvm::StringRef name) {
+    // build and name a vgpr or uniform register.
+    // The register holds either a 32 value per thread (vgpr) or a single 32 bit value per 64-thread wavefront.
+    VariableOp buildAndName32BitReg(llvm::StringRef name) {
         mlir::ImplicitLocOpBuilder initBuilder(builder);
         initBuilder.setInsertionPointToStart(mainEntryBlock);
         auto intPtrTy = PointerType::get(intTy, StorageClass::Function);
@@ -303,55 +404,54 @@ private:
         return var;
     }
 
-    VectorReg initVgpr(uint vgprno) {
-        auto it = usedVgprs.find(vgprno);
+    VectorReg initVgpr(uint regno) {
+        auto it = usedVgprs.find(regno);
         if (it == usedVgprs.end()) {
             llvm::SmallString<8> name("v_");
-            name += std::to_string(vgprno);
-            VariableOp vgpr = init32BitReg(name);
-            auto it = usedVgprs.insert(std::make_pair(vgprno, vgpr));
+            uint vgprNameOffset = vgprOffset(regno);
+            name += std::to_string(vgprNameOffset);
+            VariableOp vgpr = buildAndName32BitReg(name);
+            auto it = usedVgprs.insert(std::make_pair(regno, vgpr));
             return it.first->second;
         } else {
             return it->second;
         }
     }
-    CCReg initSgprCC(uint sgprno) {
-        auto it = usedSgprsCC.find(sgprno);
-        if (it == usedSgprsCC.end()) {
-            llvm::SmallString<8> name("scc_");
-            name += std::to_string(sgprno);
-            CCReg cc = initCcReg(name);
-            auto it = usedSgprsCC.insert(std::make_pair(sgprno, cc));
+    CCReg initCCReg(uint regno) {
+        auto it = usedCCRegs.find(regno);
+        if (it == usedCCRegs.end()) {
+            auto name = getCCRegName(regno);
+            CCReg cc = buildAndNameCCReg(name);
+            auto it = usedCCRegs.insert(std::make_pair(regno, cc));
             return it.first->second;
         } else {
             return it->second;
         }
     }
-    VariableOp initSgprUniform(uint sgprno) {
-        auto it = usedSgprsUniform.find(sgprno);
-        if (it == usedSgprsUniform.end()) {
-            llvm::SmallString<8> name("s_");
-            name += std::to_string(sgprno);
-            auto uniform = init32BitReg(name);
-            auto it = usedSgprsUniform.insert(std::make_pair(sgprno, uniform));
+    VariableOp initUniformReg(uint regno) {
+        auto it = usedUniformRegs.find(regno);
+        if (it == usedUniformRegs.end()) {
+            auto name = getUniformRegName(regno);
+            UniformReg uniform = buildAndName32BitReg(name);
+            auto it = usedUniformRegs.insert(std::make_pair(regno, uniform));
             return it.first->second;
         } else {
             return it->second;
         }
     }
 
-    mlir::Value sourceScalarGprCC(uint sgprno) {
-        VariableOp cc = initSgprCC(sgprno);
+    mlir::Value sourceCCReg(uint regno) {
+        VariableOp cc = initCCReg(regno);
         return builder.create<LoadOp>(cc);
     }
 
-    mlir::Value sourceScalarGprUniform(uint sgprno) {
-        VariableOp uni = initSgprUniform(sgprno);
+    mlir::Value sourceUniformReg(uint regno) {
+        VariableOp uni = initUniformReg(regno);
         return builder.create<LoadOp>(uni);
     }
 
-    mlir::Value sourceVectorGpr(uint vgprno) {
-        VariableOp vgpr = initVgpr(vgprno);
+    mlir::Value sourceVectorGpr(uint regno) {
+        VariableOp vgpr = initVgpr(regno);
         return builder.create<LoadOp>(vgpr);
     }
 
@@ -411,20 +511,20 @@ private:
         }
         assert(operand.isReg());
         uint regno = operand.getReg();
-        switch (regnoToType(regno)) {
-            case SGpr:
-                rv =  sourceScalarGprUniform(sgprOffset(regno));
-                break;
-            default:
-                assert(false && "unhandled");
+    
+        if (regnoToType(regno) == GcnRegType::Special) {
+            assert(isSpecialUniformReg(regno));
         }
-        if (type != intTy) {
+        // SGpr or special reg (VCC_LO, m0, etc)
+        rv = sourceUniformReg(regno);
+
+        if (type != rv.getType()) {
             rv = builder.create<BitcastOp>(type, rv);
         }
         return rv;
     }
 
-    mlir::Value sourceScalarOperandCC(MCOperand &operand) {
+    mlir::Value sourceCCOperand(MCOperand &operand) {
         mlir::Value rv;
         if (operand.isImm()) {
             // Only support this in compute (TODO)
@@ -434,14 +534,12 @@ private:
 
         assert(operand.isReg());
         uint regno = operand.getReg();
-        switch (regnoToType(regno)) {
-            case SGpr:
-                rv =  sourceScalarGprCC(sgprOffset(regno));
-                break;
-            default:
-                assert(false && "unhandled");
-                return nullptr;
+
+        if (regnoToType(regno) == GcnRegType::Special) {
+            assert(isSpecialCCReg(regno));
         }
+
+        rv = sourceCCReg(regno);
 
         return rv;
     }
@@ -456,17 +554,20 @@ private:
         assert(operand.isReg());
         uint regno = operand.getReg();
         switch (regnoToType(regno)) {
+            case Special:
+                assert(isSpecialUniformReg(regno));
+                LLVM_FALLTHROUGH;
             case SGpr:
-                rv =  sourceScalarGprUniform(sgprOffset(regno));
+                rv =  sourceUniformReg(regno);
                 break;
             case VGpr:
-                rv = sourceVectorGpr(vgprOffset(regno));
+                rv = sourceVectorGpr(regno);
                 break;
             default:
                 assert(false && "unhandled");
                 return nullptr;
         }
-        if (type != intTy) {
+        if (type != rv.getType()) {
             rv = builder.create<BitcastOp>(type, rv);
         }
         return rv;
@@ -479,21 +580,21 @@ private:
             result = builder.create<BitcastOp>(intTy, result);
         }
 
-        // TODO handle special sgprs (EXEC, VCC, etc)
-        // Are all special sgprs 64 bit pairs? - then do nothing
-        assert(dst.isReg() && isSgpr(dst.getReg()));
-        uint sgprno = sgprOffset(dst.getReg());
-        VariableOp sgpr = initSgprUniform(sgprno);
-        builder.create<StoreOp>(sgpr, result);
+        assert(dst.isReg());
+        uint regno = dst.getReg();
+        assert(isSgpr(regno) || isSpecialUniformReg(regno));
+
+        UniformReg uniform = initUniformReg(regno);
+        builder.create<StoreOp>(uniform, result);
     }
 
     void storeResultCC(MCOperand &dst, mlir::Value result) {
         assert(result.getType() == boolTy);
 
-        // TODO handle special sgprs (EXEC, VCC, etc)
-        uint sgprno = sgprOffset(dst.getReg());
-        VariableOp sgpr = initSgprCC(sgprno);
-        builder.create<StoreOp>(sgpr, result);
+        uint regno = dst.getReg();
+        assert(isSgpr(regno) || isSpecialCCReg(regno));
+        CCReg cc = initCCReg(regno);
+        builder.create<StoreOp>(cc, result);
     }
 
     void storeVectorResult32(MCOperand &dst, mlir::Value result) {
@@ -504,8 +605,8 @@ private:
         }
 
         assert(dst.isReg() && isVgpr(dst.getReg()));
-        uint vgprno = vgprOffset(dst.getReg());
-        VariableOp vgpr = initVgpr(vgprno);
+        uint regno = dst.getReg();
+        VectorReg vgpr = initVgpr(regno);
         auto store = builder.create<StoreOp>(vgpr, result);
         // Don't write back the result if thread is masked off by EXEC
         // Will need to generate control flow, TODO
@@ -520,12 +621,11 @@ private:
     SpirvBytecodeVector spirvModule;
     SpirvConvertResult::ConvertStatus status;
 
-    llvm::DenseMap<uint, VariableOp> usedVgprs;
-    llvm::DenseMap<uint, VariableOp> usedSgprsCC;
-    llvm::DenseMap<uint, VariableOp> usedSgprsUniform;
-
-    ScalarRegUnion VCCVars;
-    CCReg execVar = nullptr; // OpTypeBool only
+    llvm::DenseMap<uint, VectorReg> usedVgprs;
+    // Includes Sgprs (CC), EXEC, VCC, etc
+    llvm::DenseMap<uint, CCReg> usedCCRegs;
+    // Includes Sgprs (uniforms - 32 bits), EXEC_LO, EXEC_HI, m0, VCC_LO, etc
+    llvm::DenseMap<uint, UniformReg> usedUniformRegs;
     
     FuncOp mainFn;
     mlir::Block *mainEntryBlock;
@@ -569,7 +669,7 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
                 uint sgprno = sgprOffset(src.getReg());
                 // Ignore odd numbered : TODO explain
                 if ((sgprno & 1) == 0) {
-                    mlir::Value srcCC = sourceScalarOperandCC(src);
+                    mlir::Value srcCC = sourceCCOperand(src);
                     storeResultCC(dst, srcCC);
                 }
             }
