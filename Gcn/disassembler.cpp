@@ -178,8 +178,12 @@ inline uint vgprOffset(uint regno) {
 enum GcnRegType {
     SGpr,
     VGpr,
-    EXEC,
+    Exec,
+    Exec_Lo,
+    Exec_Hi,
     VCC,
+    VCC_Lo,
+    VCC_Hi,
     m0,
     INVALID
 };
@@ -192,13 +196,17 @@ GcnRegType regnoToType(uint regno) {
     }
     switch (regno) {
         case AMDGPU::EXEC:
+            return GcnRegType::Exec;
         case AMDGPU::EXEC_LO:
+            return GcnRegType::Exec_Lo;
         case AMDGPU::EXEC_HI:
-            return GcnRegType::EXEC;
+            return GcnRegType::Exec_Hi;
         case AMDGPU::VCC:
-        case AMDGPU::VCC_LO:
-        case AMDGPU::VCC_HI:
             return GcnRegType::VCC;
+        case AMDGPU::VCC_LO:
+            return GcnRegType::VCC_Lo;
+        case AMDGPU::VCC_HI:
+            return GcnRegType::VCC_Hi;
         case AMDGPU::M0:
             return GcnRegType::m0;
         default:
@@ -234,6 +242,7 @@ private:
 
 typedef VariableOp UniformReg;
 typedef VariableOp CCReg;
+typedef VariableOp VectorReg;
 
 struct ScalarRegUnion {
     UniformReg uniform;
@@ -271,58 +280,60 @@ private:
     bool finalizeModule();
     bool generateSpirvBytecode();
 
-    VariableOp initVgpr(uint vgprno) {
+    CCReg initCcReg(llvm::StringRef name) {
         mlir::ImplicitLocOpBuilder initBuilder(builder);
         initBuilder.setInsertionPointToStart(mainEntryBlock);
+        auto boolPtrTy = PointerType::get(boolTy, StorageClass::Function);
+        auto initializer = initBuilder.create<ConstantOp>(boolTy, initBuilder.getIntegerAttr(boolTy, 0));
+        auto var = initBuilder.create<VariableOp>(boolPtrTy, StorageClassAttr::get(&mlirContext, StorageClass::Function), initializer);
+#if defined(_DEBUG)
+        var->setDiscardableAttr(builder.getStringAttr("gcn.varname"), builder.getStringAttr(name));
+#endif
+        return var;
+    }
+    VariableOp init32BitReg(llvm::StringRef name) {
+        mlir::ImplicitLocOpBuilder initBuilder(builder);
+        initBuilder.setInsertionPointToStart(mainEntryBlock);
+        auto intPtrTy = PointerType::get(intTy, StorageClass::Function);
+        auto initializer = initBuilder.create<ConstantOp>(intTy, initBuilder.getI32IntegerAttr(0));
+        auto var = initBuilder.create<VariableOp>(intPtrTy, StorageClassAttr::get(&mlirContext, StorageClass::Function), initializer);
+#if defined(_DEBUG)
+        var->setDiscardableAttr(builder.getStringAttr("gcn.varname"), builder.getStringAttr(name));
+#endif
+        return var;
+    }
+
+    VectorReg initVgpr(uint vgprno) {
         auto it = usedVgprs.find(vgprno);
         if (it == usedVgprs.end()) {
-            auto intPtrTy = PointerType::get(intTy, StorageClass::Function);
-            auto initializer = initBuilder.create<ConstantOp>(intTy, initBuilder.getI32IntegerAttr(0));
-            auto var = initBuilder.create<VariableOp>(intPtrTy, StorageClassAttr::get(&mlirContext, StorageClass::Function), initializer);
-#if defined(_DEBUG)
             llvm::SmallString<8> name("v_");
             name += std::to_string(vgprno);
-            var->setDiscardableAttr(builder.getStringAttr("gcn.varname"), builder.getStringAttr(name));
-#endif
-            auto it = usedVgprs.insert(std::make_pair(vgprno, var));
+            VariableOp vgpr = init32BitReg(name);
+            auto it = usedVgprs.insert(std::make_pair(vgprno, vgpr));
             return it.first->second;
         } else {
             return it->second;
         }
     }
-    VariableOp initSgprCC(uint sgprno) {
-        mlir::ImplicitLocOpBuilder initBuilder(builder);
-        initBuilder.setInsertionPointToStart(mainEntryBlock);
+    CCReg initSgprCC(uint sgprno) {
         auto it = usedSgprsCC.find(sgprno);
         if (it == usedSgprsCC.end()) {
-            auto boolPtrTy = PointerType::get(boolTy, StorageClass::Function);
-            auto initializer = initBuilder.create<ConstantOp>(boolTy, initBuilder.getIntegerAttr(boolTy, 0));
-            auto var = initBuilder.create<VariableOp>(boolPtrTy, StorageClassAttr::get(&mlirContext, StorageClass::Function), initializer);
-#if defined(_DEBUG)
             llvm::SmallString<8> name("scc_");
             name += std::to_string(sgprno);
-            var->setDiscardableAttr(builder.getStringAttr("gcn.varname"), builder.getStringAttr(name));
-#endif
-            auto it = usedSgprsCC.insert(std::make_pair(sgprno, var));
+            CCReg cc = initCcReg(name);
+            auto it = usedSgprsCC.insert(std::make_pair(sgprno, cc));
             return it.first->second;
         } else {
             return it->second;
         }
     }
     VariableOp initSgprUniform(uint sgprno) {
-        mlir::ImplicitLocOpBuilder initBuilder(builder);
-        initBuilder.setInsertionPointToStart(mainEntryBlock);
         auto it = usedSgprsUniform.find(sgprno);
         if (it == usedSgprsUniform.end()) {
-            auto intPtrTy = PointerType::get(intTy, StorageClass::Function);
-            auto initializer = initBuilder.create<ConstantOp>(intTy, initBuilder.getI32IntegerAttr(0));
-            auto var = initBuilder.create<VariableOp>(intPtrTy, StorageClassAttr::get(&mlirContext, StorageClass::Function), initializer);
-#if defined(_DEBUG)
             llvm::SmallString<8> name("s_");
             name += std::to_string(sgprno);
-            var->setDiscardableAttr(builder.getStringAttr("gcn.varname"), builder.getStringAttr(name));
-#endif
-            auto it = usedSgprsUniform.insert(std::make_pair(sgprno, var));
+            auto uniform = init32BitReg(name);
+            auto it = usedSgprsUniform.insert(std::make_pair(sgprno, uniform));
             return it.first->second;
         } else {
             return it->second;
