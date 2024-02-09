@@ -186,7 +186,7 @@ bool isSpecialUniformReg(uint regno) {
         case AMDGPU::EXEC_HI:
         case AMDGPU::VCC_LO:
         case AMDGPU::VCC_HI:
-        case AMDGPU::M0:
+        case AMDGPU::M0_gfxpre11:
             return true;
         default:
             return false;
@@ -224,7 +224,7 @@ llvm::SmallString<8> getUniformRegName(uint regno) {
         case AMDGPU::VCC_HI:
             name = "vcc_hi";
             break;
-        case AMDGPU::M0:
+        case AMDGPU::M0_gfxpre11:
             name = "m0";
             break;
         default:
@@ -274,7 +274,7 @@ GcnRegType regnoToType(uint regno) {
         case AMDGPU::VCC:
         case AMDGPU::VCC_LO:
         case AMDGPU::VCC_HI:
-        case AMDGPU::M0:
+        case AMDGPU::M0_gfxpre11:
             return GcnRegType::Special;
         default:
             assert(false && "unhandled");
@@ -366,6 +366,7 @@ public:
         floatTy = builder.getF32Type();
         float16Ty = builder.getF16Type();
         intTy = builder.getI32Type();
+        int64Ty = builder.getI64Type();
         int16Ty = builder.getI16Type();
         boolTy = builder.getI1Type();
     }
@@ -573,19 +574,22 @@ private:
         return rv;
     }
 
-    void storeScalarResult32(MCOperand &dst, mlir::Value result) {
+    void storeScalarResult32(uint regno, mlir::Value result) {
         mlir::Type resultTy = result.getType();
         assert(resultTy.getIntOrFloatBitWidth() == 32);
         if (result.getType() != intTy) {
             result = builder.create<BitcastOp>(intTy, result);
         }
 
-        assert(dst.isReg());
-        uint regno = dst.getReg();
         assert(isSgpr(regno) || isSpecialUniformReg(regno));
 
         UniformReg uniform = initUniformReg(regno);
         builder.create<StoreOp>(uniform, result);
+    }
+
+    void storeScalarResult32(MCOperand &dst, mlir::Value result) {
+        assert(dst.isReg());
+        storeScalarResult32(dst.getReg(), result);
     }
 
     void storeResultCC(MCOperand &dst, mlir::Value result) {
@@ -636,6 +640,7 @@ private:
     mlir::FloatType floatTy;
     mlir::FloatType float16Ty;
     mlir::IntegerType intTy;
+    mlir::IntegerType int64Ty;
     mlir::IntegerType int16Ty;
     mlir::IntegerType boolTy;
 
@@ -648,31 +653,102 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
             //= { mlir::NamedAttribute(builder.getStringAttr("gcn.predicated"), builder.getBoolAttr(true)) };
     //llvm::SmallVector<mlir::Value, 2> args;
     switch (MI.getOpcode()) {
-        //case AMDGPU::S_MOV_B32_gfx6_gfx7:
+        // SOP1
+        case AMDGPU::S_MOV_B32_gfx6_gfx7:
         {
-            // For MOV_32 it probably doesn't make sense to copy the CC bits over.
-            // The ps4 compiler would probably use MOV_64 if it wanted to move a CC result,
-            // because CC results go to an sgpr pair (64 bits)
-            // Copy the CC bits as well, and ignore odd numbered sgprs.
             MCOperand dst, src;
             dst = MI.getOperand(0);
             src = MI.getOperand(1);
 
-            GcnRegType dstRegType = regnoToType(dst.getReg());
-            bool skipWrite = false;
-            
+            assert(dst.isReg());
+            mlir::Value result = sourceScalarOperandUniform(src, intTy);
+            // TODO try to move CC bits too somehow.
+            storeScalarResult32(dst, result);
+            break;
+        }
+        case AMDGPU::S_MOV_B64_gfx6_gfx7:
+        {
+            // Try to move uniform register and cc register values
+            MCOperand dst, src;
+            dst = MI.getOperand(0);
+            src = MI.getOperand(1);
 
-            mlir::Value uni = sourceScalarOperandUniform(src, intTy);
-            storeScalarResult32(dst, uni);
-            if (src.isReg()) {
-                assert(isSgpr(src.getReg()));
-                uint sgprno = sgprOffset(src.getReg());
-                // Ignore odd numbered : TODO explain
-                if ((sgprno & 1) == 0) {
-                    mlir::Value srcCC = sourceCCOperand(src);
-                    storeResultCC(dst, srcCC);
+            assert(dst.isReg());
+            mlir::Value uniValLo, uniValHi;
+            mlir::Value ccVal;
+
+            if (src.isImm()) {
+                ConstantOp immConst = sourceImmediate(src, int64Ty);
+                auto constval0  = builder.create<ConstantOp>(intTy, builder.getI32IntegerAttr(0));
+                auto constval32 = builder.create<ConstantOp>(intTy, builder.getI32IntegerAttr(32));
+
+                // val, offset, count
+                uniValLo = builder.create<BitFieldUExtractOp>(immConst, constval0, constval32);                
+                uniValLo = builder.create<BitFieldUExtractOp>(immConst, constval32, constval32);
+
+                // Don't move cc if the src is immediate.
+                // TODO - support this in compute
+            } else {
+                assert(src.isReg());
+                uint srcno = src.getReg();
+                uint loSrcNo;
+                uint hiSrcNo;
+
+                if (regnoToType(srcno) == GcnRegType::Special) {
+                    switch (srcno) {
+                        case AMDGPU::VCC:
+                            loSrcNo = AMDGPU::VCC_LO;
+                            hiSrcNo = AMDGPU::VCC_HI;
+                            break;
+                        case AMDGPU::EXEC:
+                            loSrcNo = AMDGPU::EXEC_LO;
+                            hiSrcNo = AMDGPU::EXEC_HI;
+                            break;
+                        default:
+                            loSrcNo = -1;
+                            hiSrcNo = -1;
+                            break;
+                    }
+                } else {
+                    assert(isSgpr(srcno) && (sgprOffset(srcno) % 2 == 0));
+                    loSrcNo = srcno;
+                    hiSrcNo = srcno + 1;
                 }
+                uniValLo = sourceUniformReg(loSrcNo);
+                uniValHi = sourceUniformReg(hiSrcNo);
+
+                // Move cc
+                assert(isSgpr(srcno) || isSpecialCCReg(srcno));
+                ccVal = sourceCCReg(srcno);
+                storeResultCC(dst, ccVal);
             }
+            // Move uniform register pair
+            assert(dst.isReg());
+            uint dstno = dst.getReg();
+            uint loDstNo;
+            uint hiDstNo;
+            if (regnoToType(dstno) == GcnRegType::Special) {
+                switch (dstno) {
+                    case AMDGPU::VCC:
+                        loDstNo = AMDGPU::VCC_LO;
+                        hiDstNo = AMDGPU::VCC_HI;
+                        break;
+                    case AMDGPU::EXEC:
+                        loDstNo = AMDGPU::EXEC_LO;
+                        hiDstNo = AMDGPU::EXEC_HI;
+                        break;
+                    default:
+                        loDstNo = -1;
+                        hiDstNo = -1;
+                        break;
+                }
+            } else {
+                assert(isSgpr(dstno) && (sgprOffset(dstno) % 2 == 0));
+                loDstNo = dstno;
+                hiDstNo = dstno + 1;
+            }
+            storeScalarResult32(loDstNo, uniValLo);
+            storeScalarResult32(hiDstNo, uniValHi);
             break;
         }
 
