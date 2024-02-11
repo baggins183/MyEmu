@@ -21,6 +21,7 @@
 #include <cassert>
 #include <cstring>
 #include <fstream>
+#include <iostream>
 #include <llvm/MC/MCInst.h>
 #include <llvm/Support/raw_ostream.h>
 #include <sstream>
@@ -33,90 +34,6 @@ namespace fs = std::filesystem;
 #include <byteswap.h>
 #include <arpa/inet.h>
 #include <llvm/ADT/ArrayRef.h>
-
-// Some taken from llvm-mc
-
-
-struct ShaderBinaryInfo
-{
-	uint8_t			m_signature[7];				// 'OrbShdr'
-	uint8_t			m_version;					// ShaderBinaryInfoVersion
-
-	unsigned int	m_pssl_or_cg : 1;	// 1 = PSSL / Cg, 0 = IL / shtb
-	unsigned int	m_cached : 1;	// 1 = when compile, debugging source was cached.  May only make sense for PSSL=1
-	uint32_t		m_type : 4;	// See enum ShaderBinaryType
-	uint32_t		m_source_type : 2;	// See enum ShaderSourceType
-	unsigned int	m_length : 24;	// Binary code length (does not include this structure or any of its preceding associated tables)
-
-	uint8_t			m_chunkUsageBaseOffsetInDW;			// in DW, which starts at ((uint32_t*)&ShaderBinaryInfo) - m_chunkUsageBaseOffsetInDW; max is currently 7 dwords (128 T# + 32 V# + 20 CB V# + 16 UAV T#/V#)
-	uint8_t			m_numInputUsageSlots;				// Up to 16 user data reg slots + 128 extended user data dwords supported by CUE; up to 16 user data reg slots + 240 extended user data dwords supported by InputUsageSlot
-	uint8_t         m_isSrt : 1;	// 1 if this shader uses shader resource tables and has an SrtDef table embedded below the input usage table and any extended usage info
-	uint8_t         m_isSrtUsedInfoValid : 1;	// 1 if SrtDef::m_isUsed=0 indicates an element is definitely unused; 0 if SrtDef::m_isUsed=0 indicates only that the element is not known to be used (m_isUsed=1 always indicates a resource is known to be used)
-	uint8_t         m_isExtendedUsageInfo : 1;	// 1 if this shader has extended usage info for the InputUsage table embedded below the input usage table
-	uint8_t         m_reserved2 : 5;	// For future use
-	uint8_t         m_reserved3;						// For future use
-
-	uint32_t		m_shaderHash0;				// Association hash first 4 bytes
-	uint32_t		m_shaderHash1;				// Association hash second 4 bytes
-	uint32_t		m_crc32;					// crc32 of shader + this struct, just up till this field
-};
-
-void print_bininfo(const ShaderBinaryInfo &bininfo) {
-    uint32_t version = bininfo.m_version;
-    uint32_t pssl_or_cg = bininfo.m_pssl_or_cg;
-    uint32_t cached = bininfo.m_cached;
-    uint32_t type = bininfo.m_type;
-    uint32_t source_type = bininfo.m_source_type;
-    uint32_t length = bininfo.m_length;
-    uint32_t chunkUsageBaseOffsetInDW = bininfo.m_chunkUsageBaseOffsetInDW;
-    uint32_t numInputUsageSlots = bininfo.m_numInputUsageSlots;
-    uint32_t isSrt = bininfo.m_isSrt;
-    uint32_t isSrtUsedInfoValid = bininfo.m_isSrtUsedInfoValid;
-    uint32_t isExtendedUsageInfo = bininfo.m_isExtendedUsageInfo;
-    uint32_t reserved2 = bininfo.m_reserved2;
-    uint32_t reserved3 = bininfo.m_reserved3;
-    uint32_t shaderHash0 = bininfo.m_shaderHash0;
-    uint32_t shaderHash1 = bininfo.m_shaderHash1;
-    uint32_t crc32 = bininfo.m_crc32;
-
-    printf(
-		"   m_signature: %.*s\n"
-		"   m_version: %x\n"
-	    "   m_pssl_or_cg: %x\n"
-	    "   m_cached: %x\n"
-		"   m_type: %x\n"
-		"   m_source_type: %x\n"
-	    "   m_length: %i\n"
-		"   m_chunkUsageBaseOffsetInDW: %x\n"
-		"   m_numInputUsageSlots: %x\n"
-        "   m_isSrt: %x\n"
-        "   m_isSrtUsedInfoValid: %x\n"
-        "   m_isExtendedUsageInfo: %x\n"
-        "   m_reserved2: %x\n"
-        "   m_reserved3: %x\n"
-        "   m_shaderHash0: %x\n"
-        "   m_shaderHash1: %x\n"
-        "   m_crc32: %x\n",
-        7, bininfo.m_signature,
-        version,
-        pssl_or_cg,
-        cached,
-        type,
-        source_type,
-        length,
-        chunkUsageBaseOffsetInDW,
-        numInputUsageSlots,
-        isSrt,
-        isSrtUsedInfoValid,
-        isExtendedUsageInfo,
-        reserved2,
-        reserved3,
-        shaderHash0,
-        shaderHash1,
-        crc32
-    );
-}
-
 
 #include "llvm/Support/ManagedStatic.h"
 #include "llvm/MC/MCAsmBackend.h"
@@ -138,6 +55,7 @@ void print_bininfo(const ShaderBinaryInfo &bininfo) {
 #include "llvm/Support/InitLLVM.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/TargetSelect.h"
+#include "llvm/Support/CommandLine.h"
 
 #include "mlir/Dialect/SPIRV/IR/SPIRVDialect.h"
 #include "mlir/Target/SPIRV/Serialization.h"
@@ -146,9 +64,9 @@ void print_bininfo(const ShaderBinaryInfo &bininfo) {
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 
-//#include "llvm/lib/Target/AMDGPU/Disassembler/AMDGPUDisassembler.h"
 #include "llvm/MC/MCDisassembler/MCDisassembler.h"
 
+#include "GcnBinary.h"
 
 #include "AMDGPUGenInstrInfo_INSTRINFO.inc"
 #include "AMDGPUGenRegisterInfo_REGINFO.inc"
@@ -162,6 +80,10 @@ bool isSgpr(uint regno) {
     return regno >= AMDGPU::SGPR0 && regno <= AMDGPU::SGPR105;
 }
 
+bool isSgprPair(uint regno) {
+    return regno >= AMDGPU::SGPR0_SGPR1 && regno <= AMDGPU::SGPR104_SGPR105;
+}
+
 bool isVgpr(uint regno) {
     return regno >= AMDGPU::VGPR0 && regno <= AMDGPU::VGPR255;
 }
@@ -171,9 +93,19 @@ inline uint sgprOffset(uint regno) {
     return regno - AMDGPU::SGPR0;
 }
 
+inline uint sgprPairOffset(uint regno) {
+    assert(isSgprPair(regno));
+    return regno - AMDGPU::SGPR0_SGPR1;
+}
+
 inline uint vgprOffset(uint regno) {
     assert(isVgpr(regno));
     return regno - AMDGPU::VGPR0;
+}
+
+inline uint sgprPairToSgprBase(uint regno) {
+    assert(isSgprPair(regno));
+    return AMDGPU::SGPR0 + 2 * sgprPairOffset(regno);
 }
 
 // Sanity check this.
@@ -207,8 +139,9 @@ bool isSpecialCCReg(uint regno) {
 llvm::SmallString<8> getUniformRegName(uint regno) {
     llvm::SmallString<8> name;
     if (isSgpr(regno)) {
-        name = "s_";
-        name += std::to_string(sgprOffset(regno));
+        llvm::Twine twine("s_");
+        uint sgprno = sgprOffset(regno);
+        twine.concat(Twine(sgprno)).toStringRef(name);
         return name;
     }
     switch (regno) {
@@ -234,11 +167,15 @@ llvm::SmallString<8> getUniformRegName(uint regno) {
     return name;
 }
 
-llvm::SmallString<8> getCCRegName(uint regno) {
-    llvm::SmallString<8> name;
-    if (isSgpr(regno)) {
-        name = "scc_";
-        name += std::to_string(sgprOffset(regno));
+llvm::SmallString<16> getCCRegName(uint regno) {
+    llvm::SmallString<16> name;
+    if (isSgprPair(regno)) {
+        llvm::Twine twine("s[");
+        uint pairOffset = sgprPairOffset(regno);
+        uint sgprlo = 2 * pairOffset;
+        uint sgprhi = sgprlo + 1;
+        twine.concat(Twine(sgprlo)).
+                concat(":").concat(Twine(sgprhi)).concat("]").toStringRef(name);
         return name;
     }
     switch (regno) {
@@ -258,12 +195,15 @@ llvm::SmallString<8> getCCRegName(uint regno) {
 enum GcnRegType {
     SGpr,
     VGpr,
+    SgprPair,
     Special // m0, VCC, etc
 };
 
 GcnRegType regnoToType(uint regno) {
     if (isSgpr(regno)) {
         return GcnRegType::SGpr;
+    } else if (isSgprPair(regno)) {
+        return GcnRegType::SgprPair;
     } else if (isVgpr(regno)) {
         return GcnRegType::VGpr;
     }
@@ -308,6 +248,16 @@ private:
     ConvertStatus status;
 };
 
+#if defined(_DEBUG)
+// For printing from GDB
+MCInstPrinter *ProcIP = nullptr;
+const MCSubtargetInfo *ProcSTI = nullptr;
+extern "C" void  printInst(MCInst &MI) {
+    llvm::outs().flush();
+    ProcIP->printInst(&MI, 0, "", *ProcSTI, llvm::outs());
+}
+#endif
+
 // Different register types in Gcn.
 // Because Gcn is a hardware ISA, it has a notion of SIMD.
 // We are modeling it in SPIR-V, which is basically SIMT and mostly hides that other threads exist.
@@ -335,6 +285,14 @@ private:
 // Bitwise instructions AND, OR, idk.
 // Figure these out on a case by case basis
 
+
+// """
+// EXEC can be read from, and written to, through scalar instructions; it also can be
+// written as a result of a vector-ALU compare. This mask affects vector-ALU,
+// vector-memory, LDS, and export instructions. It does not affect scalar execution
+// or branches.
+// """
+
 // Holds a single 32 bit value per 64-thread wavefront.
 // Could hold a loop counter for example
 // VariableOp holds an i32 type
@@ -349,10 +307,10 @@ typedef VariableOp VectorReg;
 
 class GcnToSpirvConverter {
 public:
-    GcnToSpirvConverter(const std::vector<MCInst> &machineCode, ExecutionModel shaderType, const MCSubtargetInfo *STI, MCInstPrinter *IP):
+    GcnToSpirvConverter(const std::vector<MCInst> &machineCode, ExecutionModel execModel, const MCSubtargetInfo *STI, MCInstPrinter *IP):
         mlirContext(), 
         builder(mlir::UnknownLoc::get(&mlirContext), &mlirContext),
-        shaderType(shaderType),
+        execModel(execModel),
         machineCode(machineCode),
         status(SpirvConvertResult::empty),
         mainEntryBlock(nullptr),
@@ -369,11 +327,17 @@ public:
         int64Ty = builder.getI64Type();
         int16Ty = builder.getI16Type();
         boolTy = builder.getI1Type();
+
+#if defined(_DEBUG)
+        ProcIP = IP;
+        ProcSTI = STI;
+#endif
     }
 
     SpirvConvertResult convert();
 
 private:
+    bool prepass();
     bool convertGcnOp(const MCInst &MI);
     bool buildSpirvDialect();
     bool finalizeModule();
@@ -384,8 +348,7 @@ private:
         mlir::ImplicitLocOpBuilder initBuilder(builder);
         initBuilder.setInsertionPointToStart(mainEntryBlock);
         auto boolPtrTy = PointerType::get(boolTy, StorageClass::Function);
-        auto initializer = initBuilder.create<ConstantOp>(boolTy, initBuilder.getIntegerAttr(boolTy, 0));
-        auto var = initBuilder.create<VariableOp>(boolPtrTy, StorageClassAttr::get(&mlirContext, StorageClass::Function), initializer);
+        auto var = initBuilder.create<VariableOp>(boolPtrTy, StorageClassAttr::get(&mlirContext, StorageClass::Function), nullptr);
 #if defined(_DEBUG)
         var->setDiscardableAttr(builder.getStringAttr("gcn.varname"), builder.getStringAttr(name));
 #endif
@@ -397,8 +360,7 @@ private:
         mlir::ImplicitLocOpBuilder initBuilder(builder);
         initBuilder.setInsertionPointToStart(mainEntryBlock);
         auto intPtrTy = PointerType::get(intTy, StorageClass::Function);
-        auto initializer = initBuilder.create<ConstantOp>(intTy, initBuilder.getI32IntegerAttr(0));
-        auto var = initBuilder.create<VariableOp>(intPtrTy, StorageClassAttr::get(&mlirContext, StorageClass::Function), initializer);
+        auto var = initBuilder.create<VariableOp>(intPtrTy, StorageClassAttr::get(&mlirContext, StorageClass::Function), nullptr);
 #if defined(_DEBUG)
         var->setDiscardableAttr(builder.getStringAttr("gcn.varname"), builder.getStringAttr(name));
 #endif
@@ -408,9 +370,10 @@ private:
     VectorReg initVgpr(uint regno) {
         auto it = usedVgprs.find(regno);
         if (it == usedVgprs.end()) {
-            llvm::SmallString<8> name("v_");
+            llvm::SmallString<8> name;
             uint vgprNameOffset = vgprOffset(regno);
-            name += std::to_string(vgprNameOffset);
+            llvm::Twine twine("v_");
+            twine.concat(Twine(vgprNameOffset)).toStringRef(name);
             VariableOp vgpr = buildAndName32BitReg(name);
             auto it = usedVgprs.insert(std::make_pair(regno, vgpr));
             return it.first->second;
@@ -435,6 +398,32 @@ private:
             auto name = getUniformRegName(regno);
             UniformReg uniform = buildAndName32BitReg(name);
             auto it = usedUniformRegs.insert(std::make_pair(regno, uniform));
+            return it.first->second;
+        } else {
+            return it->second;
+        }
+    }
+
+    VariableOp buildAndNameInOutAttribute(llvm::StringRef name, uint attrno, mlir::Type attrType, StorageClass storage) {
+        mlir::ImplicitLocOpBuilder initBuilder(builder);
+        initBuilder.setInsertionPointToStart(mainEntryBlock);
+        auto attrPtrTy = PointerType::get(attrType, storage);
+        auto var = initBuilder.create<VariableOp>(attrPtrTy, StorageClassAttr::get(&mlirContext, storage), nullptr);
+#if defined(_DEBUG)
+        var->setDiscardableAttr(builder.getStringAttr("gcn.varname"), builder.getStringAttr(name));
+#endif
+        var->setAttr("Location", builder.getI32IntegerAttr(attrno));
+        return var;
+    }
+
+    VariableOp initInputAttribute(uint attrno, mlir::Type attrType) {
+        auto it = inAttributes.find(attrno);
+        if (it == inAttributes.end()) {
+            llvm::SmallString<16> name;
+            llvm::Twine twine("inAttr_");
+            twine.concat(Twine(attrno)).toStringRef(name);
+            InputAttribute attr = buildAndNameInOutAttribute(name, attrno, attrType, StorageClass::Input);
+            auto it = inAttributes.insert(std::make_pair(attrno, attr));
             return it.first->second;
         } else {
             return it->second;
@@ -596,7 +585,7 @@ private:
         assert(result.getType() == boolTy);
 
         uint regno = dst.getReg();
-        assert(isSgpr(regno) || isSpecialCCReg(regno));
+        assert(isSgprPair(regno) || isSpecialCCReg(regno));
         CCReg cc = initCCReg(regno);
         builder.create<StoreOp>(cc, result);
     }
@@ -619,7 +608,7 @@ private:
 
     mlir::MLIRContext mlirContext;
     mlir::ImplicitLocOpBuilder builder;
-    ExecutionModel shaderType;
+    ExecutionModel execModel;
 
     std::vector<MCInst> machineCode;
     SpirvBytecodeVector spirvModule;
@@ -630,6 +619,11 @@ private:
     llvm::DenseMap<uint, CCReg> usedCCRegs;
     // Includes Sgprs (uniforms - 32 bits), EXEC_LO, EXEC_HI, m0, VCC_LO, etc
     llvm::DenseMap<uint, UniformReg> usedUniformRegs;
+
+    // In/Out attributes
+    typedef VariableOp InputAttribute;
+    // Maps attribute number (Gcn) to VariableOp for 'in' vertex attributes
+    llvm::DenseMap<uint, InputAttribute> inAttributes;
     
     FuncOp mainFn;
     mlir::Block *mainEntryBlock;
@@ -647,6 +641,53 @@ private:
     const MCSubtargetInfo *STI;
     MCInstPrinter *IP;
 };
+
+bool GcnToSpirvConverter::prepass() {
+    llvm::DenseMap<uint, uint> attrToNumComponents;
+
+    // Do some things:
+    // Figure out how many components each in/out attribute has (1 - 4)
+
+    bool success = true;
+    for (MCInst &MI: machineCode) {
+        switch (MI.getOpcode()) {
+            case AMDGPU::V_INTERP_P2_F32_si:
+            {
+                assert(execModel == ExecutionModel::Fragment);
+                if (execModel != ExecutionModel::Fragment) {
+                    return false;
+                }
+                uint attrno, component;
+                attrno = MI.getOperand(3).getImm();
+                component = MI.getOperand(4).getImm();
+                auto it = attrToNumComponents.find(attrno);
+                if (it != attrToNumComponents.end()) {
+                    uint maxComponent = std::max(it->second, component);
+                    it->getSecond() = maxComponent;
+                } else {
+                    attrToNumComponents[attrno] = component;
+                }
+                break;
+            }
+        }
+    }
+
+    // Initialize input attributes
+    for (const auto &kv: attrToNumComponents) {
+        uint attrno = kv.first;
+        uint numComponents = kv.second + 1;
+        mlir::Type attrType;
+        if (numComponents > 1) {
+            attrType = mlir::VectorType::get({numComponents}, floatTy);
+        } else {
+            attrType = floatTy;
+        }
+
+        initInputAttribute(attrno, attrType);
+    }
+
+    return success;
+}
 
 bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
     //llvm::SmallVector<mlir::NamedAttribute, 2> attrs 
@@ -710,15 +751,15 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
                             break;
                     }
                 } else {
-                    assert(isSgpr(srcno) && (sgprOffset(srcno) % 2 == 0));
-                    loSrcNo = srcno;
-                    hiSrcNo = srcno + 1;
+                    assert(isSgprPair(srcno));
+                    loSrcNo = sgprPairToSgprBase(srcno);
+                    hiSrcNo = loSrcNo + 1;
                 }
                 uniValLo = sourceUniformReg(loSrcNo);
                 uniValHi = sourceUniformReg(hiSrcNo);
 
                 // Move cc
-                assert(isSgpr(srcno) || isSpecialCCReg(srcno));
+                assert(isSgprPair(srcno) || isSpecialCCReg(srcno));
                 ccVal = sourceCCReg(srcno);
                 storeResultCC(dst, ccVal);
             }
@@ -743,12 +784,27 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
                         break;
                 }
             } else {
-                assert(isSgpr(dstno) && (sgprOffset(dstno) % 2 == 0));
-                loDstNo = dstno;
-                hiDstNo = dstno + 1;
+                assert(isSgprPair(dstno));
+                loDstNo = sgprPairToSgprBase(dstno);
+                hiDstNo = loDstNo + 1;
             }
             storeScalarResult32(loDstNo, uniValLo);
             storeScalarResult32(hiDstNo, uniValHi);
+            break;
+        }
+
+        case AMDGPU::S_WQM_B64_gfx6_gfx7:
+        {
+            MCOperand dst, src;
+            dst = MI.getOperand(0);
+            src = MI.getOperand(1);
+
+            // What I've seen so far
+            // Probably just implementation detail for pixel shaders and can ignore.
+            // Probably gets helper quad invocations running on AMD hardware
+            // for derivatives and stuff
+            assert(dst.isReg() && dst.getReg() == AMDGPU::EXEC);
+            assert(src.isReg() && src.getReg() == AMDGPU::EXEC);
             break;
         }
 
@@ -938,6 +994,48 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
             break;
         }
 
+        // VINTRP
+        case AMDGPU::V_INTERP_P1_F32_si:
+        {
+            // ignore for now
+            break;
+        }
+        case AMDGPU::V_INTERP_P2_F32_si:
+        {
+            // Simple for now
+            // Assume previous V_INTERP_P1 with 1st barycentric coord.
+            // Assume this one uses 2nd bary coord
+            MCOperand dst, src;
+            int attrno, component;
+            dst = MI.getOperand(0); // also operand 1 (I think)
+            // src = MI.getOperand(2); // holds barycentric coord (I think): ignore and let Vulkan driver handle
+            attrno = MI.getOperand(3).getImm();
+            // Dunno if this needs to be an immediate
+            component = MI.getOperand(4).getImm();
+
+            //assert(inp)
+            auto it = inAttributes.find(attrno);
+            assert(it != inAttributes.end());
+            InputAttribute attr = it->second;
+            PointerType attrPtrType = cast<PointerType>(attr.getType());
+            mlir::Type attrType = attrPtrType.getPointeeType();
+
+            mlir::Value attrVal = builder.create<LoadOp>(attr);
+            if (auto fvecTy = dyn_cast<mlir::VectorType>(attrType)) {
+                int idx[] = { component };
+                attrVal = builder.create<CompositeExtractOp>(attrVal, idx);
+            }
+            assert(dyn_cast<mlir::VectorType>(attrType) || component == 0);
+
+            // TODO: check if this store should be predicated by EXEC
+            // Pretty sure it is
+            storeVectorResult32(dst, attrVal);
+            break;
+        }
+
+        // The EXEC mask is applied to all exports.
+        // Only pixels with the corresponding EXEC bit set to 1 export data to the output buffer.
+
         default:
             llvm::outs() << "Unhandled instruction: \n";
             IP->printInst(&MI, 0, "", *STI, llvm::outs());
@@ -949,7 +1047,7 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
 }
 
 bool GcnToSpirvConverter::buildSpirvDialect() {
-    bool err = true;
+    bool success = true;
     moduleOp = builder.create<ModuleOp>(AddressingModel::Logical, MemoryModel::GLSL450);
     mlir::Region &region = moduleOp.getBodyRegion();
     //mlir::Block &entryBlock = region.emplaceBlock();
@@ -968,8 +1066,11 @@ bool GcnToSpirvConverter::buildSpirvDialect() {
     builder.create<BranchOp>(&mainBody);
     builder.setInsertionPointToStart(&mainBody);
 
+    if ( !prepass()) {
+        return false;
+    }
     for (const MCInst &MI: machineCode) {
-        err &= convertGcnOp(MI);
+        success &= convertGcnOp(MI);
     }
     builder.create<ReturnOp>();
     
@@ -981,7 +1082,7 @@ bool GcnToSpirvConverter::finalizeModule() {
     mlir::Region &region = moduleOp.getBodyRegion();
     builder.setInsertionPointToEnd(&(*region.begin()));
     llvm::SmallVector<mlir::Attribute, 4> interfaceVars;
-    builder.create<EntryPointOp>(shaderType, mainFn, interfaceVars);
+    builder.create<EntryPointOp>(execModel, mainFn, interfaceVars);
 
     llvm::SmallVector<Capability, 8> caps = { Capability::Shader, Capability::Float16, Capability::Int16 };
     llvm::SmallVector<Extension, 4> exts;
@@ -1029,12 +1130,13 @@ SpirvConvertResult GcnToSpirvConverter::convert() {
     return SpirvConvertResult(std::move(spirvModule), SpirvConvertResult::success);
 }
 
-int llvm_mc_main(int argc, char ** argv, const std::vector<unsigned char> &gcnBytecode, fs::path binPath) {
-    //llvm::InitializeAllTargetInfos();
-    //llvm::InitializeAllTargetMCs();
+// For hiding llvm command line options
+cl::OptionCategory MyCategory("Compiler Options", "Options for controlling the compilation process.");
 
-    //InitLLVM X(argc, argv);
+cl::opt<std::string> GcnBinaryDumpFilepath("dump-gcn-inputs", cl::desc("dump gcn binaries in the input file to N numbered files starting with given name"), cl::value_desc("filename"), cl::cat(MyCategory));
+cl::opt<std::string> InputGcnFilepath(cl::Positional, cl::desc("<input file>"), cl::Required, cl::value_desc("filename"), cl::cat(MyCategory));
 
+bool decodeAndConvertGcnCode(const std::vector<unsigned char> &gcnBytecode, ExecutionModel execModel) {
     LLVMInitializeAMDGPUTargetInfo();
     LLVMInitializeAMDGPUTargetMC();
     LLVMInitializeAMDGPUDisassembler();
@@ -1081,13 +1183,12 @@ int llvm_mc_main(int argc, char ** argv, const std::vector<unsigned char> &gcnBy
 
     ArrayRef byteView(gcnBytecode.data(), gcnBytecode.size());
 
-    //builder.create<mlir::spirv::BitcastOp>();
-
     llvm::outs() << "\n";
     std::vector<MCInst> machineCode;
     while (addr < byteView.size()) {
         MCInst MI;
-        MCDisassembler::DecodeStatus Res = DisAsm->getInstruction(MI, size, byteView.slice(addr), addr, llvm::nulls());
+        MCDisassembler::DecodeStatus Res;
+        Res = DisAsm->getInstruction(MI, size, byteView.slice(addr), addr, llvm::nulls());
 
         switch (Res) {
             case MCDisassembler::DecodeStatus::Success:
@@ -1095,30 +1196,21 @@ int llvm_mc_main(int argc, char ** argv, const std::vector<unsigned char> &gcnBy
             case MCDisassembler::DecodeStatus::Fail:
             case MCDisassembler::DecodeStatus::SoftFail:
                 printf("Failed decoding instruction\n");
-                return 1;
+                return false;
         }
         IP->printInst(&MI, 0, "", *STI, llvm::outs());
         llvm::outs() << "\n";
-
-        switch (MI.getOpcode()) {
-            case AMDGPU::S_MOV_B32_gfx6_gfx7:
-                break;
-            default:
-                break;
-        }
 
         machineCode.push_back(std::move(MI));
 
         addr += size;
     }
 
-    ExecutionModel execModel = ExecutionModel::Vertex; // TODO
     GcnToSpirvConverter converter(machineCode, execModel, STI.get(), IP);
     SpirvConvertResult result = converter.convert();
-    assert(result);
     SpirvBytecodeVector spirvModule = result.takeSpirvModule();
 
-    fs::path spirvPath = binPath.filename().stem();
+    fs::path spirvPath = fs::path(InputGcnFilepath.getValue()).filename().stem();
     spirvPath += ".spv";
     std::error_code ec;
     raw_fd_ostream spirvFile(spirvPath.c_str(), ec);
@@ -1129,105 +1221,142 @@ int llvm_mc_main(int argc, char ** argv, const std::vector<unsigned char> &gcnBy
     spirvFile.write(reinterpret_cast<char *>(spirvModule.data()), spirvModule.size_in_bytes());
 
     llvm_shutdown();
-    return result ? 0 : 1;
+    return result;
 }
 
 int main(int argc, char **argv) {
-    assert(argc > 0);
+    int err = 0;
+    std::vector<uint8_t> buf;
 
-    fs::path binPath(argv[1]);
-    //bool search = false;
+    cl::HideUnrelatedOptions(MyCategory);
+    cl::ParseCommandLineOptions(argc, argv);
 
-    fs::path outBinPath;
-    for (int i = 1; i < argc; i++) {
-        if ( std::string(argv[i]) == "-o") { 
-            assert(i + 1 < argc);
-            outBinPath = argv[++i];
-        } else if ( std::string(argv[i]) == "-s") { // search file for GCN. Dump to working directory
-            //search = true;
-        } else {
-            binPath = argv[i];
-        }
+    FILE *gcnFile = fopen(InputGcnFilepath.c_str(), "r");
+    if (!gcnFile) {
+        printf("Couldn't open %s for reading\n", InputGcnFilepath.c_str());
+        return 1;
     }
-
-    if (binPath.empty()) {
-        fprintf(stderr, "input binary path not given\n");
-        return -1;
-    }
-
-    std::vector<unsigned char> buf;
-    FILE *f = fopen(binPath.c_str(), "r");
-    assert(f);
-    fseek(f, 0, SEEK_END);
-    size_t len = ftell(f);
-    fseek(f, 0, SEEK_SET);
-
+    fseek(gcnFile, 0, SEEK_END);
+    size_t len = ftell(gcnFile);
     buf.resize(len);
-    assert(1 == fread(buf.data(), len, 1, f));
+    fseek(gcnFile, 0, SEEK_SET);
+    if (1 != fread(buf.data(), len, 1, gcnFile)) {
+        printf("Error reading from %s: %s\n", InputGcnFilepath.c_str(), strerror(errno));
+        return 1;
+    }
 
-    ShaderBinaryInfo bininfo;
     const char *magic = "OrbShdr";
+    const uint32_t fileHeaderMagic = 0x72646853; // "Shdr"
 
-    size_t progStartOff = 0;
-    bool foundProgStart = false;
-    bool foundBinInfo = false;
+    // location "OrbShdr" string
+    llvm::SmallVector<size_t, 4> programOffsets;
+    // location of "Shdr" string
+    llvm::SmallVector<size_t, 4> shdrOffsets;
+    // Headers that follow binary
+    llvm::SmallVector<size_t, 4> binaryInfoOffsets;
 
-    for (size_t i = 0; i <= len - strlen(magic); i++) {
+    for (size_t i = 0; i <= len - strlen(magic);) {
         if ( !memcmp(&buf[i], magic, strlen(magic))) {
-            printf("found OrbShdr, position 0x%zx\n", i);
             assert(i + sizeof(ShaderBinaryInfo) <= len);
-            memcpy(&bininfo, &buf[i], sizeof(ShaderBinaryInfo));
-            printf("\n");
-            print_bininfo(bininfo);
-            foundBinInfo = true;
-            assert(foundProgStart);
-            std::vector<unsigned char> programBinary(bininfo.m_length);
-            memcpy(programBinary.data(), &buf[progStartOff], bininfo.m_length);
-            llvm_mc_main(argc, argv, programBinary, binPath);
+            if (programOffsets.size() == binaryInfoOffsets.size()) {
+                printf("Found BinaryInfo header without previous first instruction (mov vcc_hi 26). Skipping\n");
+                err = 1;
+                continue;
+            }
+            binaryInfoOffsets.push_back(i);
+            i += strlen(magic);
+        } else if (*reinterpret_cast<uint32_t *>(&buf[i]) == fileHeaderMagic) {
+            shdrOffsets.push_back(i);
+            i += sizeof(fileHeaderMagic);
         } else if ( *reinterpret_cast<uint32_t *>(&buf[i]) == 0xbeeb03ff) {
-            // host is little endian. Reverse when we
-            printf("found first instr: offset: 0x%zx\n", progStartOff);
-            progStartOff = i;
-            foundProgStart = true;
-        } else if ( *reinterpret_cast<uint32_t *>(&buf[i]) == 0xff03ebbe) { // s_mov_b32 vcc_hi, #imm
-            printf("found first instr: offset: 0x%zx\n", progStartOff);
-            printf("was reversed on disk (big endian)\n");
-            progStartOff = i;
-            foundProgStart = true;
-        }
-
-        if (foundProgStart) {
-            
+            if (programOffsets.size() > binaryInfoOffsets.size()) {
+                printf("Found 2 first instructions (mov vcc_hi 26) in a row. Dropping the first one\n");
+                err = 1;
+                programOffsets.pop_back();
+            }
+            programOffsets.push_back(i);
+            i+=4;
+        } else {
+            i++;
         }
     }
 
-    if ( !foundProgStart) {
+    size_t numBinaries = programOffsets.size();
+    assert(numBinaries == binaryInfoOffsets.size() && numBinaries == shdrOffsets.size());
+
+    if (numBinaries == 0) {
         printf("couldn't find first instruction\n");
         return 1;
     }
 
-    if ( !foundBinInfo) {
-        printf("couldn't find bininfo\n");
-        return -1;
+    for (uint i = 0; i < numBinaries; i++) {
+        std::vector<uint8_t> gcnBytecode;
+        size_t codeOff = programOffsets[i];
+        size_t infoOff = binaryInfoOffsets[i];
+        size_t shdrMagicOff = shdrOffsets[i];
+
+        //void *afterShdrMagic = &buf[shdrMagicOff + strlen(shdrMagic)];
+        //auto *header = (Header *) buf.data();
+        //auto *fileHeader = (ShaderFileHeader*) buf.data(); 
+        //auto *common = (ShaderCommonData*) buf.data();
+
+        const ShaderFileHeader *fileHeader = reinterpret_cast<const ShaderFileHeader*>(&buf[shdrMagicOff]);
+        const Header *binaryHeader = reinterpret_cast<const Header *>(fileHeader) - 1;
+        const ShaderCommonData *shaderCommon = reinterpret_cast<const ShaderCommonData*>(fileHeader + 1);
+
+        ShaderBinaryInfo *binaryInfo = (ShaderBinaryInfo *) &buf[infoOff];
+        gcnBytecode.resize(binaryInfo->m_length);
+        memcpy(gcnBytecode.data(), &buf[codeOff], gcnBytecode.size());
+
+        ExecutionModel execModel;
+        printf("Binary %i: \"Shdr\" at offset %lu, code at offset %lu, size %i, \"OrbShdr\" at offset %lu\n", i, shdrMagicOff, codeOff, binaryInfo->m_length, infoOff);
+        switch (static_cast<ShaderBinaryStageType>(binaryInfo->m_type)) {
+	        case ShaderBinaryStageType::kPixelShader:
+                execModel = ExecutionModel::Fragment;
+                break;
+	        case ShaderBinaryStageType::kVertexShader:
+                execModel = ExecutionModel::Vertex;
+                break;
+	        case ShaderBinaryStageType::kComputeShader:
+                execModel = ExecutionModel::GLCompute;
+                break;
+	        case ShaderBinaryStageType::kGeometryShader:
+                execModel = ExecutionModel::Geometry;
+                break;
+	        case ShaderBinaryStageType::kHullShader:
+                execModel = ExecutionModel::TessellationControl;
+                break;
+	        case ShaderBinaryStageType::kDomainShader:
+                execModel = ExecutionModel::TessellationEvaluation;
+                break;
+            default:
+                err = true;
+                continue;
+        }
+
+        printf("stage type: %s\n", stringifyExecutionModel(execModel).str().c_str());
+
+        switch (execModel) {
+            case ExecutionModel::Vertex:
+            {
+                auto *vsShader = reinterpret_cast<const VsShader *>(shaderCommon);
+                const VertexInputSemantic *inputSemantics = vsShader->getInputSemanticTable();
+                const VertexExportSemantic *exportSemantics = vsShader->getExportSemanticTable();
+                break;
+            }
+            case ExecutionModel::Fragment:
+            {
+                auto *psShader = reinterpret_cast<const PsShader *>(shaderCommon);
+                const PixelInputSemantic *inputSemantics = psShader->getPixelInputSemanticTable();
+                break;
+            }
+            default:
+                break;
+        }
+
+        decodeAndConvertGcnCode(gcnBytecode, execModel);
     }
 
-
-//    size_t bytesRead = 0;
-//    while (bytesRead < bininfo.m_length) {
-//        uint32_t instr;
-//
-//        instr = *reinterpret_cast<uint32_t *>(&buf[progStartOff + bytesRead]);
-//        if ( !fileIsLittleEndian) {
-//            instr = bswap_32(instr);
-//        }
-//
-//        memcpy(programBinary.data() + bytesRead, &instr, sizeof(instr));
-//        uint32_t temp = htonl(instr);
-//        memcpy(outData.data() + bytesRead, &temp, sizeof(temp));
-//
-//        bytesRead += 4;
-//    }
-
-    return 0;
+    return err;
 }
 
