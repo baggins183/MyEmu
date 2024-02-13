@@ -93,11 +93,11 @@ Compiler
 Plan is to translate Gcn bytecode to spir-v.
 Gcn seems to all be public.
 Already supported in LLVM: can disassemble gcn code found in games using
-AMDGPU disassembler (with some tIaks to allow disassembling for the Bonaire arch, see Gcn/llvm_patch.diff).
+AMDGPU disassembler (with some tweaks to allow disassembling for the Bonaire arch, see Gcn/llvm_patch.diff).
 
 Will need to turn Gcn arbitrary control flow into legal spir-v (structured?) control flow.
 
-Need to handle Iird things like predicated execution with the exec mask, ambiguity between condition codes and uniforms (which are
+Need to handle weird things like predicated execution with the exec mask, ambiguity between condition codes and uniforms (which are
 stored in scalar gprs).
 
 How to handle buffer, image, texture memory ops with Vulkan concepts (descriptors, etc).
@@ -139,4 +139,18 @@ Stuff in general is messy, no effort to clean it up yet
 Add helpful links everywhere
 (AMD docs, ELF format/dynamic linking)
 
-/
+
+Building LLVM dependency
+pull from my llvm fork here:
+<TODO>
+
+from <llvm_repo_root>/<build_dir>:
+cmake -G Ninja -DCMAKE_BUILD_TYPE=Debug ../llvm -DLLVM_BUILD_LLVM_DYLIB=1 -DLLVM_LINK_LLVM_DYLIB=1 -DLLVM_ENABLE_PROJECTS=mlir -DLLVM_BUILD_EXAMPLES=ON -DLLVM_TARGETS_TO_BUILD="Native;NVPTX;AMDGPU" -DLLVM_ENABLE_ASSERTIONS=ON -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DLLVM_ENABLE_LLD=ON -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_INSTALL_PREFIX=<install prefix> -DLLVM_INSTALL_UTILS=ON
+ninja install
+
+Then need to change the Gcn/CMakeLists.txt to correct LLVM and MLIR install dirs
+
+TODO - add llvm fork as submodule and generalize CMakeLists.txt
+
+Building project
+cmake <project_root> [-G <whatever>]

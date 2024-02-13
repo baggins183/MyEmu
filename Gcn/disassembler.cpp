@@ -76,6 +76,12 @@ namespace fs = std::filesystem;
 using namespace llvm;
 using namespace mlir::spirv;
 
+// Input vertex attributes (interpolated in frag stage)
+typedef GlobalVariableOp InputAttribute;
+// Export targets. Includes render targets for frag shaders, position and user-defined attributes
+// otherwise.
+typedef GlobalVariableOp ExportTarget;
+
 bool isSgpr(uint regno) {
     return regno >= AMDGPU::SGPR0 && regno <= AMDGPU::SGPR105;
 }
@@ -88,24 +94,41 @@ bool isVgpr(uint regno) {
     return regno >= AMDGPU::VGPR0 && regno <= AMDGPU::VGPR255;
 }
 
-inline uint sgprOffset(uint regno) {
+uint sgprOffset(uint regno) {
     assert(isSgpr(regno));
     return regno - AMDGPU::SGPR0;
 }
 
-inline uint sgprPairOffset(uint regno) {
+uint sgprPairOffset(uint regno) {
     assert(isSgprPair(regno));
     return regno - AMDGPU::SGPR0_SGPR1;
 }
 
-inline uint vgprOffset(uint regno) {
+uint vgprOffset(uint regno) {
     assert(isVgpr(regno));
     return regno - AMDGPU::VGPR0;
 }
 
-inline uint sgprPairToSgprBase(uint regno) {
+uint sgprPairToSgprBase(uint regno) {
     assert(isSgprPair(regno));
     return AMDGPU::SGPR0 + 2 * sgprPairOffset(regno);
+}
+
+bool isRenderTarget(uint target) {
+    return target >= AMDGPU::Exp::ET_MRT0 && target <= AMDGPU::Exp::ET_NULL;
+}
+
+bool isPositionTarget(uint target) {
+    return target >= AMDGPU::Exp::ET_POS0 && target <= AMDGPU::Exp::ET_POS3;
+}
+
+bool isUserAttributeTarget(uint target) {
+    return target >= AMDGPU::Exp::ET_PARAM0 && target <= AMDGPU::Exp::ET_PARAM31;
+}
+
+uint userAttributeOffset(uint target) {
+    assert(isUserAttributeTarget(target));
+    return target - AMDGPU::Exp::ET_PARAM0;
 }
 
 // Sanity check this.
@@ -323,6 +346,9 @@ public:
         
         floatTy = builder.getF32Type();
         float16Ty = builder.getF16Type();
+        v2float32Ty = mlir::VectorType::get({2}, floatTy);
+        v2float16Ty = mlir::VectorType::get({2}, float16Ty);
+
         intTy = builder.getI32Type();
         int64Ty = builder.getI64Type();
         int16Ty = builder.getI16Type();
@@ -343,8 +369,11 @@ private:
     bool finalizeModule();
     bool generateSpirvBytecode();
 
+    bool isVertexShader() { return execModel == ExecutionModel::Vertex; }
+    bool isFragShader() { return execModel == ExecutionModel::Fragment; }
+
     // build a VariableOp for the CC (condition code) register, and attach a name
-    CCReg buildAndNameCCReg(llvm::StringRef name) {
+    CCReg buildCCReg(llvm::StringRef name) {
         mlir::ImplicitLocOpBuilder initBuilder(builder);
         initBuilder.setInsertionPointToStart(mainEntryBlock);
         auto boolPtrTy = PointerType::get(boolTy, StorageClass::Function);
@@ -356,7 +385,7 @@ private:
     }
     // build and name a vgpr or uniform register.
     // The register holds either a 32 value per thread (vgpr) or a single 32 bit value per 64-thread wavefront.
-    VariableOp buildAndName32BitReg(llvm::StringRef name) {
+    VariableOp build32BitReg(llvm::StringRef name) {
         mlir::ImplicitLocOpBuilder initBuilder(builder);
         initBuilder.setInsertionPointToStart(mainEntryBlock);
         auto intPtrTy = PointerType::get(intTy, StorageClass::Function);
@@ -374,7 +403,7 @@ private:
             uint vgprNameOffset = vgprOffset(regno);
             llvm::Twine twine("v_");
             twine.concat(Twine(vgprNameOffset)).toStringRef(name);
-            VariableOp vgpr = buildAndName32BitReg(name);
+            VariableOp vgpr = build32BitReg(name);
             auto it = usedVgprs.insert(std::make_pair(regno, vgpr));
             return it.first->second;
         } else {
@@ -385,7 +414,7 @@ private:
         auto it = usedCCRegs.find(regno);
         if (it == usedCCRegs.end()) {
             auto name = getCCRegName(regno);
-            CCReg cc = buildAndNameCCReg(name);
+            CCReg cc = buildCCReg(name);
             auto it = usedCCRegs.insert(std::make_pair(regno, cc));
             return it.first->second;
         } else {
@@ -396,7 +425,7 @@ private:
         auto it = usedUniformRegs.find(regno);
         if (it == usedUniformRegs.end()) {
             auto name = getUniformRegName(regno);
-            UniformReg uniform = buildAndName32BitReg(name);
+            UniformReg uniform = build32BitReg(name);
             auto it = usedUniformRegs.insert(std::make_pair(regno, uniform));
             return it.first->second;
         } else {
@@ -404,11 +433,12 @@ private:
         }
     }
 
-    VariableOp buildAndNameInOutAttribute(llvm::StringRef name, uint attrno, mlir::Type attrType, StorageClass storage) {
+    GlobalVariableOp buildInputAttribute(llvm::StringRef name, uint attrno, mlir::Type attrType) {
+        mlir::Region &region = moduleOp.getBodyRegion();
         mlir::ImplicitLocOpBuilder initBuilder(builder);
-        initBuilder.setInsertionPointToStart(mainEntryBlock);
-        auto attrPtrTy = PointerType::get(attrType, storage);
-        auto var = initBuilder.create<VariableOp>(attrPtrTy, StorageClassAttr::get(&mlirContext, storage), nullptr);
+        initBuilder.setInsertionPointToStart(&(*region.begin()));
+        auto attrPtrTy = PointerType::get(attrType, StorageClass::Input);
+        auto var = initBuilder.create<GlobalVariableOp>(attrPtrTy, name, nullptr);
 #if defined(_DEBUG)
         var->setDiscardableAttr(builder.getStringAttr("gcn.varname"), builder.getStringAttr(name));
 #endif
@@ -416,14 +446,86 @@ private:
         return var;
     }
 
-    VariableOp initInputAttribute(uint attrno, mlir::Type attrType) {
-        auto it = inAttributes.find(attrno);
-        if (it == inAttributes.end()) {
+    GlobalVariableOp buildExportTarget(llvm::StringRef name, uint target, mlir::Type attrType) {
+        mlir::Region &region = moduleOp.getBodyRegion();
+        mlir::ImplicitLocOpBuilder initBuilder(builder);
+        initBuilder.setInsertionPointToStart(&(*region.begin()));
+        auto attrPtrTy = PointerType::get(attrType, StorageClass::Output);
+        auto var = initBuilder.create<GlobalVariableOp>(attrPtrTy, name, nullptr);
+#if defined(_DEBUG)
+        var->setDiscardableAttr(builder.getStringAttr("gcn.varname"), builder.getStringAttr(name));
+#endif
+        int vkLocation = -1;
+        if (isUserAttributeTarget(target)) {
+            vkLocation = userAttributeOffset(target);
+        } else if (isRenderTarget(target)) {
+            assert(fragExportTargetToVkLocation.contains(target));
+            vkLocation = fragExportTargetToVkLocation[target];
+        }
+
+        if (vkLocation >= 0) {
+            var->setAttr("Location", builder.getI32IntegerAttr(vkLocation));
+        }
+
+        return var;
+    }
+
+    GlobalVariableOp initInputAttribute(uint attrno, mlir::Type attrType) {
+        auto it = inputAttributes.find(attrno);
+        if (it == inputAttributes.end()) {
             llvm::SmallString<16> name;
             llvm::Twine twine("inAttr_");
             twine.concat(Twine(attrno)).toStringRef(name);
-            InputAttribute attr = buildAndNameInOutAttribute(name, attrno, attrType, StorageClass::Input);
-            auto it = inAttributes.insert(std::make_pair(attrno, attr));
+            InputAttribute attr = buildInputAttribute(name, attrno, attrType);
+            auto it = inputAttributes.insert(std::make_pair(attrno, attr));
+            return it.first->second;
+        } else {
+            return it->second;
+        }
+    }
+
+    llvm::SmallString<16> nameExportTarget(uint target) {
+        llvm::SmallString<16> name;
+        llvm::Twine twine;
+        switch (execModel) {
+            case ExecutionModel::Fragment:
+            {
+                assert(isRenderTarget(target));
+                assert(target != AMDGPU::Exp::ET_NULL);
+                if (target == AMDGPU::Exp::ET_MRTZ) {
+                    name = "mrtZ";
+                } else {
+                    uint mrtIdx = target - AMDGPU::Exp::ET_MRT0;
+                    twine.concat("mrt").concat(Twine(mrtIdx)).toStringRef(name);
+                }
+                break;
+            }
+            case ExecutionModel::Vertex:
+            {
+                if (isPositionTarget(target)) {
+                    // When would multiple position exports happen?
+                    // multi view?
+                    assert(target == AMDGPU::Exp::ET_POS0 && "unhandled position export in vert shader");
+                    name = "position";
+                } else  {
+                    assert(isUserAttributeTarget(target));
+                    uint userAttribIdx = userAttributeOffset(target);
+                    twine.concat("outAttr_").concat(Twine(userAttribIdx)).toStringRef(name);
+                }
+                break;
+            }
+            default:
+                assert(false && "unhandled");
+        }
+        return name;
+    }
+
+    GlobalVariableOp initExportTarget(uint target, mlir::Type expTy) {
+        auto it = exportTargets.find(target);
+        if (it == exportTargets.end()) {
+            auto name = nameExportTarget(target);
+            ExportTarget attr = buildExportTarget(name, target, expTy);
+            auto it = exportTargets.insert(std::make_pair(target, attr));
             return it.first->second;
         } else {
             return it->second;
@@ -620,10 +722,15 @@ private:
     // Includes Sgprs (uniforms - 32 bits), EXEC_LO, EXEC_HI, m0, VCC_LO, etc
     llvm::DenseMap<uint, UniformReg> usedUniformRegs;
 
-    // In/Out attributes
-    typedef VariableOp InputAttribute;
-    // Maps attribute number (Gcn) to VariableOp for 'in' vertex attributes
-    llvm::DenseMap<uint, InputAttribute> inAttributes;
+    // Maps attribute number (GCN) to GlobalVariableOp for 'in' attributes
+    llvm::DenseMap<uint, InputAttribute> inputAttributes;
+    // Maps export number (GCN) to GlobalVariableOp for 'out' attributes.
+    // Keys are from the Exp enum, which includes MRT render targets 0-7, MRTZ (assuming frag-only)
+    // vertex position, and user-defined attributes from 32-63 (PARAM0-PARAM31) (assuming vert-only)
+    llvm::DenseMap<uint, ExportTarget> exportTargets;
+
+    // Used to compact the render targets MRT0...MRT7, MRTZ, etc to locations 0..N
+    llvm::DenseMap<uint, uint> fragExportTargetToVkLocation;
     
     FuncOp mainFn;
     mlir::Block *mainEntryBlock;
@@ -633,6 +740,9 @@ private:
     // init once and reuse these instead
     mlir::FloatType floatTy;
     mlir::FloatType float16Ty;
+    mlir::VectorType v2float32Ty;
+    mlir::VectorType v2float16Ty;
+    
     mlir::IntegerType intTy;
     mlir::IntegerType int64Ty;
     mlir::IntegerType int16Ty;
@@ -643,29 +753,81 @@ private:
 };
 
 bool GcnToSpirvConverter::prepass() {
-    llvm::DenseMap<uint, uint> attrToNumComponents;
+    // TODO : may need to declare input attributes with specific type
+    // so interpolation happens correctly in frag stage. Also need to match previous
+    // stage's output types with frag stage's input types
+    struct InputAttributeInfos {
+        mlir::Type eltTy;
+        uint maxComponent;
+    };
+
+    llvm::DenseMap<uint, InputAttributeInfos> inputAttrInfos;
+
+    struct ExportInfo {
+        uint componentWidth;
+        uint validMask : 4;
+    };
+
+    llvm::DenseMap<uint, ExportInfo> exportInfos;
 
     // Do some things:
     // Figure out how many components each in/out attribute has (1 - 4)
+
+    // Use to compact render targets (frag shader outputs)
+    llvm::BitVector usedExportTargets(AMDGPU::Exp::Target::ET_PARAM31 + 1);
 
     bool success = true;
     for (MCInst &MI: machineCode) {
         switch (MI.getOpcode()) {
             case AMDGPU::V_INTERP_P2_F32_si:
             {
-                assert(execModel == ExecutionModel::Fragment);
-                if (execModel != ExecutionModel::Fragment) {
+                assert(isFragShader());
+                if ( !isFragShader()) {
                     return false;
                 }
                 uint attrno, component;
                 attrno = MI.getOperand(3).getImm();
                 component = MI.getOperand(4).getImm();
-                auto it = attrToNumComponents.find(attrno);
-                if (it != attrToNumComponents.end()) {
-                    uint maxComponent = std::max(it->second, component);
-                    it->getSecond() = maxComponent;
+                auto it = inputAttrInfos.find(attrno);
+                if (it != inputAttrInfos.end()) {
+                    uint maxComponent = std::max(it->second.maxComponent, component);
+                    it->getSecond().maxComponent = maxComponent;
                 } else {
-                    attrToNumComponents[attrno] = component;
+                    // assume 32 bit float type for now - TODO
+                    inputAttrInfos[attrno] = { floatTy, component };
+                }
+                break;
+            }
+
+            case AMDGPU::EXP_DONE_si:
+            case AMDGPU::EXP_si:
+            {
+                uint target, compr, validMask;
+                target = MI.getOperand(0).getImm();
+                compr = MI.getOperand(6).getImm();
+                validMask = MI.getOperand(7).getImm();
+
+                // TODO - when vm flag is 0, are all components written
+                // I'm only guessing about what validMask is
+
+                if (target != AMDGPU::Exp::Target::ET_NULL) {
+                    if (isFragShader()) {
+                        assert(isRenderTarget(target));
+                        usedExportTargets.set(target);
+                    }
+
+                    // Remember validMask to later figure out how many components
+                    // compr == 1 -> 16 bit components
+                    // Assume either of these types for render targets for now
+                    uint componentWidth = compr ? 16 : 32;
+                    auto it = exportInfos.find(target);
+                    if (it != exportInfos.end()) {
+                        ExportInfo info = it->getSecond();
+                        assert(info.componentWidth == componentWidth);
+                        info.validMask |= validMask;
+                    } else {
+                        exportInfos[target] = { componentWidth, validMask };
+                    }
                 }
                 break;
             }
@@ -673,9 +835,9 @@ bool GcnToSpirvConverter::prepass() {
     }
 
     // Initialize input attributes
-    for (const auto &kv: attrToNumComponents) {
+    for (const auto &kv: inputAttrInfos) {
         uint attrno = kv.first;
-        uint numComponents = kv.second + 1;
+        uint numComponents = kv.second.maxComponent + 1;
         mlir::Type attrType;
         if (numComponents > 1) {
             attrType = mlir::VectorType::get({numComponents}, floatTy);
@@ -684,6 +846,46 @@ bool GcnToSpirvConverter::prepass() {
         }
 
         initInputAttribute(attrno, attrType);
+    }
+
+    // Compact render targets to output locations 0...N
+    if (isFragShader()) {
+        uint location = 0;
+        for (uint target = 0; target < usedExportTargets.size(); target++) {
+            if (usedExportTargets.test(target)) {
+                fragExportTargetToVkLocation[target] = location;
+                ++location;
+            }
+        }
+    }
+
+    // Assign types, initialize variables for exports
+    for (const auto &[target, expInfo]: exportInfos) {
+        uint width = expInfo.componentWidth;
+        assert(width == 16 || width == 32);
+        mlir::Type eltTy = width == 16 ? float16Ty : floatTy;
+        uint numComponents;
+        // Basically find the index of the MSB of validMask
+        if (expInfo.validMask & 8) {
+            numComponents = 4;
+        } else if (expInfo.validMask & 4) {
+            numComponents = 3;
+        } else if (expInfo.validMask & 2) {
+            numComponents = 2;
+        } else if (expInfo.validMask & 1) {
+            numComponents = 1;
+        } else {
+            // is never written, we should skip
+            continue;
+        }
+
+        mlir::Type expTy;
+        if (numComponents > 1) {
+            expTy = mlir::VectorType::get({numComponents}, eltTy);
+        } else {
+            expTy = eltTy;
+        }
+        initExportTarget(target, expTy);
     }
 
     return success;
@@ -821,6 +1023,7 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
         case AMDGPU::V_FLOOR_F32_e32_gfx6_gfx7:
         case AMDGPU::V_FRACT_F32_e32_gfx6_gfx7:
         case AMDGPU::V_RCP_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_MOV_B32_e32_gfx6_gfx7:
         {
             MCOperand dst, src;
             dst = MI.getOperand(0);
@@ -845,6 +1048,9 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
                     result = builder.create<FDivOp>(numerator, srcVal);
                     break;
                 }
+                case AMDGPU::V_MOV_B32_e32_gfx6_gfx7:
+                    result = srcVal;
+                    break;
             }
             storeVectorResult32(dst, result);
             break;
@@ -928,19 +1134,13 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
                     // decorate with FPRoundingMode?
                     // OpFConvert?
                     // OpQuantizeToF16?
-                    // TODO use glsl.450 ext with packHalf2x16
-                    auto bF16 = builder.create<FConvertOp>(float16Ty, b);
-                    auto bI16 = builder.create<BitcastOp>(int16Ty, bF16);
-                    result = builder.create<UConvertOp>(intTy, bI16);
-                    auto shiftBy = builder.create<ConstantOp>(intTy, builder.getI32IntegerAttr(16));
-                    result = builder.create<ShiftLeftLogicalOp>(result, shiftBy);
-                    auto aF16 = builder.create<FConvertOp>(float16Ty, a);
-                    auto aI16 = builder.create<BitcastOp>(int16Ty, aF16);
-                    auto aI32 = builder.create<UConvertOp>(intTy, aI16);
-                    result = builder.create<BitwiseOrOp>(result, aI32);
-
-                    // TODO: spirv dialect doesn't support this? Need to add to binary?
+                    mlir::Value vecElts[] = { a, b };
+                    result = builder.create<CompositeConstructOp>(v2float32Ty, vecElts);
+                    // Needs llvm/mlir patch to add this opcode
+                    result = builder.create<GLPackHalf2x16Op>(intTy, result);
+                    // TODO: spirv dialect doesn't support this? Need to change llvm?
                     // bF16->setAttr("FPRoundingMode", builder.getI32IntegerAttr(1));
+                    break;
                 }
 
             }
@@ -1014,13 +1214,14 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
             component = MI.getOperand(4).getImm();
 
             //assert(inp)
-            auto it = inAttributes.find(attrno);
-            assert(it != inAttributes.end());
+            auto it = inputAttributes.find(attrno);
+            assert(it != inputAttributes.end());
             InputAttribute attr = it->second;
             PointerType attrPtrType = cast<PointerType>(attr.getType());
             mlir::Type attrType = attrPtrType.getPointeeType();
 
-            mlir::Value attrVal = builder.create<LoadOp>(attr);
+            auto gvRef = builder.create<AddressOfOp>(attr);
+            mlir::Value attrVal = builder.create<LoadOp>(gvRef);
             if (auto fvecTy = dyn_cast<mlir::VectorType>(attrType)) {
                 int idx[] = { component };
                 attrVal = builder.create<CompositeExtractOp>(attrVal, idx);
@@ -1033,8 +1234,118 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
             break;
         }
 
-        // The EXEC mask is applied to all exports.
-        // Only pixels with the corresponding EXEC bit set to 1 export data to the output buffer.
+
+        case AMDGPU::EXP_DONE_si:
+        case AMDGPU::EXP_si:
+        {
+            // The EXEC mask is applied to all exports.
+            // Only pixels with the corresponding EXEC bit set to 1 export data to the output buffer.
+
+            // exp mrtz v2, off, off, off
+            // exp mrt0 v0, v0, v1, v1 done compr vm
+            MCOperand vsrc0, vsrc1, vsrc2, vsrc3;
+            uint target, done, compr, validMask;
+
+            target = MI.getOperand(0).getImm();
+            vsrc0 = MI.getOperand(1);
+            vsrc1 = MI.getOperand(2);
+            vsrc2 = MI.getOperand(3);
+            vsrc3 = MI.getOperand(4);
+            done = MI.getOperand(5).getImm();
+            compr = MI.getOperand(6).getImm();
+            validMask = MI.getOperand(7).getImm();
+
+            assert( !(isFragShader() && !isRenderTarget(target)));
+            if (target != AMDGPU::Exp::Target::ET_NULL) {
+                // dunno what validMask actually is.
+                // assuming is a writemask, but description of EXP instructions makes that sound wrong
+                // Just treat it like a writemask for now
+                assert(exportTargets.contains(target));
+                ExportTarget exp = exportTargets[target];
+                // exports are in 16 bit format.
+                // vsrc0 and vsrc1 each contain 2 f16's
+                auto gvRef = builder.create<AddressOfOp>(exp);
+                mlir::Type dstType = cast<PointerType>(gvRef.getType()).getPointeeType();
+
+                int dstNumComponents;
+                mlir::Type eltTy;
+                if (auto vecTy = dyn_cast<mlir::VectorType>(dstType)) {
+                    dstNumComponents = vecTy.getDimSize(0);
+                    eltTy = vecTy.getElementType();
+                } else {
+                    dstNumComponents = 1;
+                    eltTy = dstType;
+                }
+                assert(cast<mlir::FloatType>(eltTy));
+
+                mlir::Value src;
+                uint fullMask = (1 << dstNumComponents) - 1;
+                if (fullMask != validMask) {
+                    // partial write
+                    // read from output variable, update it partially, then write the result back
+                    src = builder.create<LoadOp>(gvRef);
+                    printf("LOG: export is partial write\n");
+                } else {
+                    src = builder.create<ConstantOp>(dstType, builder.getZeroAttr(dstType));
+                }
+
+                uint width = eltTy.getIntOrFloatBitWidth();
+                // index arg to composite insert/extract. Reuse
+                std::array<int, 1> idx = { 0 };
+                switch (width) {
+                    case 16:
+                    {
+                        mlir::Value src_0_1, src_2_3;
+
+                        if (validMask & 0x3) {
+                            src_0_1 = sourceVectorGpr(vsrc0.getReg());
+                            // Can we just bitfield extract and bitcast it? TODO
+                            // Instead of caring about float conversions?
+                            // uint -> vec2
+                            src_0_1 = builder.create<GLUnpackHalf2x16Op>(v2float32Ty, src_0_1);
+                        }
+                        if (validMask & 0xc) {
+                            src_2_3 = sourceVectorGpr(vsrc1.getReg());
+                            // uint -> vec2
+                            src_2_3 = builder.create<GLUnpackHalf2x16Op>(v2float32Ty, src_2_3);
+                        }
+                        for (int i = 0; i < dstNumComponents; i++) {
+                            if (validMask & (1 << i)) {
+                                auto half = i <= 1 ? src_0_1 : src_2_3;
+                                idx[0] = i & 1;
+                                // vec2 -> float
+                                mlir::Value component = builder.create<CompositeExtractOp>(half, idx);
+                                // float -> float16
+                                component = builder.create<FConvertOp>(float16Ty, component);
+                                idx[0] = i;
+                                src = builder.create<CompositeInsertOp>(component, src, idx);
+                            }
+                        }
+                        break;
+                    }
+                    case 32:
+                    {
+                        llvm::SmallVector<MCOperand, 4> srcRegs = { vsrc0, vsrc1, vsrc2, vsrc3 };
+                        for (int i = 0; i < dstNumComponents; i++) {
+                            if (validMask & (1 << i)) {
+                                idx[0] = i;
+                                mlir::Value component = sourceVectorOperand(srcRegs[i], eltTy);
+                                src = builder.create<CompositeInsertOp>(component, src, idx);
+                            }
+                        }                        
+                        break;
+                    }
+                    default:
+                        assert(false && "unhandled");
+                        break;
+                }
+                auto store = builder.create<StoreOp>(gvRef, src);
+                // exports shouldn't be written if the thread is masked off by EXEC
+                // tag with "predicated" to later generate if stmt
+                store->setDiscardableAttr(builder.getStringAttr("gcn.predicated"), builder.getUnitAttr());
+            }
+            break;
+        }
 
         default:
             llvm::outs() << "Unhandled instruction: \n";
@@ -1081,8 +1392,19 @@ bool GcnToSpirvConverter::buildSpirvDialect() {
 bool GcnToSpirvConverter::finalizeModule() {
     mlir::Region &region = moduleOp.getBodyRegion();
     builder.setInsertionPointToEnd(&(*region.begin()));
-    llvm::SmallVector<mlir::Attribute, 4> interfaceVars;
+    llvm::SmallVector<mlir::Attribute, 8> interfaceVars;
+
+    for (const auto &[location, attr] : inputAttributes) {
+        interfaceVars.push_back(mlir::SymbolRefAttr::get(attr));
+    }
+
+    for (const auto &[location, attr] : exportTargets) {
+        interfaceVars.push_back(mlir::SymbolRefAttr::get(attr));
+    }
+
     builder.create<EntryPointOp>(execModel, mainFn, interfaceVars);
+    llvm::SmallVector<int, 1> lits;
+    builder.create<ExecutionModeOp>(mainFn, ExecutionMode::OriginUpperLeft, lits);
 
     llvm::SmallVector<Capability, 8> caps = { Capability::Shader, Capability::Float16, Capability::Int16 };
     llvm::SmallVector<Extension, 4> exts;
