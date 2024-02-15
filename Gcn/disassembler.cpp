@@ -21,9 +21,9 @@
 #include <cassert>
 #include <cstring>
 #include <fstream>
-#include <iostream>
 #include <llvm/MC/MCInst.h>
 #include <llvm/Support/raw_ostream.h>
+#include <optional>
 #include <sstream>
 #include <sys/types.h>
 #include <system_error>
@@ -31,31 +31,20 @@
 #include <fcntl.h>
 #include <filesystem>
 namespace fs = std::filesystem;
-#include <byteswap.h>
-#include <arpa/inet.h>
 #include <llvm/ADT/ArrayRef.h>
 
-#include "llvm/Support/ManagedStatic.h"
-#include "llvm/MC/MCAsmBackend.h"
+
 #include "llvm/MC/MCAsmInfo.h"
-#include "llvm/MC/MCCodeEmitter.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCInstPrinter.h"
 #include "llvm/MC/MCInstrInfo.h"
-#include "llvm/MC/MCObjectFileInfo.h"
-#include "llvm/MC/MCObjectWriter.h"
-#include "llvm/MC/MCParser/AsmLexer.h"
-#include "llvm/MC/MCParser/MCTargetAsmParser.h"
 #include "llvm/MC/MCRegisterInfo.h"
-#include "llvm/MC/MCStreamer.h"
 #include "llvm/MC/MCSubtargetInfo.h"
-#include "llvm/MC/MCTargetOptionsCommandFlags.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/InitLLVM.h"
-#include "llvm/Support/SourceMgr.h"
+
 #include "llvm/Support/TargetSelect.h"
-#include "llvm/Support/CommandLine.h"
 
 #include "mlir/Dialect/SPIRV/IR/SPIRVDialect.h"
 #include "mlir/Target/SPIRV/Serialization.h"
@@ -75,6 +64,54 @@ namespace fs = std::filesystem;
 
 using namespace llvm;
 using namespace mlir::spirv;
+
+// For hiding llvm command line options
+cl::OptionCategory MyCategory("Compiler Options", "Options for controlling the compilation process.");
+
+cl::opt<std::string> GcnBinaryDumpPath("dump-gcn", cl::desc("dump gcn binaries in the input file to N numbered files starting with given name"), cl::value_desc("filename"), cl::cat(MyCategory));
+cl::opt<std::string> SpirvDumpPath("dump-spirv", cl::desc("dump generated spirv binaries to N numbered files starting with given name"), cl::value_desc("filename"), cl::cat(MyCategory));
+cl::opt<std::string> SpirvAsmDumpPath("dump-spirvasm", cl::desc("TODO - dump disassembled spirv to N numbered files starting with given name"), cl::value_desc("filename"), cl::cat(MyCategory));
+cl::opt<std::string> MlirDumpPath("dump-mlir", cl::desc("dump generated mlir modules to N numbered files starting with given name"), cl::value_desc("filename"), cl::cat(MyCategory));
+cl::opt<std::string> DumpAllPath("dump", cl::desc("dump all info (spirv, spirv-asm, gcn, mlir) to a prefix starting with given name"), cl::value_desc("filename"), cl::cat(MyCategory));
+cl::opt<bool> PrintGcn("p", cl::desc("print gcn bytecode to stdout"));
+cl::opt<bool> Quiet("q", cl::desc("don't print warnings"));
+
+cl::opt<std::string> InputGcnPath(cl::Positional, cl::desc("<input file>"), cl::Required, cl::value_desc("filename"), cl::cat(MyCategory));
+
+std::optional<fs::path> getGcnBinaryDumpPath() { return !GcnBinaryDumpPath.empty() ? GcnBinaryDumpPath.getValue() : (!DumpAllPath.empty() ? DumpAllPath.getValue() : std::optional<fs::path>() ); }
+std::optional<fs::path> getSpirvDumpPath() { return !SpirvDumpPath.empty() ? SpirvDumpPath.getValue() : (!DumpAllPath.empty() ? DumpAllPath.getValue() : std::optional<fs::path>() ); }
+std::optional<fs::path> getSpirvAsmDumpPath() { return !SpirvAsmDumpPath.empty() ? SpirvAsmDumpPath.getValue() : (!DumpAllPath.empty() ? DumpAllPath.getValue() : std::optional<fs::path>() ); }
+std::optional<fs::path> getMlirDumpPath() { return !MlirDumpPath.empty() ? MlirDumpPath.getValue() : (!DumpAllPath.empty() ? DumpAllPath.getValue() : std::optional<fs::path>() ); }
+
+static int FileNum = 0;
+
+std::unique_ptr<raw_fd_ostream> createDumpFile(fs::path prefix, fs::path extension, int number) {
+    std::unique_ptr<raw_fd_ostream> ptr;
+    fs::path fullPath = prefix;
+    if (number > -1) {
+        fullPath += std::to_string(number);
+    } else if ( !prefix.has_filename()) {
+        fullPath += "output";
+    }
+    fs::path dirpath;
+    if (prefix.has_parent_path()) {
+        std::error_code ec;
+        fs::create_directories(prefix.parent_path(), ec);
+        if (ec) {
+            printf("Couldn't create dump file directory: %s\n", ec.message().c_str());
+            return ptr;
+        }
+    }
+
+    fullPath += extension;
+
+    std::error_code ec;
+    ptr = std::make_unique<raw_fd_ostream>(fullPath.c_str(), ec);
+    if (ec) {
+        printf("Couldn't open dump file %s: %s\n", fullPath.c_str(), ec.message().c_str());
+    }
+    return ptr;
+}
 
 // Input vertex attributes (interpolated in frag stage)
 typedef GlobalVariableOp InputAttribute;
@@ -273,11 +310,11 @@ private:
 
 #if defined(_DEBUG)
 // For printing from GDB
-MCInstPrinter *ProcIP = nullptr;
-const MCSubtargetInfo *ProcSTI = nullptr;
+thread_local MCInstPrinter *ThreadIP = nullptr;
+thread_local const MCSubtargetInfo *ThreadSTI = nullptr;
 extern "C" void  printInst(MCInst &MI) {
     llvm::outs().flush();
-    ProcIP->printInst(&MI, 0, "", *ProcSTI, llvm::outs());
+    ThreadIP->printInst(&MI, 0, "", *ThreadSTI, llvm::outs());
 }
 #endif
 
@@ -355,8 +392,8 @@ public:
         boolTy = builder.getI1Type();
 
 #if defined(_DEBUG)
-        ProcIP = IP;
-        ProcSTI = STI;
+        ThreadIP = IP;
+        ThreadSTI = STI;
 #endif
     }
 
@@ -1348,11 +1385,12 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
         }
 
         default:
-            llvm::outs() << "Unhandled instruction: \n";
-            IP->printInst(&MI, 0, "", *STI, llvm::outs());
-            llvm::outs() << "\n";
+            if (!Quiet) {
+            llvm::errs() << "Unhandled instruction: \n";
+            IP->printInst(&MI, 0, "", *STI, llvm::errs());
+            llvm::errs() << "\n";
+            }
             return false;
-            break;
     }
     return true;
 }
@@ -1411,15 +1449,15 @@ bool GcnToSpirvConverter::finalizeModule() {
     auto vceTriple = VerCapExtAttr::get(Version::V_1_5, caps, exts, &mlirContext);
     moduleOp->setAttr("vce_triple", vceTriple);
 
-    //moduleOp.dump();
-    std::error_code ec;
-    fs::path path = "output.mlir";
-    raw_fd_ostream mlirFile(path.c_str(), ec);
-    if (ec) {
-        llvm::outs() << "Couldn't open " << path << ": " << ec.message() << "\n";
-        return false;
+    if (auto dumpPath = getMlirDumpPath()) {
+        auto outfile = createDumpFile(dumpPath.value(), ".mlir", FileNum);
+        if (outfile) {
+            moduleOp->print(*outfile);
+        } else {
+            printf("Couldn't dump mlir to file %s\n", dumpPath.value().c_str());
+            return 1;
+        }
     }
-    moduleOp->print(mlirFile);
 
     return true;
 }
@@ -1451,12 +1489,6 @@ SpirvConvertResult GcnToSpirvConverter::convert() {
     }
     return SpirvConvertResult(std::move(spirvModule), SpirvConvertResult::success);
 }
-
-// For hiding llvm command line options
-cl::OptionCategory MyCategory("Compiler Options", "Options for controlling the compilation process.");
-
-cl::opt<std::string> GcnBinaryDumpFilepath("dump-gcn-inputs", cl::desc("dump gcn binaries in the input file to N numbered files starting with given name"), cl::value_desc("filename"), cl::cat(MyCategory));
-cl::opt<std::string> InputGcnFilepath(cl::Positional, cl::desc("<input file>"), cl::Required, cl::value_desc("filename"), cl::cat(MyCategory));
 
 bool decodeAndConvertGcnCode(const std::vector<unsigned char> &gcnBytecode, ExecutionModel execModel) {
     LLVMInitializeAMDGPUTargetInfo();
@@ -1520,8 +1552,10 @@ bool decodeAndConvertGcnCode(const std::vector<unsigned char> &gcnBytecode, Exec
                 printf("Failed decoding instruction\n");
                 return false;
         }
-        IP->printInst(&MI, 0, "", *STI, llvm::outs());
-        llvm::outs() << "\n";
+        if (PrintGcn) {
+            IP->printInst(&MI, 0, "", *STI, llvm::outs());
+            llvm::outs() << "\n";
+        }
 
         machineCode.push_back(std::move(MI));
 
@@ -1532,15 +1566,16 @@ bool decodeAndConvertGcnCode(const std::vector<unsigned char> &gcnBytecode, Exec
     SpirvConvertResult result = converter.convert();
     SpirvBytecodeVector spirvModule = result.takeSpirvModule();
 
-    fs::path spirvPath = fs::path(InputGcnFilepath.getValue()).filename().stem();
-    spirvPath += ".spv";
-    std::error_code ec;
-    raw_fd_ostream spirvFile(spirvPath.c_str(), ec);
-    if (ec) {
-        llvm::outs() << "Couldn't open " << spirvPath << ": " << ec.message() << "\n";
-        return 1;
+    if (auto dumpPath = getSpirvDumpPath()) {
+        auto outfile = createDumpFile(dumpPath.value(), ".spv", FileNum);
+        if (outfile) {
+            outfile->write(reinterpret_cast<const char *>(spirvModule.data()), spirvModule.size_in_bytes());
+            if (outfile->has_error()) {
+                printf("Couldn't dump spirv bytecode to file %s\n", dumpPath.value().c_str());
+                return 1;
+            }
+        }
     }
-    spirvFile.write(reinterpret_cast<char *>(spirvModule.data()), spirvModule.size_in_bytes());
 
     llvm_shutdown();
     return result;
@@ -1553,9 +1588,9 @@ int main(int argc, char **argv) {
     cl::HideUnrelatedOptions(MyCategory);
     cl::ParseCommandLineOptions(argc, argv);
 
-    FILE *gcnFile = fopen(InputGcnFilepath.c_str(), "r");
+    FILE *gcnFile = fopen(InputGcnPath.c_str(), "r");
     if (!gcnFile) {
-        printf("Couldn't open %s for reading\n", InputGcnFilepath.c_str());
+        printf("Couldn't open %s for reading\n", InputGcnPath.c_str());
         return 1;
     }
     fseek(gcnFile, 0, SEEK_END);
@@ -1563,7 +1598,7 @@ int main(int argc, char **argv) {
     buf.resize(len);
     fseek(gcnFile, 0, SEEK_SET);
     if (1 != fread(buf.data(), len, 1, gcnFile)) {
-        printf("Error reading from %s: %s\n", InputGcnFilepath.c_str(), strerror(errno));
+        printf("Error reading from %s: %s\n", InputGcnPath.c_str(), strerror(errno));
         return 1;
     }
 
@@ -1676,7 +1711,19 @@ int main(int argc, char **argv) {
                 break;
         }
 
+        if (auto dumpPath = getGcnBinaryDumpPath()) {
+            auto outfile = createDumpFile(dumpPath.value(), ".sb", FileNum);
+            if (outfile) {
+                outfile->write(reinterpret_cast<const char *>(fileHeader), binaryHeader->m_codeSize);
+                if (outfile->has_error()) {
+                    printf("Couldn't dump gcn bytecode to file %s\n", dumpPath.value().c_str());
+                    return 1;
+                }
+            }
+        }
+
         decodeAndConvertGcnCode(gcnBytecode, execModel);
+        ++FileNum;
     }
 
     return err;
