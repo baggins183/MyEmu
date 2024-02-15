@@ -382,14 +382,18 @@ public:
         mlirContext.getOrLoadDialect<mlir::spirv::SPIRVDialect>();
         
         floatTy = builder.getF32Type();
+        f64Ty = builder.getF64Type();
         float16Ty = builder.getF16Type();
         v2float32Ty = mlir::VectorType::get({2}, floatTy);
         v2float16Ty = mlir::VectorType::get({2}, float16Ty);
 
         intTy = builder.getI32Type();
+        sintTy = builder.getIntegerType(32, true);
         int64Ty = builder.getI64Type();
         int16Ty = builder.getI16Type();
         boolTy = builder.getI1Type();
+
+        arithCarryTy = StructType::get({ intTy, intTy });
 
 #if defined(_DEBUG)
         ThreadIP = IP;
@@ -408,6 +412,13 @@ private:
 
     bool isVertexShader() { return execModel == ExecutionModel::Vertex; }
     bool isFragShader() { return execModel == ExecutionModel::Fragment; }
+
+    ConstantOp getZero(mlir::Type ty) { return ConstantOp::getZero(ty, builder.getLoc(), builder); }
+    ConstantOp getOne(mlir::Type ty) { return ConstantOp::getOne(ty, builder.getLoc(), builder); }
+    ConstantOp getF32Const(float f) { return builder.create<ConstantOp>(floatTy, builder.getF32FloatAttr(f)); }
+    ConstantOp getF64Const(double d) { return builder.create<ConstantOp>(f64Ty, builder.getF64FloatAttr(d)); }
+    ConstantOp getI32Const(int n) { return builder.create<ConstantOp>(intTy, builder.getI32IntegerAttr(n)); }
+    ConstantOp getI64Const(int n) { return builder.create<ConstantOp>(int64Ty, builder.getI64IntegerAttr(n)); }
 
     // build a VariableOp for the CC (condition code) register, and attach a name
     CCReg buildCCReg(llvm::StringRef name) {
@@ -597,13 +608,13 @@ private:
                 case 32:
                 {
                     int32_t imm = static_cast<uint32_t>(operand.getImm() & 0xffffffff);
-                    return builder.create<ConstantOp>(type, builder.getI32IntegerAttr(imm));     
+                    return getI32Const(imm);
                 }
                 case 64:
                 {
                     // Not sure if operand comes sign extended or not, do it in case.
                     int64_t imm = operand.getImm();
-                    return builder.create<ConstantOp>(type, builder.getI64IntegerAttr(imm));
+                    return getI64Const(imm);
                 }
                 default:
                     assert(false && "unhandled int width");
@@ -615,14 +626,14 @@ private:
                 {
                     uint32_t imm = operand.getImm() & 0xffffffff;
                     float fImm = llvm::bit_cast<float>(imm);
-                    return builder.create<ConstantOp>(type, builder.getF32FloatAttr(fImm));
+                    return getF32Const(fImm);
                 }
                 case 64:
                 {
                     uint64_t imm = operand.getImm();
                     // extend float by padding LSBs, just in case. Same if already padded or not.
                     double dImm = llvm::bit_cast<double>(imm | (imm << 32));
-                    return builder.create<ConstantOp>(type, builder.getF64FloatAttr(dImm));
+                    return getF64Const(dImm);
                 }
                 default:
                     assert(false && "unhandled float width");
@@ -720,13 +731,16 @@ private:
         storeScalarResult32(dst.getReg(), result);
     }
 
-    void storeResultCC(MCOperand &dst, mlir::Value result) {
-        assert(result.getType() == boolTy);
-
-        uint regno = dst.getReg();
+    void storeResultCC(uint regno, mlir::Value result) {
         assert(isSgprPair(regno) || isSpecialCCReg(regno));
         CCReg cc = initCCReg(regno);
         builder.create<StoreOp>(cc, result);
+    }
+
+    void storeResultCC(MCOperand &dst, mlir::Value result) {
+        assert(result.getType() == boolTy);
+        uint regno = dst.getReg();
+        storeResultCC(regno, result);
     }
 
     void storeVectorResult32(MCOperand &dst, mlir::Value result) {
@@ -776,14 +790,20 @@ private:
     // spirv-val complains about duplicate int types, so mlir must be caching or handling signedness weird.
     // init once and reuse these instead
     mlir::FloatType floatTy;
+    mlir::FloatType f64Ty;
     mlir::FloatType float16Ty;
     mlir::VectorType v2float32Ty;
     mlir::VectorType v2float16Ty;
     
     mlir::IntegerType intTy;
+    mlir::IntegerType sintTy;
     mlir::IntegerType int64Ty;
     mlir::IntegerType int16Ty;
     mlir::IntegerType boolTy;
+
+    // struct has 2 u32 members.
+    // This is used for a lot of carry procducing int ops, i.e. V_ADD_I32 -> OpIAddCarry
+    StructType arithCarryTy;
 
     const MCSubtargetInfo *STI;
     MCInstPrinter *IP;
@@ -959,8 +979,8 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
 
             if (src.isImm()) {
                 ConstantOp immConst = sourceImmediate(src, int64Ty);
-                auto constval0  = builder.create<ConstantOp>(intTy, builder.getI32IntegerAttr(0));
-                auto constval32 = builder.create<ConstantOp>(intTy, builder.getI32IntegerAttr(32));
+                auto constval0  = getZero(intTy);
+                auto constval32 = getI32Const(32);
 
                 // val, offset, count
                 uniValLo = builder.create<BitFieldUExtractOp>(immConst, constval0, constval32);                
@@ -1047,6 +1067,22 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
             break;
         }
 
+        // SOP2
+        case AMDGPU::S_MUL_I32_gfx6_gfx7:
+        {
+            // D = S1 * S2. Low 32 bits of result.
+            MCOperand dst, ssrc0, ssrc1;
+            mlir::Value a, b;
+            dst = MI.getOperand(0);
+            ssrc0 = MI.getOperand(1);
+            ssrc1 = MI.getOperand(2);
+            a = sourceScalarOperandUniform(ssrc0, intTy);
+            b = sourceScalarOperandUniform(ssrc1, intTy);
+            auto result = builder.create<IMulOp>(a, b);
+            storeScalarResult32(dst.getReg(), result);
+            break;
+        }
+
         // SOPP
         case AMDGPU::S_WAITCNT_gfx6_gfx7:
             // Used by AMD hardware to wait for long-latency instructions.
@@ -1061,11 +1097,11 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
         case AMDGPU::V_FRACT_F32_e32_gfx6_gfx7:
         case AMDGPU::V_RCP_F32_e32_gfx6_gfx7:
         case AMDGPU::V_MOV_B32_e32_gfx6_gfx7:
+        case AMDGPU::V_CVT_U32_F32_e32_gfx6_gfx7:
         {
             MCOperand dst, src;
             dst = MI.getOperand(0);
             src = MI.getOperand(1);
-            mlir::Type floatTy = builder.getF32Type();
             mlir::Value srcVal = sourceVectorOperand(src, floatTy);
             mlir::Value result;
             switch (MI.getOpcode()) {
@@ -1081,13 +1117,25 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
                 }
                 case AMDGPU::V_RCP_F32_e32_gfx6_gfx7:
                 {
-                    auto numerator = ConstantOp::getOne(floatTy, builder.getLoc(), builder);
+                    auto numerator = getOne(floatTy);
                     result = builder.create<FDivOp>(numerator, srcVal);
                     break;
                 }
                 case AMDGPU::V_MOV_B32_e32_gfx6_gfx7:
                     result = srcVal;
                     break;
+                case AMDGPU::V_CVT_U32_F32_e32_gfx6_gfx7:
+                {
+                    // Input is converted to an unsigned integer value using truncation. Positive float magnitudes
+                    // too great to be represented by an unsigned integer float (unbiased exponent > 31) saturate
+                    // to max_uint.
+                    // Special number handling:
+                    // -inf & NaN & 0 & -0 → 0
+                    // Inf → max_uint
+                    // D.u = (unsigned)S0.f
+                    result = builder.create<ConvertFToUOp>(intTy, srcVal);
+                    break;
+                }
             }
             storeVectorResult32(dst, result);
             break;
@@ -1119,9 +1167,9 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
             mlir::Value result;
             // For now, just do multiplication. 0.0625 * float(sext(src[3:0]))
             // Maybe put all constants + switch stmt in shader later
-            auto scale = builder.create<ConstantOp>(floatTy, builder.getF32FloatAttr(0.0625f));
-            auto bfOff = builder.create<ConstantOp>(intTy, builder.getI32IntegerAttr(0));
-            auto bfCount = builder.create<ConstantOp>(intTy, builder.getI32IntegerAttr(4));
+            auto scale = getF32Const(0.0625f);
+            auto bfOff = getZero(intTy);
+            auto bfCount = getI32Const(4);
             auto srcSExt = builder.create<BitFieldSExtractOp>(srcVal, bfOff, bfCount);
             result = builder.create<ConvertSToFOp>(floatTy, srcSExt);
             result = builder.create<FMulOp>(result, scale);
@@ -1142,7 +1190,6 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
             src0 = MI.getOperand(1);
             vsrc1 = MI.getOperand(2);
             //MCOperand src
-            mlir::Type floatTy = builder.getF32Type();
             mlir::Value a = sourceVectorOperand(src0, floatTy);
             mlir::Value b = sourceVectorOperand(vsrc1, floatTy);
             // overflow, side effects?
@@ -1171,12 +1218,45 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
                     // decorate with FPRoundingMode?
                     // OpFConvert?
                     // OpQuantizeToF16?
-                    mlir::Value vecElts[] = { a, b };
-                    result = builder.create<CompositeConstructOp>(v2float32Ty, vecElts);
+                    result = builder.create<CompositeConstructOp>(v2float32Ty, std::array{a, b});
                     // Needs llvm/mlir patch to add this opcode
                     result = builder.create<GLPackHalf2x16Op>(intTy, result);
                     // TODO: spirv dialect doesn't support this? Need to change llvm?
                     // bF16->setAttr("FPRoundingMode", builder.getI32IntegerAttr(1));
+                    break;
+                }
+
+            }
+            storeVectorResult32(dst, result);            
+            break;
+        }
+
+        case AMDGPU::V_ADD_I32_e32_gfx6_gfx7:
+        {
+            //assert(MI.getNumOperands() == 3);
+            MCOperand dst, src0, vsrc1;
+            dst = MI.getOperand(0);
+            src0 = MI.getOperand(1);
+            vsrc1 = MI.getOperand(2);
+            //MCOperand src
+            mlir::Value a = sourceVectorOperand(src0, intTy);
+            mlir::Value b = sourceVectorOperand(vsrc1, intTy);
+            // overflow, side effects?
+            mlir::Value result;
+            switch (MI.getOpcode()) {
+                case AMDGPU::V_ADD_I32_e32_gfx6_gfx7:
+                {
+                    // "Unsigned integer add based on signed or unsigned integer components. Produces an
+                    // unsigned carry out in VCC or a scalar register" <- VOP2 is always VCC
+                    mlir::Value carry;
+                    assert(MI.getNumOperands() == 3);
+                    auto sumAndCarry = builder.create<IAddCarryOp>(a, b);
+                    result = builder.create<CompositeExtractOp>(sumAndCarry, std::array{0});
+                    carry = builder.create<CompositeExtractOp>(sumAndCarry, std::array{1});
+                    // Can't cast i32 -> i1 with OpUConvert because mlir forces i1 -> OpTypeBool
+                    carry = builder.create<INotEqualOp>(getZero(carry.getType()), carry);
+                    storeVectorResult32(dst, result);
+                    storeResultCC(AMDGPU::VCC, carry);
                     break;
                 }
 
@@ -1194,7 +1274,6 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
             src0 = MI.getOperand(1);
             src1 = MI.getOperand(2);   
             src2 = MI.getOperand(3);
-            mlir::Type floatTy = builder.getF32Type();
             mlir::Value a = sourceVectorOperand(src0, floatTy);
             mlir::Value b = sourceVectorOperand(src1, floatTy);
             mlir::Value c = sourceVectorOperand(src2, floatTy);
@@ -1260,8 +1339,7 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
             auto gvRef = builder.create<AddressOfOp>(attr);
             mlir::Value attrVal = builder.create<LoadOp>(gvRef);
             if (auto fvecTy = dyn_cast<mlir::VectorType>(attrType)) {
-                int idx[] = { component };
-                attrVal = builder.create<CompositeExtractOp>(attrVal, idx);
+                attrVal = builder.create<CompositeExtractOp>(attrVal, std::array{component});
             }
             assert(dyn_cast<mlir::VectorType>(attrType) || component == 0);
 
@@ -1323,12 +1401,11 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
                     src = builder.create<LoadOp>(gvRef);
                     printf("LOG: export is partial write\n");
                 } else {
-                    src = builder.create<ConstantOp>(dstType, builder.getZeroAttr(dstType));
+                    src = getZero(dstType);
                 }
 
                 uint width = eltTy.getIntOrFloatBitWidth();
                 // index arg to composite insert/extract. Reuse
-                std::array<int, 1> idx = { 0 };
                 switch (width) {
                     case 16:
                     {
@@ -1349,13 +1426,11 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
                         for (int i = 0; i < dstNumComponents; i++) {
                             if (validMask & (1 << i)) {
                                 auto half = i <= 1 ? src_0_1 : src_2_3;
-                                idx[0] = i & 1;
                                 // vec2 -> float
-                                mlir::Value component = builder.create<CompositeExtractOp>(half, idx);
+                                mlir::Value component = builder.create<CompositeExtractOp>(half, std::array{i&1});
                                 // float -> float16
                                 component = builder.create<FConvertOp>(float16Ty, component);
-                                idx[0] = i;
-                                src = builder.create<CompositeInsertOp>(component, src, idx);
+                                src = builder.create<CompositeInsertOp>(component, src, std::array{i});
                             }
                         }
                         break;
@@ -1365,9 +1440,8 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
                         llvm::SmallVector<MCOperand, 4> srcRegs = { vsrc0, vsrc1, vsrc2, vsrc3 };
                         for (int i = 0; i < dstNumComponents; i++) {
                             if (validMask & (1 << i)) {
-                                idx[0] = i;
                                 mlir::Value component = sourceVectorOperand(srcRegs[i], eltTy);
-                                src = builder.create<CompositeInsertOp>(component, src, idx);
+                                src = builder.create<CompositeInsertOp>(component, src, std::array{i});
                             }
                         }                        
                         break;
@@ -1441,8 +1515,10 @@ bool GcnToSpirvConverter::finalizeModule() {
     }
 
     builder.create<EntryPointOp>(execModel, mainFn, interfaceVars);
-    llvm::SmallVector<int, 1> lits;
-    builder.create<ExecutionModeOp>(mainFn, ExecutionMode::OriginUpperLeft, lits);
+    if (isFragShader()) {
+        llvm::SmallVector<int, 1> lits;
+        builder.create<ExecutionModeOp>(mainFn, ExecutionMode::OriginUpperLeft, lits);
+    }
 
     llvm::SmallVector<Capability, 8> caps = { Capability::Shader, Capability::Float16, Capability::Int16 };
     llvm::SmallVector<Extension, 4> exts;
