@@ -20,12 +20,10 @@ TODO
 
 We remove .init, fini sections from the ELF (which contain initializers, constructors/destructors for global variables, etc).
 Normally the dynamic linker calls into the .init section when it loads an executable or dynamic library.
-That causes problems with our patched .so files, we need syscall interception to be off while inside the dynamic linker (dlopen), but turned on inside
-ps4 code in .init or .fini code.
-So we remove the dynamic tags/section headers for .init, .fini sections, so the dynamic linker doesn't try to
-do them, and manually call into the .init entry points after dlopen loading the patched elf's with dlopen().
-we store info about each patched ELF, including the address of .init/.fini entry points in a json file, e.g. libkernel.prx.so.json.
-we need to call the init routines in order of library dependecies. Havent really bothered yet, we should just set up a static
+That causes problems with our patched .so files, because of syscall interception (see later explanation)
+So we remove the dynamic tags/section headers for .init, .fini section from the ELF, remember their addresses, and after dlopen(), we
+call the init/fini routines manually.
+We need to call the init routines in order of library dependecies. Havent really bothered yet, we should just set up a static
 order for all the system libraries (libkernel.prx.so, libSceLibcInternal.prx.so, etc) and figure out a specific game's dependencies
 on the fly.
 
@@ -69,7 +67,7 @@ Intercepting syscalls
 /////////////////////////////////////////////////////////////////////////////////////
 Currently have working syscall handlers, using "syscall user dispatch" (https://docs.kernel.org/admin-guide/syscall-user-dispatch.html)
 This registers a handler for when ps4 code executes syscall instruction, which the ps4 kernel is meant to handle.
-Then we basically enter a switch statement where we can have our own handler from each
+Then we basically enter a switch statement where we can have our own handler for each
 ps4 syscall number (see include/orbis/orbis_syscalls.h for the list of ps4 syscalls, which is like FreeBSD).
 Syscall user dispatch needs to be toggled on/off when we "enter" or "leave" ps4 code. When turned "off",
 syscalls will pass directly to the linux kernel, which is what we want when making syscalls from our own code.

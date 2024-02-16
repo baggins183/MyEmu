@@ -21,6 +21,7 @@
 #include <cassert>
 #include <cstring>
 #include <fstream>
+#include <tuple>
 #include <llvm/MC/MCInst.h>
 #include <llvm/Support/raw_ostream.h>
 #include <optional>
@@ -131,6 +132,10 @@ bool isVgpr(uint regno) {
     return regno >= AMDGPU::VGPR0 && regno <= AMDGPU::VGPR255;
 }
 
+bool isVgprPair(uint regno) {
+    return regno >= AMDGPU::VGPR0_VGPR1 && regno <= AMDGPU::VGPR254_VGPR255;
+}
+
 uint sgprOffset(uint regno) {
     assert(isSgpr(regno));
     return regno - AMDGPU::SGPR0;
@@ -146,9 +151,19 @@ uint vgprOffset(uint regno) {
     return regno - AMDGPU::VGPR0;
 }
 
+uint vgprPairOffset(uint regno) {
+    assert(isVgprPair(regno));
+    return regno - AMDGPU::VGPR0_VGPR1;
+}
+
 uint sgprPairToSgprBase(uint regno) {
     assert(isSgprPair(regno));
     return AMDGPU::SGPR0 + 2 * sgprPairOffset(regno);
+}
+
+uint vgprPairToVgprBase(uint regno) {
+    assert(isVgprPair(regno));
+    return AMDGPU::VGPR0 + vgprPairOffset(regno);
 }
 
 bool isRenderTarget(uint target) {
@@ -185,7 +200,7 @@ bool isSpecialUniformReg(uint regno) {
     }
 }
 
-bool isSpecialCCReg(uint regno) {
+bool isSpecialRegPair(uint regno) {
     // check if supported yet
     switch (regno) {
         case AMDGPU::EXEC:
@@ -254,8 +269,9 @@ llvm::SmallString<16> getCCRegName(uint regno) {
 
 enum GcnRegType {
     SGpr,
-    VGpr,
     SgprPair,
+    VGpr,
+    VGprPair,
     Special // m0, VCC, etc
 };
 
@@ -266,6 +282,8 @@ GcnRegType regnoToType(uint regno) {
         return GcnRegType::SgprPair;
     } else if (isVgpr(regno)) {
         return GcnRegType::VGpr;
+    } else if (isVgprPair(regno)) {
+        return GcnRegType::VGprPair;
     }
     switch (regno) {
         case AMDGPU::EXEC_LO:
@@ -345,6 +363,11 @@ extern "C" void  printInst(MCInst &MI) {
 // Bitwise instructions AND, OR, idk.
 // Figure these out on a case by case basis
 
+// Notes:
+// VOP3a operand modifiers are present as MCInst operands, 1 per relevant operand.
+// I've seen them like (dst, src0Mods, src0, src1Mods, src1, ...)
+// They are only there for float args
+// I haven't seen result mods yet. I've only seen extra Imm operands, 0 so far.
 
 // """
 // EXEC can be read from, and written to, through scalar instructions; it also can be
@@ -676,7 +699,7 @@ private:
         uint regno = operand.getReg();
 
         if (regnoToType(regno) == GcnRegType::Special) {
-            assert(isSpecialCCReg(regno));
+            assert(isSpecialRegPair(regno));
         }
 
         rv = sourceCCReg(regno);
@@ -685,6 +708,7 @@ private:
     }
 
     mlir::Value sourceVectorOperand(MCOperand &operand, mlir::Type type) {
+        assert(type.getIntOrFloatBitWidth() == 32);
         mlir::Value rv;
         if (operand.isImm()) {
             ConstantOp immConst = sourceImmediate(operand, type);
@@ -713,6 +737,94 @@ private:
         return rv;
     }
 
+    mlir::Value create64BitValue(mlir::Value lo, mlir::Value hi) {
+        assert(lo.getType() == intTy && hi.getType() == intTy);
+        hi = builder.create<UConvertOp>(int64Ty, hi);
+        hi = builder.create<ShiftLeftLogicalOp>(hi, getI32Const(32));
+        lo = builder.create<UConvertOp>(int64Ty, lo);
+        return builder.create<BitwiseOrOp>(hi, lo);
+    }
+
+    mlir::Value sourceScalarOperand64(uint regno, mlir::Type type) {
+        assert(type.getIntOrFloatBitWidth() == 64);
+        mlir::Value lo, hi;
+        switch(regnoToType(regno)) {
+            case Special:
+            {
+                assert(isSpecialRegPair(regno));
+                uint loSrcNo, hiSrcNo;
+                // TODO factor this out into like "specialRegPairToBase"
+                switch (regno) {
+                    case AMDGPU::VCC:
+                        loSrcNo = AMDGPU::VCC_LO;
+                        hiSrcNo = AMDGPU::VCC_HI;
+                        break;
+                    case AMDGPU::EXEC:
+                        loSrcNo = AMDGPU::EXEC_LO;
+                        hiSrcNo = AMDGPU::EXEC_HI;
+                        break;
+                    default:
+                        loSrcNo = -1;
+                        hiSrcNo = -1;
+                        assert(false && "unhandled");
+                        break;
+                }
+                lo = sourceUniformReg(loSrcNo);
+                hi = sourceUniformReg(hiSrcNo);
+                return create64BitValue(lo, hi);
+            }
+            case SgprPair:
+            {
+                uint base = sgprPairToSgprBase(regno);
+                lo = sourceUniformReg(base);
+                hi = sourceUniformReg(base + 1);
+                return create64BitValue(lo, hi);
+            }
+            default:
+                assert(false && "unhandled");
+                return nullptr;
+        }
+    }
+
+    mlir::Value sourceScalarOperand64(MCOperand &operand, mlir::Type type) {
+        assert(type.getIntOrFloatBitWidth() == 64);
+        if (operand.isImm()) {
+            ConstantOp immConst = sourceImmediate(operand, type);
+            return immConst;
+        }
+
+        assert(operand.isReg());
+        uint regno = operand.getReg();
+        return sourceScalarOperand64(regno, type);
+    }
+
+    mlir::Value sourceVectorOperand64(MCOperand &operand, mlir::Type type) {
+        assert(type.getIntOrFloatBitWidth() == 64);
+        if (operand.isImm()) {
+            ConstantOp immConst = sourceImmediate(operand, type);
+            return immConst;
+        }
+
+        assert(operand.isReg());
+        uint regno = operand.getReg();
+        switch(regnoToType(regno)) {
+            case Special:
+            case SgprPair:
+                return sourceScalarOperand64(regno, type);
+            case VGpr:
+            {
+                mlir::Value lo, hi;
+                uint base = vgprPairToVgprBase(regno);
+                lo = sourceVectorGpr(base);
+                hi = sourceVectorGpr(base + 1);
+                return create64BitValue(lo, hi);
+            }
+            default:
+                assert(false && "unhandled");
+                return nullptr;
+        }
+    }
+
     void storeScalarResult32(uint regno, mlir::Value result) {
         mlir::Type resultTy = result.getType();
         assert(resultTy.getIntOrFloatBitWidth() == 32);
@@ -732,7 +844,7 @@ private:
     }
 
     void storeResultCC(uint regno, mlir::Value result) {
-        assert(isSgprPair(regno) || isSpecialCCReg(regno));
+        assert(isSgprPair(regno) || isSpecialRegPair(regno));
         CCReg cc = initCCReg(regno);
         builder.create<StoreOp>(cc, result);
     }
@@ -743,21 +855,100 @@ private:
         storeResultCC(regno, result);
     }
 
-    void storeVectorResult32(MCOperand &dst, mlir::Value result) {
+    void storeVectorResult32(uint regno, mlir::Value result) {
         mlir::Type resultTy = result.getType();
         assert(resultTy.getIntOrFloatBitWidth() == 32);
         if (result.getType() != intTy) {
             result = builder.create<BitcastOp>(intTy, result);
         }
-
-        assert(dst.isReg() && isVgpr(dst.getReg()));
-        uint regno = dst.getReg();
         VectorReg vgpr = initVgpr(regno);
         auto store = builder.create<StoreOp>(vgpr, result);
         // Don't write back the result if thread is masked off by EXEC
         // Will need to generate control flow, TODO
         store->setDiscardableAttr(builder.getStringAttr("gcn.predicated"), builder.getUnitAttr());
     }
+
+    void storeVectorResult32(MCOperand &dst, mlir::Value result) {
+        assert(dst.isReg() && isVgpr(dst.getReg()));
+        uint regno = dst.getReg();
+        return storeVectorResult32(regno, result);
+    }
+
+    void storeVectorResult64(uint regno, mlir::Value result) {
+        assert(isVgprPair(regno));
+        mlir::Type resultTy = result.getType();
+        assert(resultTy.getIntOrFloatBitWidth() == 64);
+        if (result.getType() != int64Ty) {
+            result = builder.create<BitcastOp>(intTy, result);
+        }
+
+        mlir::Value lo, hi;
+        // val, offset, count
+        ConstantOp fullmask = getI32Const(0xffffffff);
+        lo = builder.create<BitFieldUExtractOp>(result, getZero(intTy), fullmask);
+        lo = builder.create<UConvertOp>(intTy, lo);
+        hi = builder.create<BitFieldUExtractOp>(result, getI32Const(32), fullmask);
+        hi = builder.create<UConvertOp>(intTy, hi);
+        uint base = vgprPairToVgprBase(regno);
+        storeVectorResult32(base, lo);
+        storeVectorResult32(base + 1, hi);
+    }
+
+    // For VOP3a
+    mlir::Value applyOperandModifiers(mlir::Value src, MCOperand &operandMods) {
+        uint mods = operandMods.getImm();
+        mlir::Value rv = src;
+        if (mods & SISrcMods::ABS) {
+            assert(src.getType().isa<mlir::FloatType>());
+            rv = builder.create<GLFAbsOp>(rv);
+        }
+        if (mods & SISrcMods::NEG) {
+            assert(src.getType().isa<mlir::FloatType>());
+            rv = builder.create<FNegateOp>(rv);
+        }
+        return rv;
+    }
+
+    // For VOP3a
+    // Don't know where clamp comes from yet, will need to see it printed
+    mlir::Value applyResultModifiers(mlir::Value result, int clamp, int omod) {
+        mlir::Value rv = result;
+        mlir::Type resultTy = result.getType();
+        if (clamp) {
+            assert(!(clamp & ~1));
+            assert(resultTy.isa<mlir::FloatType>());
+            rv = builder.create<GLFClampOp>(resultTy, rv, getZero(resultTy), getOne(resultTy));
+        }
+        assert(!omod || resultTy.isa<mlir::FloatType>());
+        switch(omod) {
+            case SIOutMods::MUL2:
+                rv = builder.create<FMulOp>(rv, builder.create<ConstantOp>(resultTy, builder.getFloatAttr(resultTy, 2.0)));
+                break;
+            case SIOutMods::MUL4:
+                rv = builder.create<FMulOp>(rv, builder.create<ConstantOp>(resultTy, builder.getFloatAttr(resultTy, 4.0)));
+                break;
+            case SIOutMods::DIV2:
+                rv = builder.create<FDivOp>(rv, builder.create<ConstantOp>(resultTy, builder.getFloatAttr(resultTy, 2.0)));
+                break;
+            default:
+                break;
+        }
+        return rv;
+    }
+
+    template<typename... Idxs>
+    const std::array<MCOperand, sizeof...(Idxs)> unwrapMI(const MCInst &MI, Idxs... args) {
+        return { (MI.getOperand(args))... };
+    }
+
+#define R0_2 0, 1, 2
+#define R0_3 R0_2, 3
+#define R0_4 R0_3, 4
+#define R0_5 R0_4, 5
+#define R0_6 R0_5, 6
+#define R0_7 R0_6, 7
+#define R0_8 R0_7, 8
+#define R0_9 R0_8, 9
 
     mlir::MLIRContext mlirContext;
     mlir::ImplicitLocOpBuilder builder;
@@ -1018,7 +1209,7 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
                 uniValHi = sourceUniformReg(hiSrcNo);
 
                 // Move cc
-                assert(isSgprPair(srcno) || isSpecialCCReg(srcno));
+                assert(isSgprPair(srcno) || isSpecialRegPair(srcno));
                 ccVal = sourceCCReg(srcno);
                 storeResultCC(dst, ccVal);
             }
@@ -1181,6 +1372,8 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
         case AMDGPU::V_ADD_F32_e32_gfx6_gfx7:
         case AMDGPU::V_MUL_F32_e32_gfx6_gfx7:
         case AMDGPU::V_SUB_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_MIN_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_MAX_F32_e32_gfx6_gfx7:
         case AMDGPU::V_MAC_F32_e32_gfx6_gfx7:
         case AMDGPU::V_CVT_PKRTZ_F16_F32_e32_gfx6_gfx7:
         {
@@ -1204,6 +1397,15 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
                 case AMDGPU::V_SUB_F32_e32_gfx6_gfx7:
                     result = builder.create<FSubOp>(a, b);
                     break;
+                case AMDGPU::V_MIN_F32_e32_gfx6_gfx7:
+                    // TODO handle NANs
+                    result = builder.create<GLFMinOp>(a, b);
+                    break;
+                case AMDGPU::V_MAX_F32_e32_gfx6_gfx7:
+                    // TODO handle NANs
+                    result = builder.create<GLFMaxOp>(a, b);
+                    break;
+
                 case AMDGPU::V_MAC_F32_e32_gfx6_gfx7:
                 {
                     // Multiply a and b. Accumulate into dst
@@ -1232,6 +1434,7 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
         }
 
         case AMDGPU::V_ADD_I32_e32_gfx6_gfx7:
+        case AMDGPU::V_SUB_I32_e32_gfx6_gfx7:
         {
             //assert(MI.getNumOperands() == 3);
             MCOperand dst, src0, vsrc1;
@@ -1248,65 +1451,213 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
                 {
                     // "Unsigned integer add based on signed or unsigned integer components. Produces an
                     // unsigned carry out in VCC or a scalar register" <- VOP2 is always VCC
-                    mlir::Value carry;
+                    mlir::Value carryOut;
                     assert(MI.getNumOperands() == 3);
                     auto sumAndCarry = builder.create<IAddCarryOp>(a, b);
                     result = builder.create<CompositeExtractOp>(sumAndCarry, std::array{0});
-                    carry = builder.create<CompositeExtractOp>(sumAndCarry, std::array{1});
+                    carryOut = builder.create<CompositeExtractOp>(sumAndCarry, std::array{1});
                     // Can't cast i32 -> i1 with OpUConvert because mlir forces i1 -> OpTypeBool
-                    carry = builder.create<INotEqualOp>(getZero(carry.getType()), carry);
+                    carryOut = builder.create<INotEqualOp>(getZero(carryOut.getType()), carryOut);
                     storeVectorResult32(dst, result);
-                    storeResultCC(AMDGPU::VCC, carry);
+                    storeResultCC(AMDGPU::VCC, carryOut);
                     break;
                 }
+                case AMDGPU::V_SUB_I32_e32_gfx6_gfx7:
+                {
+                    mlir::Value borrowOut;
+                    auto subAndBorrow = builder.create<ISubBorrowOp>(a, b);
+                    result = builder.create<CompositeExtractOp>(subAndBorrow, std::array{0});
+                    borrowOut = builder.create<CompositeExtractOp>(subAndBorrow, std::array{1});
+                    // Can't cast i32 -> i1 with OpUConvert because mlir forces i1 -> OpTypeBool
+                    borrowOut = builder.create<INotEqualOp>(getZero(borrowOut.getType()), borrowOut);
+                    storeVectorResult32(dst, result);
+                    storeResultCC(AMDGPU::VCC, borrowOut);
+                    break;  
+                }
+
 
             }
             storeVectorResult32(dst, result);            
             break;
         }
 
+        case AMDGPU::V_MUL_HI_U32_gfx6_gfx7:
+        case AMDGPU::V_MUL_LO_U32_gfx6_gfx7:
+        case AMDGPU::V_MUL_HI_I32_gfx6_gfx7:
+        case AMDGPU::V_MUL_LO_I32_gfx6_gfx7:
+        {
+            // TODO check NEG, OMOD, CLAMP, ABS
+            auto [ dst, src0, src1 ] = unwrapMI(MI, R0_2);
+            mlir::Value a = sourceVectorOperand(src0, intTy);
+            mlir::Value b = sourceVectorOperand(src1, intTy);
+            mlir::Value product;
+            mlir::Value result;
+
+            switch(MI.getOpcode()) {
+                case AMDGPU::V_MUL_HI_U32_gfx6_gfx7:
+                case AMDGPU::V_MUL_LO_U32_gfx6_gfx7:
+                    product = builder.create<UMulExtendedOp>(a, b);
+                    break;
+                case AMDGPU::V_MUL_HI_I32_gfx6_gfx7:
+                case AMDGPU::V_MUL_LO_I32_gfx6_gfx7:
+                    product = builder.create<SMulExtendedOp>(a, b);
+                    break;
+            }
+
+            switch(MI.getOpcode()) {
+                case AMDGPU::V_MUL_HI_U32_gfx6_gfx7:
+                case AMDGPU::V_MUL_HI_I32_gfx6_gfx7:
+                    result = builder.create<CompositeExtractOp>(product, std::array{1});
+                    break;
+                case AMDGPU::V_MUL_LO_U32_gfx6_gfx7:
+                case AMDGPU::V_MUL_LO_I32_gfx6_gfx7:
+                    result = builder.create<CompositeExtractOp>(product, std::array{0});
+                    break;
+            }
+            storeVectorResult32(dst, result);
+            break;
+        }
+
+
         // VOP3a
         case AMDGPU::V_MED3_F32_gfx6_gfx7:
         {
-            // TODO check NEG, OMOD, CLAMP, ABS
-            MCOperand dst, src0, src1, src2;
-            dst = MI.getOperand(0);
-            src0 = MI.getOperand(1);
-            src1 = MI.getOperand(2);   
-            src2 = MI.getOperand(3);
+            // TODO OMOD, CLAMP
+            auto [ dst, src0Mods, src0, src1Mods, src1, src2Mods, src2 ] = unwrapMI(MI, R0_6);
             mlir::Value a = sourceVectorOperand(src0, floatTy);
+            a = applyOperandModifiers(a, src0Mods);
             mlir::Value b = sourceVectorOperand(src1, floatTy);
+            b = applyOperandModifiers(b, src1Mods);
             mlir::Value c = sourceVectorOperand(src2, floatTy);
+            c = applyOperandModifiers(c, src2Mods);
             mlir::Value result;
-            switch(MI.getOpcode()) {
-                case AMDGPU::V_MED3_F32_gfx6_gfx7:
-                {
-                    //If (isNan(S0.f) || isNan(S1.f) || isNan(S2.f))
-                    //  D.f = MIN3(S0.f, S1.f, S2.f)
-                    //Else if (MAX3(S0.f,S1.f,S2.f) == S0.f)
-                    //  D.f = MAX(S1.f, S2.f)
-                    //Else if (MAX3(S0.f,S1.f,S2.f) == S1.f)
-                    //  D.f = MAX(S0.f, S2.f)
-                    //Else
-                    //  D.f = MAX(S0.f, S1.f)
+            //If (isNan(S0.f) || isNan(S1.f) || isNan(S2.f))
+            //  D.f = MIN3(S0.f, S1.f, S2.f)
+            //Else if (MAX3(S0.f,S1.f,S2.f) == S0.f)
+            //  D.f = MAX(S1.f, S2.f)
+            //Else if (MAX3(S0.f,S1.f,S2.f) == S1.f)
+            //  D.f = MAX(S0.f, S2.f)
+            //Else
+            //  D.f = MAX(S0.f, S1.f)
 
-                    // ignore NaNs for now
-                    mlir::Value cmp, max_a_b, max3, max_b_c, max_a_c;
-                    //cmp = builder.create<FOrdGreaterThanEqualOp>(a, b);
-                    max_a_b = builder.create<GLFMaxOp>(a, b);
-                    max_a_c = builder.create<GLFMaxOp>(a, c);
-                    max_b_c = builder.create<GLFMaxOp>(b, c);
-                    max3 = builder.create<GLFMaxOp>(max_a_b, max_a_c);
+            // ignore NaNs for now
+            mlir::Value cmp, max_a_b, max3, max_b_c, max_a_c;
+            //cmp = builder.create<FOrdGreaterThanEqualOp>(a, b);
+            max_a_b = builder.create<GLFMaxOp>(a, b);
+            max_a_c = builder.create<GLFMaxOp>(a, c);
+            max_b_c = builder.create<GLFMaxOp>(b, c);
+            max3 = builder.create<GLFMaxOp>(max_a_b, max_a_c);
 
-                    cmp = builder.create<FOrdEqualOp>(max3, a);
-                    result = builder.create<SelectOp>(cmp, max_b_c, max_a_b);
-                    cmp = builder.create<FOrdEqualOp>(max3, b);
-                    result = builder.create<SelectOp>(cmp, max_a_c, result);
+            cmp = builder.create<FOrdEqualOp>(max3, a);
+            result = builder.create<SelectOp>(cmp, max_b_c, max_a_b);
+            cmp = builder.create<FOrdEqualOp>(max3, b);
+            result = builder.create<SelectOp>(cmp, max_a_c, result);
 
-                    break;
-                }
-            }
+            break;
             storeVectorResult32(dst, result);
+            break;
+        }
+
+        case AMDGPU::V_SAD_U32_gfx6_gfx7:
+        {
+            auto [ dst, src0, src1, src2 ] = unwrapMI(MI, R0_3);
+            // Dunno what operand 4 is
+            assert(MI.getOperand(4).getImm() == 0);
+            mlir::Value a = sourceVectorOperand(src0, intTy);
+            mlir::Value b = sourceVectorOperand(src1, intTy);
+            mlir::Value c = sourceVectorOperand(src2, intTy);
+            mlir::Value result;
+            // ABS_DIFF (A,B) = (A>B) ? (A-B) : (B-A)
+            // D.u = ABS_DIFF (S0.u,S1.u) + S2.u
+            mlir::Value absDiff, aSubB, bSubA;
+            aSubB = builder.create<ISubOp>(a, b);
+            bSubA = builder.create<ISubOp>(b, a);
+            auto cmp = builder.create<UGreaterThanOp>(a, b);
+            absDiff = builder.create<SelectOp>(cmp, aSubB, bSubA);
+            result = builder.create<IAddOp>(absDiff, c);
+            break;
+            storeVectorResult32(dst, result);
+            break;
+        }
+
+        case AMDGPU::V_MAD_U64_U32_gfx7:
+        {
+            auto [ dst, cc, src0, src1, src2 ] = unwrapMI(MI, R0_4);
+            assert(MI.getNumOperands() == 5);
+            mlir::Value a = sourceVectorOperand(src0, intTy);
+            mlir::Value b = sourceVectorOperand(src1, intTy);
+            // Multiply add using the product of two 32-bit unsigned integers, then added to a 64-bit integer.
+            // {vcc_out,D.u64} = S0.u32 * S1.u32 + S2.u64
+
+            // product : { lo, hi : 32 }
+            mlir::Value product = builder.create<UMulExtendedOp>(a, b);
+            mlir::Value lo = builder.create<CompositeExtractOp>(product, std::array{0});
+            mlir::Value hi = builder.create<CompositeExtractOp>(product, std::array{1});
+            mlir::Value prod64 = create64BitValue(lo, hi);
+            mlir::Value addend = sourceVectorOperand64(src2, int64Ty);
+            mlir::Value madAndCarry = builder.create<IAddCarryOp>(prod64, addend);
+            mlir::Value mad = builder.create<CompositeExtractOp>(madAndCarry, std::array{0});
+            mlir::Value carry = builder.create<CompositeExtractOp>(madAndCarry, std::array{1});
+            carry = builder.create<INotEqualOp>(getZero(carry.getType()), carry);
+            storeResultCC(cc, carry);
+            storeVectorResult64(dst.getReg(), mad);
+            break;
+        }
+
+        case AMDGPU::V_ADDC_U32_e64_gfx6_gfx7:
+        {
+            auto [ dst, cc, src0, src1, src2 ] = unwrapMI(MI, R0_4);
+            mlir::Value a = sourceVectorOperand(src0, intTy);
+            mlir::Value b = sourceVectorOperand(src1, intTy);
+            mlir::Value carryIn, carryOut1, carryOut2;
+            mlir::Value sumAndCarry1, sumAndCarry2;
+            mlir::Value sum1, sum2;
+            carryIn = sourceCCOperand(src2);
+            carryIn = builder.create<SelectOp>(carryIn, getZero(intTy), getOne(intTy));
+            sumAndCarry1 = builder.create<IAddCarryOp>(a, b);
+            sum1 = builder.create<CompositeExtractOp>(sumAndCarry1, std::array{0});
+            carryOut1 = builder.create<CompositeExtractOp>(sumAndCarry1, std::array{1});
+            carryOut1 = builder.create<INotEqualOp>(getZero(carryOut1.getType()), carryOut1);
+            sumAndCarry2 = builder.create<IAddCarryOp>(sum1, carryIn);
+            sum2 = builder.create<CompositeExtractOp>(sumAndCarry2, std::array{0});
+            carryOut2 = builder.create<CompositeExtractOp>(sumAndCarry2, std::array{1});
+            carryOut2 = builder.create<INotEqualOp>(getZero(carryOut2.getType()), carryOut2);       
+            storeResultCC(cc, carryOut2);
+            storeVectorResult32(dst.getReg(), sum2);
+            break;
+        }
+
+        case AMDGPU::V_MAD_F32_gfx6_gfx7:
+        {
+            // TODO OMOD, CLAMP
+            auto [ dst, src0Mods, src0, src1Mods, src1, src2Mods, src2 ] = unwrapMI(MI, R0_6);
+            mlir::Value a = sourceVectorOperand(src0, floatTy);
+            a = applyOperandModifiers(a, src0Mods);
+            mlir::Value b = sourceVectorOperand(src1, floatTy);
+            b = applyOperandModifiers(b, src1Mods);
+            mlir::Value c = sourceVectorOperand(src2, floatTy);
+            c = applyOperandModifiers(c, src2Mods);
+
+            mlir::Value mad = builder.create<FMulOp>(a, b);
+            mad = builder.create<FAddOp>(mad, c);
+            storeVectorResult32(dst, mad);
+            break;
+        }
+
+        case AMDGPU::V_MUL_F32_e64_gfx6_gfx7:
+        {
+            // TODO OMOD, CLAMP
+            auto [ dst, src0Mods, src0, src1Mods, src1 ] = unwrapMI(MI, R0_4);
+            mlir::Value a = sourceVectorOperand(src0, floatTy);
+            a = applyOperandModifiers(a, src0Mods);
+            mlir::Value b = sourceVectorOperand(src1, floatTy);
+            b = applyOperandModifiers(b, src1Mods);
+
+            mlir::Value mul = builder.create<FMulOp>(a, b);
+            // if ??? clamp mul
+            // TODO
+            mul = applyResultModifiers(mul, 0, 0);
+            storeVectorResult32(dst, mul);
             break;
         }
 
@@ -1460,9 +1811,9 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
 
         default:
             if (!Quiet) {
-            llvm::errs() << "Unhandled instruction: \n";
-            IP->printInst(&MI, 0, "", *STI, llvm::errs());
-            llvm::errs() << "\n";
+                llvm::errs() << "Unhandled instruction: \n";
+                IP->printInst(&MI, 0, "", *STI, llvm::errs());
+                llvm::errs() << "\n";
             }
             return false;
     }
@@ -1520,7 +1871,7 @@ bool GcnToSpirvConverter::finalizeModule() {
         builder.create<ExecutionModeOp>(mainFn, ExecutionMode::OriginUpperLeft, lits);
     }
 
-    llvm::SmallVector<Capability, 8> caps = { Capability::Shader, Capability::Float16, Capability::Int16 };
+    llvm::SmallVector<Capability, 8> caps = { Capability::Shader, Capability::Float16, Capability::Int16, Capability::Int64 };
     llvm::SmallVector<Extension, 4> exts;
     auto vceTriple = VerCapExtAttr::get(Version::V_1_5, caps, exts, &mlirContext);
     moduleOp->setAttr("vce_triple", vceTriple);
