@@ -38,4 +38,5 @@ enum Type {
 
 GcnCmp::Op compareOpcodeToOperation(unsigned int opcode);
 bool compareWritesExec(unsigned int opcode);
+bool compareIsVop3(unsigned int opcode);
 GcnCmp::Type compareOpcodeToOperandType(unsigned int opcode);

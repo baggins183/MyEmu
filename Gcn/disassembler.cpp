@@ -212,6 +212,15 @@ bool isSpecialRegPair(uint regno) {
     }
 }
 
+uint isScalarCcReg(uint regno) {
+    switch (regno) {
+        case AMDGPU::SCC:
+            return true;
+        default:
+            return false;
+    }
+}
+
 llvm::SmallString<8> getUniformRegName(uint regno) {
     llvm::SmallString<8> name;
     if (isSgpr(regno)) {
@@ -260,6 +269,9 @@ llvm::SmallString<16> getCCRegName(uint regno) {
             break;
         case AMDGPU::VCC:
             name = "vcc";
+            break;
+        case AMDGPU::SCC:
+            name = "scc";
             break;
         default:
             assert(false && "unhandled");
@@ -863,7 +875,7 @@ private:
     }
 
     StoreOp storeResultCC(uint regno, mlir::Value result) {
-        assert(isSgprPair(regno) || isSpecialRegPair(regno));
+        assert(isSgprPair(regno) || isSpecialRegPair(regno) || isScalarCcReg(regno));
         CCReg cc = initCCReg(regno);
         return builder.create<StoreOp>(cc, result);
     }
@@ -1787,32 +1799,479 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
         case AMDGPU::V_CMPX_LE_U64_e32_gfx6_gfx7:
         case AMDGPU::V_CMPX_GT_U64_e32_gfx6_gfx7:
         case AMDGPU::V_CMPX_GE_U64_e32_gfx6_gfx7:
+
+        case AMDGPU::V_CMP_F_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_LT_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_EQ_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_LE_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_GT_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_LG_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_GE_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_O_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_U_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_NGE_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_NLG_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_NGT_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_NLE_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_NEQ_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_NLT_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_TRU_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_F_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_LT_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_EQ_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_LE_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_GT_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_LG_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_GE_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_O_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_U_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_NGE_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_NLG_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_NGT_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_NLE_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_NEQ_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_NLT_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_TRU_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_F_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_LT_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_EQ_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_LE_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_GT_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_LG_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_GE_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_O_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_U_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_NGE_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_NLG_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_NGT_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_NLE_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_NEQ_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_NLT_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_TRU_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_F_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_LT_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_EQ_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_LE_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_GT_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_LG_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_GE_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_O_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_U_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_NGE_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_NLG_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_NGT_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_NLE_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_NEQ_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_NLT_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_TRU_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPS_F_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPS_LT_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPS_EQ_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPS_LE_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPS_GT_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPS_LG_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPS_GE_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPS_O_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPS_U_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPS_NGE_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPS_NLG_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPS_NGT_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPS_NLE_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPS_NEQ_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPS_NLT_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPS_TRU_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_F_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_LT_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_EQ_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_LE_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_GT_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_LG_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_GE_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_O_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_U_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_NGE_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_NLG_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_NGT_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_NLE_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_NEQ_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_NLT_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_TRU_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPS_F_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPS_LT_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPS_EQ_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPS_LE_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPS_GT_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPS_LG_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPS_GE_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPS_O_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPS_U_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPS_NGE_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPS_NLG_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPS_NGT_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPS_NLE_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPS_NEQ_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPS_NLT_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPS_TRU_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_F_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_LT_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_EQ_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_LE_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_GT_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_LG_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_GE_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_O_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_U_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_NGE_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_NLG_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_NGT_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_NLE_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_NEQ_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_NLT_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_TRU_F64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_F_I32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_LT_I32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_EQ_I32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_LE_I32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_GT_I32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_GE_I32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_F_I32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_LT_I32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_EQ_I32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_LE_I32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_GT_I32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_GE_I32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_F_I64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_LT_I64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_EQ_I64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_LE_I64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_GT_I64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_GE_I64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_F_I64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_LT_I64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_EQ_I64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_LE_I64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_GT_I64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_GE_I64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_F_U32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_LT_U32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_EQ_U32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_LE_U32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_GT_U32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_GE_U32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_F_U32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_LT_U32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_EQ_U32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_LE_U32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_GT_U32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_GE_U32_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_F_U64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_LT_U64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_EQ_U64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_LE_U64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_GT_U64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMP_GE_U64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_F_U64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_LT_U64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_EQ_U64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_LE_U64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_GT_U64_e64_gfx6_gfx7:
+        case AMDGPU::V_CMPX_GE_U64_e64_gfx6_gfx7:
         {
             // Ignore NAN signalling - maybe TODO
-            bool writeExec = compareWritesExec(opcode);
             GcnCmp::Op cmpOp = compareOpcodeToOperation(opcode);
+            bool writeExec = compareWritesExec(opcode);
+            bool isVop3 = compareIsVop3(opcode);
             GcnCmp::Type cmpOperandType = compareOpcodeToOperandType(opcode);
+
+            bool isFloat = false;
+            bool isSigned = false;
+            bool is64Bit = false;
             mlir::Type argTy;
             switch (cmpOperandType) {
                 case GcnCmp::F32:
+                    isFloat = true;
                     argTy = floatTy;
                     break;
                 case GcnCmp::F64:
+                    isFloat = true;
+                    is64Bit = true;
                     argTy = f64Ty;
                     break;
                 case GcnCmp::I32:
-                    argTy = sintTy;
-                    break;
-                case GcnCmp::I64:
-                    argTy = sint64Ty;
-                    break;
+                    isSigned = true;
+                    LLVM_FALLTHROUGH;
                 case GcnCmp::U32:
                     argTy = intTy;
                     break;
+                case GcnCmp::I64:
+                    isSigned = true;
+                    LLVM_FALLTHROUGH;
                 case GcnCmp::U64:
+                    is64Bit = true;
                     argTy = int64Ty;
                     break;
             }
+
+            MCOperand src0, src1, src0Mods, src1Mods;
+            uint dst = AMDGPU::VCC;
+            mlir::Value a, b, ccOut;
+
+            if (isVop3) {
+                dst = MI.getOperand(0).getReg();
+                if (isFloat) {
+                    src0Mods = MI.getOperand(1);
+                    src0 = MI.getOperand(2);
+                    src1Mods = MI.getOperand(3);
+                    src1 = MI.getOperand(4);
+                } else {
+                    src0 = MI.getOperand(1);
+                    src1 = MI.getOperand(2);
+                }
+            } else {
+                src0 = MI.getOperand(0);
+                src1 = MI.getOperand(1);
+            }
+
+            if (is64Bit) {
+                // TODO should probably just handle 64 bit vector operands in sourceVectorOperand() itself
+                a = sourceVectorOperand64(src0, argTy);
+                b = sourceVectorOperand64(src1, argTy);           
+            } else {
+                a = sourceVectorOperand(src0, argTy);
+                b = sourceVectorOperand(src1, argTy);
+            }
+
+            if (isVop3 && isFloat) {
+                a = applyOperandModifiers(a, src0Mods);
+                b = applyOperandModifiers(b, src1Mods);
+            }
+
+            //// ALL SPIRV OPS
+            // OpIEqual
+            // OpINotEqual
+            // OpUGreaterThan
+            // OpSGreaterThan
+            // OpUGreaterThanEqual
+            // OpSGreaterThanEqual
+            // OpULessThan
+            // OpSLessThan
+            // OpULessThanEqual
+            // OpSLessThanEqual
+
+            // OpFOrdEqual
+            // OpFUnordEqual
+            // OpFOrdNotEqual
+            // OpFUnordNotEqual
+            // OpFOrdLessThan
+            // OpFUnordLessThan
+            // OpFOrdGreaterThan
+            // OpFUnordGreaterThan
+            // OpFOrdLessThanEqual
+            // OpFUnordLessThanEqual
+            // OpFOrdGreaterThanEqual
+            // OpFUnordGreaterThanEqual
+
+            bool invert;
+            switch (cmpOp) {
+                case GcnCmp::NGE:
+                case GcnCmp::LG: // handle like NEQ
+                case GcnCmp::NGT:
+                case GcnCmp::NLE:
+                case GcnCmp::NEQ:
+                case GcnCmp::NLT:
+                    invert = true;
+                    break;
+                default:
+                    invert = false;
+            }
+
+            if (isFloat) {
+                // Dont know about ordered/unordered here
+                switch (cmpOp) {
+                    case GcnCmp::F:
+                        ccOut = getZero(boolTy);
+                        break;
+                    case GcnCmp::LT:
+                    case GcnCmp::NLT:
+                        ccOut = builder.create<FOrdLessThanOp>(a, b);
+                        break;
+                    case GcnCmp::EQ:
+                    case GcnCmp::NEQ:
+                    // Don't know what the point of these is
+                    // Maybe they should tolerate small diffs? And (N)EQ is bitwise equality?
+                    case GcnCmp::LG:
+                    case GcnCmp::NLG:
+                        ccOut = builder.create<FOrdEqualOp>(a, b);
+                        break;
+                    case GcnCmp::LE:
+                    case GcnCmp::NLE:
+                        ccOut = builder.create<FOrdLessThanEqualOp>(a, b);
+                        break;
+                    case GcnCmp::GT:
+                    case GcnCmp::NGT:
+                        ccOut = builder.create<FOrdGreaterThanOp>(a, b);
+                        break;
+                    case GcnCmp::GE:
+                    case GcnCmp::NGE:
+                        ccOut = builder.create<FOrdGreaterThanEqualOp>(a, b);
+                        break;
+                    case GcnCmp::O_F:
+                        ccOut = builder.create<OrderedOp>(a, b);
+                        break;
+                    case GcnCmp::U_F:
+                    {
+                        ccOut = builder.create<OrderedOp>(a, a);
+                        mlir::Value tmp = builder.create<OrderedOp>(b, b);
+                        ccOut = builder.create<LogicalOrOp>(ccOut, tmp);
+                        break;
+                    }
+                    case GcnCmp::TRU:
+                        ccOut = getOne(boolTy);
+                        break;
+                }
+            } else {
+                assert(argTy.isa<mlir::IntegerType>());
+                switch (cmpOp) {
+                    case GcnCmp::F:
+                        ccOut = getZero(boolTy);
+                        break;
+                    case GcnCmp::LT:
+                        if (isSigned) {
+                            ccOut = builder.create<SLessThanOp>(a, b);
+                        } else {
+                            ccOut = builder.create<ULessThanOp>(a, b);
+                        }
+                        break;
+                    case GcnCmp::EQ:
+                    case GcnCmp::LG:
+                        ccOut = builder.create<IEqualOp>(a, b);
+                        break;
+                    case GcnCmp::LE:
+                        if (isSigned) {
+                            ccOut = builder.create<SLessThanEqualOp>(a, b);
+                        } else {
+                            ccOut = builder.create<ULessThanEqualOp>(a, b);
+                        }
+                        break;
+                    case GcnCmp::GT:
+                        if (isSigned) {
+                            ccOut = builder.create<SGreaterThanOp>(a, b);
+                        } else {
+                            ccOut = builder.create<UGreaterThanOp>(a, b);
+                        }
+                        break;
+                    case GcnCmp::GE:
+                        if (isSigned) {
+                            ccOut = builder.create<SGreaterThanEqualOp>(a, b);
+                        } else {
+                            ccOut = builder.create<UGreaterThanEqualOp>(a, b);                            
+                        }
+                        break;
+                    case GcnCmp::TRU:
+                        ccOut = getOne(boolTy);
+                        break;
+                    default:
+                        assert(false && "unhandled");
+                }
+            }
+
+            if (invert) {
+                ccOut = builder.create<NotOp>(ccOut);
+            }
+
+            auto storeVCC = storeResultCC(dst, ccOut);
+            tagPredicated(storeVCC);
+
+            if (writeExec) {
+                auto storeExec = storeResultCC(AMDGPU::EXEC, ccOut);
+                tagPredicated(storeExec);
+            }
+
+            break;
+        }
+
+        case AMDGPU::S_CMP_EQ_I32_gfx6_gfx7:
+        case AMDGPU::S_CMP_LG_I32_gfx6_gfx7:
+        case AMDGPU::S_CMP_GT_I32_gfx6_gfx7:
+        case AMDGPU::S_CMP_GE_I32_gfx6_gfx7:
+        case AMDGPU::S_CMP_LE_I32_gfx6_gfx7:
+        case AMDGPU::S_CMP_LT_I32_gfx6_gfx7:
+        case AMDGPU::S_CMPK_EQ_I32_gfx6_gfx7:
+        case AMDGPU::S_CMPK_LG_I32_gfx6_gfx7:
+        case AMDGPU::S_CMPK_GT_I32_gfx6_gfx7:
+        case AMDGPU::S_CMPK_GE_I32_gfx6_gfx7:
+        case AMDGPU::S_CMPK_LE_I32_gfx6_gfx7:
+        case AMDGPU::S_CMPK_LT_I32_gfx6_gfx7:
+        case AMDGPU::S_CMP_EQ_U32_gfx6_gfx7:
+        case AMDGPU::S_CMP_LG_U32_gfx6_gfx7:
+        case AMDGPU::S_CMP_GT_U32_gfx6_gfx7:
+        case AMDGPU::S_CMP_GE_U32_gfx6_gfx7:
+        case AMDGPU::S_CMP_LE_U32_gfx6_gfx7:
+        case AMDGPU::S_CMP_LT_U32_gfx6_gfx7:
+        case AMDGPU::S_CMPK_EQ_U32_gfx6_gfx7:
+        case AMDGPU::S_CMPK_LG_U32_gfx6_gfx7:
+        case AMDGPU::S_CMPK_GT_U32_gfx6_gfx7:
+        case AMDGPU::S_CMPK_GE_U32_gfx6_gfx7:
+        case AMDGPU::S_CMPK_LE_U32_gfx6_gfx7:
+        case AMDGPU::S_CMPK_LT_U32_gfx6_gfx7:
+        {
+            auto [ src0, src1 ] = unwrapMI(MI, 0, 1);
+            mlir::Value a, b, ccOut;
+
+            GcnCmp::Op cmpOp = compareOpcodeToOperation(opcode);
+            GcnCmp::Type cmpOperandType = compareOpcodeToOperandType(opcode);
+
+            assert(cmpOperandType == GcnCmp::I32 || cmpOperandType == GcnCmp::U32);
+            bool isSigned = cmpOperandType == GcnCmp::I32;
+
+            a = sourceScalarOperandUniform(src0, intTy);
+            b = sourceScalarOperandUniform(src1, intTy);
+
+            switch (cmpOp) {
+                case GcnCmp::F:
+                    ccOut = getZero(boolTy);
+                    break;
+
+                case GcnCmp::EQ:
+                    ccOut = builder.create<IEqualOp>(a, b);
+                    break;
+                case GcnCmp::LG:
+                    ccOut = builder.create<INotEqualOp>(a, b);
+                    break;
+                case GcnCmp::GT:
+                    if (isSigned) {
+                        ccOut = builder.create<SGreaterThanOp>(a, b);
+                    } else {
+                        ccOut = builder.create<UGreaterThanOp>(a, b);
+                    }
+                    break;
+                case GcnCmp::GE:
+                    if (isSigned) {
+                        ccOut = builder.create<SGreaterThanEqualOp>(a, b);
+                    } else {
+                        ccOut = builder.create<UGreaterThanEqualOp>(a, b);                            
+                    }
+                    break;
+                case GcnCmp::LE:
+                    if (isSigned) {
+                        ccOut = builder.create<SLessThanEqualOp>(a, b);
+                    } else {
+                        ccOut = builder.create<ULessThanEqualOp>(a, b);
+                    }
+                    break;
+                case GcnCmp::LT:
+                    if (isSigned) {
+                        ccOut = builder.create<SLessThanOp>(a, b);
+                    } else {
+                        ccOut = builder.create<ULessThanOp>(a, b);
+                    }
+                    break;
+                default:
+                    assert(false && "unhandled");
+            }
+
+            storeResultCC(AMDGPU::SCC, ccOut);
+
             break;
         }
 
