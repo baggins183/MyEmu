@@ -33,10 +33,9 @@ set(LIBS
         MLIRGcn
         LLVM
 )
-message(STATUS "LIBS!!!!!!!!!!!!!!" ${LIBS})
 
 #FILE(GLOB SOURCES *.cpp *.c)
 #add_llvm_executable(gcn-dis ${SOURCES})
-add_executable(gcn-dis disassembler.cpp)
+add_executable(gcn-dis disassembler.cpp utils.cpp)
 target_compile_options(gcn-dis PUBLIC -fno-rtti)
 target_link_libraries(gcn-dis PRIVATE ${LIBS})

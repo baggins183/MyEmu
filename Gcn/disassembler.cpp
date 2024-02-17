@@ -57,6 +57,7 @@ namespace fs = std::filesystem;
 #include "llvm/MC/MCDisassembler/MCDisassembler.h"
 
 #include "GcnBinary.h"
+#include "utils.h"
 
 #include "AMDGPUGenInstrInfo_INSTRINFO.inc"
 #include "AMDGPUGenRegisterInfo_REGINFO.inc"
@@ -412,6 +413,7 @@ public:
 
         intTy = builder.getI32Type();
         sintTy = builder.getIntegerType(32, true);
+        sint64Ty = builder.getIntegerType(64, true);
         int64Ty = builder.getI64Type();
         int16Ty = builder.getI16Type();
         boolTy = builder.getI1Type();
@@ -1041,6 +1043,7 @@ private:
     
     mlir::IntegerType intTy;
     mlir::IntegerType sintTy;
+    mlir::IntegerType sint64Ty;
     mlir::IntegerType int64Ty;
     mlir::IntegerType int16Ty;
     mlir::IntegerType boolTy;
@@ -1193,7 +1196,8 @@ bool GcnToSpirvConverter::prepass() {
 }
 
 bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
-    switch (MI.getOpcode()) {
+    unsigned int opcode = MI.getOpcode();
+    switch (opcode) {
         // SOP1
         case AMDGPU::S_MOV_B32_gfx6_gfx7:
         {
@@ -1336,12 +1340,13 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
         case AMDGPU::V_RCP_F32_e32_gfx6_gfx7:
         case AMDGPU::V_MOV_B32_e32_gfx6_gfx7:
         case AMDGPU::V_CVT_U32_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_EXP_F32_e32_gfx6_gfx7:
         {
             auto [ dst, src ] = unwrapMI(MI, 0, 1);
 
             mlir::Value srcVal = sourceVectorOperand(src, floatTy);
             mlir::Value result;
-            switch (MI.getOpcode()) {
+            switch (opcode) {
                 case AMDGPU::V_FLOOR_F32_e32_gfx6_gfx7:
                     result = builder.create<GLFloorOp>(srcVal);
                     break;
@@ -1373,6 +1378,9 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
                     result = builder.create<ConvertFToUOp>(intTy, srcVal);
                     break;
                 }
+                case AMDGPU::V_EXP_F32_e32_gfx6_gfx7:
+                    result = builder.create<GLExp2Op>(srcVal);
+                    break;
             }
             storeVectorResult32(dst, result);
             break;
@@ -1413,6 +1421,17 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
             break;
         }
 
+        case AMDGPU::V_CVT_F32_I32_e32_gfx6_gfx7:
+        {
+            auto [ dst, src ] = unwrapMI(MI, 0, 1);
+
+            mlir::Value srcVal = sourceVectorOperand(src, intTy);
+            mlir::Value result = builder.create<ConvertSToFOp>(floatTy, srcVal);
+
+            storeVectorResult32(dst, result);
+            break;
+        }
+
         // VOP2
         case AMDGPU::V_ADD_F32_e32_gfx6_gfx7:
         case AMDGPU::V_MUL_F32_e32_gfx6_gfx7:
@@ -1420,15 +1439,17 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
         case AMDGPU::V_MIN_F32_e32_gfx6_gfx7:
         case AMDGPU::V_MAX_F32_e32_gfx6_gfx7:
         case AMDGPU::V_MAC_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_AND_B32_e32_gfx6_gfx7:
+        case AMDGPU::V_OR_B32_e32_gfx6_gfx7:
+        case AMDGPU::V_XOR_B32_e32_gfx6_gfx7:
         {
-            //assert(MI.getNumOperands() == 3);
             auto [ dst, src0, vsrc1 ] = unwrapMI(MI, R0_2);
 
             mlir::Value a = sourceVectorOperand(src0, floatTy);
             mlir::Value b = sourceVectorOperand(vsrc1, floatTy);
             // overflow, side effects?
             mlir::Value result;
-            switch (MI.getOpcode()) {
+            switch (opcode) {
                 case AMDGPU::V_ADD_F32_e32_gfx6_gfx7:
                     result = builder.create<FAddOp>(a, b);
                     break;
@@ -1456,6 +1477,15 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
                     result = builder.create<FAddOp>(dstVal, result);
                     break;
                 }
+                case AMDGPU::V_AND_B32_e32_gfx6_gfx7:
+                    result = builder.create<BitwiseAndOp>(a, b);
+                    break;
+                case AMDGPU::V_OR_B32_e32_gfx6_gfx7:
+                    result = builder.create<BitwiseOrOp>(a, b);
+                    break;
+                case AMDGPU::V_XOR_B32_e32_gfx6_gfx7:
+                    result = builder.create<BitwiseXorOp>(a, b);
+                    break;
 
             }
             storeVectorResult32(dst, result);            
@@ -1476,11 +1506,15 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
         }
 
         case AMDGPU::V_MADAK_F32_gfx6_gfx7:
+        case AMDGPU::V_MADMK_F32_gfx6_gfx7:
         {
-            auto [ dst, src0, src1, src2K ] = unwrapMI(MI, R0_3);
+            // MADAK: addend is constant
+            // MADMK: one of multipliers is constant
+            // makes no diff for this
+            auto [ dst, src0, src1, src2 ] = unwrapMI(MI, R0_3);
             mlir::Value a = sourceVectorOperand(src0, floatTy);
             mlir::Value b = sourceVectorOperand(src1, floatTy);
-            mlir::Value c = sourceVectorOperand(src2K, floatTy);
+            mlir::Value c = sourceVectorOperand(src2, floatTy);
             auto mad = handleVMadF32(a, b, c);
             storeVectorResult32(dst, mad);
             break;
@@ -1489,7 +1523,6 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
         case AMDGPU::V_ADD_I32_e32_gfx6_gfx7:
         case AMDGPU::V_SUB_I32_e32_gfx6_gfx7:
         {
-            //assert(MI.getNumOperands() == 3);
             auto [ dst, src0, vsrc1 ] = unwrapMI(MI, R0_2);
 
             //MCOperand src
@@ -1497,13 +1530,12 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
             mlir::Value b = sourceVectorOperand(vsrc1, intTy);
             // overflow, side effects?
             mlir::Value result;
-            switch (MI.getOpcode()) {
+            switch (opcode) {
                 case AMDGPU::V_ADD_I32_e32_gfx6_gfx7:
                 {
                     // "Unsigned integer add based on signed or unsigned integer components. Produces an
                     // unsigned carry out in VCC or a scalar register" <- VOP2 is always VCC
                     mlir::Value carryOut;
-                    assert(MI.getNumOperands() == 3);
                     auto sumAndCarry = builder.create<IAddCarryOp>(a, b);
                     result = builder.create<CompositeExtractOp>(sumAndCarry, std::array{0});
                     carryOut = builder.create<CompositeExtractOp>(sumAndCarry, std::array{1});
@@ -1546,7 +1578,7 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
             mlir::Value product;
             mlir::Value result;
 
-            switch(MI.getOpcode()) {
+            switch(opcode) {
                 case AMDGPU::V_MUL_HI_U32_gfx6_gfx7:
                 case AMDGPU::V_MUL_LO_U32_gfx6_gfx7:
                     product = builder.create<UMulExtendedOp>(a, b);
@@ -1557,7 +1589,7 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
                     break;
             }
 
-            switch(MI.getOpcode()) {
+            switch(opcode) {
                 case AMDGPU::V_MUL_HI_U32_gfx6_gfx7:
                 case AMDGPU::V_MUL_HI_I32_gfx6_gfx7:
                     result = builder.create<CompositeExtractOp>(product, std::array{1});
@@ -1575,6 +1607,212 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
         {
             auto [ dst, src0, src1 ] = unwrapMI(MI, R0_2);
             handleVAddCU32(dst, src0, src1, AMDGPU::VCC, AMDGPU::VCC);
+            break;
+        }
+
+        // VCMP
+        case AMDGPU::V_CMP_F_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_LT_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_EQ_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_LE_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_GT_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_LG_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_GE_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_O_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_U_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_NGE_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_NLG_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_NGT_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_NLE_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_NEQ_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_NLT_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_TRU_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_F_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_LT_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_EQ_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_LE_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_GT_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_LG_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_GE_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_O_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_U_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_NGE_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_NLG_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_NGT_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_NLE_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_NEQ_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_NLT_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_TRU_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_F_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_LT_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_EQ_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_LE_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_GT_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_LG_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_GE_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_O_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_U_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_NGE_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_NLG_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_NGT_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_NLE_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_NEQ_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_NLT_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_TRU_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_F_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_LT_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_EQ_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_LE_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_GT_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_LG_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_GE_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_O_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_U_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_NGE_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_NLG_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_NGT_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_NLE_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_NEQ_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_NLT_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_TRU_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPS_F_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPS_LT_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPS_EQ_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPS_LE_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPS_GT_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPS_LG_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPS_GE_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPS_O_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPS_U_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPS_NGE_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPS_NLG_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPS_NGT_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPS_NLE_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPS_NEQ_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPS_NLT_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPS_TRU_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_F_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_LT_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_EQ_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_LE_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_GT_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_LG_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_GE_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_O_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_U_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_NGE_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_NLG_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_NGT_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_NLE_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_NEQ_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_NLT_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_TRU_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPS_F_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPS_LT_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPS_EQ_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPS_LE_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPS_GT_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPS_LG_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPS_GE_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPS_O_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPS_U_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPS_NGE_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPS_NLG_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPS_NGT_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPS_NLE_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPS_NEQ_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPS_NLT_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPS_TRU_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_F_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_LT_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_EQ_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_LE_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_GT_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_LG_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_GE_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_O_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_U_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_NGE_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_NLG_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_NGT_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_NLE_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_NEQ_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_NLT_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPSX_TRU_F64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_F_I32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_LT_I32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_EQ_I32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_LE_I32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_GT_I32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_GE_I32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_F_I32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_LT_I32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_EQ_I32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_LE_I32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_GT_I32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_GE_I32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_F_I64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_LT_I64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_EQ_I64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_LE_I64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_GT_I64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_GE_I64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_F_I64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_LT_I64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_EQ_I64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_LE_I64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_GT_I64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_GE_I64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_F_U32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_LT_U32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_EQ_U32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_LE_U32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_GT_U32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_GE_U32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_F_U32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_LT_U32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_EQ_U32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_LE_U32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_GT_U32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_GE_U32_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_F_U64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_LT_U64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_EQ_U64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_LE_U64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_GT_U64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMP_GE_U64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_F_U64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_LT_U64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_EQ_U64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_LE_U64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_GT_U64_e32_gfx6_gfx7:
+        case AMDGPU::V_CMPX_GE_U64_e32_gfx6_gfx7:
+        {
+            // Ignore NAN signalling - maybe TODO
+            bool writeExec = compareWritesExec(opcode);
+            GcnCmp::Op cmpOp = compareOpcodeToOperation(opcode);
+            GcnCmp::Type cmpOperandType = compareOpcodeToOperandType(opcode);
+            mlir::Type argTy;
+            switch (cmpOperandType) {
+                case GcnCmp::F32:
+                    argTy = floatTy;
+                    break;
+                case GcnCmp::F64:
+                    argTy = f64Ty;
+                    break;
+                case GcnCmp::I32:
+                    argTy = sintTy;
+                    break;
+                case GcnCmp::I64:
+                    argTy = sint64Ty;
+                    break;
+                case GcnCmp::U32:
+                    argTy = intTy;
+                    break;
+                case GcnCmp::U64:
+                    argTy = int64Ty;
+                    break;
+            }
             break;
         }
 
@@ -1642,7 +1880,6 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
         case AMDGPU::V_MAD_U64_U32_gfx7:
         {
             auto [ dst, cc, src0, src1, src2 ] = unwrapMI(MI, R0_4);
-            assert(MI.getNumOperands() == 5);
             mlir::Value a = sourceVectorOperand(src0, intTy);
             mlir::Value b = sourceVectorOperand(src1, intTy);
             // Multiply add using the product of two 32-bit unsigned integers, then added to a 64-bit integer.
@@ -1661,6 +1898,24 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
             auto store = storeResultCC(cc, carry);
             tagPredicated(store);
             storeVectorResult64(dst.getReg(), mad);
+            break;
+        }
+
+        case AMDGPU::V_MAD_U32_U24_gfx6_gfx7:
+        {
+            auto [ dst, src0, src1, src2 ] = unwrapMI(MI, R0_3);
+            mlir::Value a, b, c, mad;
+            a = sourceVectorOperand(src0, intTy);
+            b = sourceVectorOperand(src1, intTy);
+            c = sourceVectorOperand(src2, intTy);
+
+            // a and b are treated as 24 bit uints
+            auto mask = getI32Const((1 << 24) - 1);
+            a = builder.create<BitwiseAndOp>(a, mask);
+            b = builder.create<BitwiseAndOp>(b, mask);
+            mad = builder.create<IMulOp>(a, b);
+            mad = builder.create<IAddOp>(mad, c);
+            storeVectorResult32(dst, mad);
             break;
         }
 
@@ -1770,9 +2025,6 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
                 attrVal = builder.create<CompositeExtractOp>(attrVal, std::array{component});
             }
             assert(dyn_cast<mlir::VectorType>(attrType) || component == 0);
-
-            // TODO: check if this store should be predicated by EXEC
-            // Pretty sure it is
             storeVectorResult32(dst, attrVal);
             break;
         }
@@ -1794,8 +2046,6 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
                 // Just treat it like a writemask for now
                 assert(exportTargets.contains(target));
                 ExportTarget exp = exportTargets[target];
-                // exports are in 16 bit format.
-                // vsrc0 and vsrc1 each contain 2 f16's
                 auto gvRef = builder.create<AddressOfOp>(exp);
                 mlir::Type dstType = cast<PointerType>(gvRef.getType()).getPointeeType();
 
@@ -1826,6 +2076,8 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
                 switch (width) {
                     case 16:
                     {
+                        // exports are in 16 bit format.
+                        // vsrc0 and vsrc1 each contain 2 f16's
                         assert(_compr.getImm());
                         mlir::Value src_0_1, src_2_3;
 
