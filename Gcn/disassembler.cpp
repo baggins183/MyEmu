@@ -604,16 +604,19 @@ private:
     }
 
     mlir::Value sourceCCReg(uint regno) {
+        assert(isSgprPair(regno) || isSpecialRegPair(regno));
         VariableOp cc = initCCReg(regno);
         return builder.create<LoadOp>(cc);
     }
 
     mlir::Value sourceUniformReg(uint regno) {
+        assert(isSpecialUniformReg(regno) || isSgpr(regno));
         VariableOp uni = initUniformReg(regno);
         return builder.create<LoadOp>(uni);
     }
 
     mlir::Value sourceVectorGpr(uint regno) {
+        assert(isVgpr(regno));
         VariableOp vgpr = initVgpr(regno);
         return builder.create<LoadOp>(vgpr);
     }
@@ -825,6 +828,20 @@ private:
         }
     }
 
+    template<typename... Idxs>
+    const std::array<MCOperand, sizeof...(Idxs)> unwrapMI(const MCInst &MI, Idxs... args) {
+        return { (MI.getOperand(args))... };
+    }
+
+#define R0_2 0, 1, 2
+#define R0_3 R0_2, 3
+#define R0_4 R0_3, 4
+#define R0_5 R0_4, 5
+#define R0_6 R0_5, 6
+#define R0_7 R0_6, 7
+#define R0_8 R0_7, 8
+#define R0_9 R0_8, 9
+
     void storeScalarResult32(uint regno, mlir::Value result) {
         mlir::Type resultTy = result.getType();
         assert(resultTy.getIntOrFloatBitWidth() == 32);
@@ -843,16 +860,20 @@ private:
         storeScalarResult32(dst.getReg(), result);
     }
 
-    void storeResultCC(uint regno, mlir::Value result) {
+    StoreOp storeResultCC(uint regno, mlir::Value result) {
         assert(isSgprPair(regno) || isSpecialRegPair(regno));
         CCReg cc = initCCReg(regno);
-        builder.create<StoreOp>(cc, result);
+        return builder.create<StoreOp>(cc, result);
     }
 
-    void storeResultCC(MCOperand &dst, mlir::Value result) {
+    StoreOp storeResultCC(MCOperand &dst, mlir::Value result) {
         assert(result.getType() == boolTy);
         uint regno = dst.getReg();
-        storeResultCC(regno, result);
+        return storeResultCC(regno, result);
+    }
+
+    void tagPredicated(mlir::Operation *op) {
+        op->setDiscardableAttr(builder.getStringAttr("gcn.predicated"), builder.getUnitAttr());
     }
 
     void storeVectorResult32(uint regno, mlir::Value result) {
@@ -865,7 +886,7 @@ private:
         auto store = builder.create<StoreOp>(vgpr, result);
         // Don't write back the result if thread is masked off by EXEC
         // Will need to generate control flow, TODO
-        store->setDiscardableAttr(builder.getStringAttr("gcn.predicated"), builder.getUnitAttr());
+        tagPredicated(store);
     }
 
     void storeVectorResult32(MCOperand &dst, mlir::Value result) {
@@ -936,19 +957,51 @@ private:
         return rv;
     }
 
-    template<typename... Idxs>
-    const std::array<MCOperand, sizeof...(Idxs)> unwrapMI(const MCInst &MI, Idxs... args) {
-        return { (MI.getOperand(args))... };
+    ///////////////////////////////////////////////////////////////////////////////////////////
+    // Factor out some common stuff, e.g. instructions that have a normal and VOP3a variant
+    ///////////////////////////////////////////////////////////////////////////////////////////
+
+    void handleVAddCU32(MCOperand &dst, MCOperand &src0, MCOperand &src1, uint carryInRegno, uint carryOutRegno) {
+        mlir::Value carryIn, carryOut1, carryOut2;
+        mlir::Value sumAndCarry1, sumAndCarry2;
+        mlir::Value sum1, sum2;
+
+        mlir::Value a = sourceVectorOperand(src0, intTy);
+        mlir::Value b = sourceVectorOperand(src1, intTy);
+
+        carryIn = sourceCCReg(carryInRegno);
+        carryIn = builder.create<SelectOp>(carryIn, getZero(intTy), getOne(intTy));
+        sumAndCarry1 = builder.create<IAddCarryOp>(a, b);
+        sum1 = builder.create<CompositeExtractOp>(sumAndCarry1, std::array{0});
+        carryOut1 = builder.create<CompositeExtractOp>(sumAndCarry1, std::array{1});
+        carryOut1 = builder.create<INotEqualOp>(getZero(carryOut1.getType()), carryOut1);
+        sumAndCarry2 = builder.create<IAddCarryOp>(sum1, carryIn);
+        sum2 = builder.create<CompositeExtractOp>(sumAndCarry2, std::array{0});
+        carryOut2 = builder.create<CompositeExtractOp>(sumAndCarry2, std::array{1});
+        carryOut2 = builder.create<INotEqualOp>(getZero(carryOut2.getType()), carryOut2);
+
+        auto store = storeResultCC(carryOutRegno, carryOut2);
+        tagPredicated(store);
+        storeVectorResult32(dst.getReg(), sum2);
     }
 
-#define R0_2 0, 1, 2
-#define R0_3 R0_2, 3
-#define R0_4 R0_3, 4
-#define R0_5 R0_4, 5
-#define R0_6 R0_5, 6
-#define R0_7 R0_6, 7
-#define R0_8 R0_7, 8
-#define R0_9 R0_8, 9
+    mlir::Value handleVMadF32(mlir::Value src0, mlir::Value src1, mlir::Value src2) {
+        mlir::Value mad = builder.create<FMulOp>(src0, src1);
+        return builder.create<FAddOp>(mad, src2);
+    }
+
+    mlir::Value handleVCvtPkrtzF16F32(mlir::Value src0, mlir::Value src1) {
+        mlir::Value pack = builder.create<CompositeConstructOp>(v2float32Ty, std::array{src0, src1});
+        // Needs llvm/mlir patch to add this opcode
+        pack = builder.create<GLPackHalf2x16Op>(intTy, pack);
+        // TODO: spirv dialect doesn't support this? Need to change llvm?
+        // bF16->setAttr("FPRoundingMode", builder.getI32IntegerAttr(/* RTZ */ 1));
+        return pack;
+    }
+
+    ///////////////////////////////////////////////////////////////////////////////////////////
+    // GcnToSpirvConverter members
+    ///////////////////////////////////////////////////////////////////////////////////////////
 
     mlir::MLIRContext mlirContext;
     mlir::ImplicitLocOpBuilder builder;
@@ -1140,16 +1193,11 @@ bool GcnToSpirvConverter::prepass() {
 }
 
 bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
-    //llvm::SmallVector<mlir::NamedAttribute, 2> attrs 
-            //= { mlir::NamedAttribute(builder.getStringAttr("gcn.predicated"), builder.getBoolAttr(true)) };
-    //llvm::SmallVector<mlir::Value, 2> args;
     switch (MI.getOpcode()) {
         // SOP1
         case AMDGPU::S_MOV_B32_gfx6_gfx7:
         {
-            MCOperand dst, src;
-            dst = MI.getOperand(0);
-            src = MI.getOperand(1);
+            auto [ dst, src ] = unwrapMI(MI, 0, 1);
 
             assert(dst.isReg());
             mlir::Value result = sourceScalarOperandUniform(src, intTy);
@@ -1160,9 +1208,7 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
         case AMDGPU::S_MOV_B64_gfx6_gfx7:
         {
             // Try to move uniform register and cc register values
-            MCOperand dst, src;
-            dst = MI.getOperand(0);
-            src = MI.getOperand(1);
+            auto [ dst, src ] = unwrapMI(MI, 0, 1);
 
             assert(dst.isReg());
             mlir::Value uniValLo, uniValHi;
@@ -1245,28 +1291,29 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
 
         case AMDGPU::S_WQM_B64_gfx6_gfx7:
         {
-            MCOperand dst, src;
-            dst = MI.getOperand(0);
-            src = MI.getOperand(1);
+            auto [ dst, src ] = unwrapMI(MI, 0, 1);
 
             // What I've seen so far
             // Probably just implementation detail for pixel shaders and can ignore.
             // Probably gets helper quad invocations running on AMD hardware
             // for derivatives and stuff
+            assert(isFragShader());
             assert(dst.isReg() && dst.getReg() == AMDGPU::EXEC);
             assert(src.isReg() && src.getReg() == AMDGPU::EXEC);
             break;
         }
 
+        case AMDGPU::S_SWAPPC_B64_gfx6_gfx7:
+            assert(isVertexShader());
+            break;
+
         // SOP2
         case AMDGPU::S_MUL_I32_gfx6_gfx7:
         {
             // D = S1 * S2. Low 32 bits of result.
-            MCOperand dst, ssrc0, ssrc1;
+            auto [ dst, ssrc0, ssrc1 ] = unwrapMI(MI, R0_2);
             mlir::Value a, b;
-            dst = MI.getOperand(0);
-            ssrc0 = MI.getOperand(1);
-            ssrc1 = MI.getOperand(2);
+
             a = sourceScalarOperandUniform(ssrc0, intTy);
             b = sourceScalarOperandUniform(ssrc1, intTy);
             auto result = builder.create<IMulOp>(a, b);
@@ -1290,9 +1337,8 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
         case AMDGPU::V_MOV_B32_e32_gfx6_gfx7:
         case AMDGPU::V_CVT_U32_F32_e32_gfx6_gfx7:
         {
-            MCOperand dst, src;
-            dst = MI.getOperand(0);
-            src = MI.getOperand(1);
+            auto [ dst, src ] = unwrapMI(MI, 0, 1);
+
             mlir::Value srcVal = sourceVectorOperand(src, floatTy);
             mlir::Value result;
             switch (MI.getOpcode()) {
@@ -1351,9 +1397,8 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
             // 0110 0.375f
             // 0111 0.4375f
             
-            MCOperand dst, src;
-            dst = MI.getOperand(0);
-            src = MI.getOperand(1);
+            auto [ dst, src ] = unwrapMI(MI, 0, 1);
+
             mlir::Value srcVal = sourceVectorOperand(src, intTy);
             mlir::Value result;
             // For now, just do multiplication. 0.0625 * float(sext(src[3:0]))
@@ -1375,14 +1420,10 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
         case AMDGPU::V_MIN_F32_e32_gfx6_gfx7:
         case AMDGPU::V_MAX_F32_e32_gfx6_gfx7:
         case AMDGPU::V_MAC_F32_e32_gfx6_gfx7:
-        case AMDGPU::V_CVT_PKRTZ_F16_F32_e32_gfx6_gfx7:
         {
             //assert(MI.getNumOperands() == 3);
-            MCOperand dst, src0, vsrc1;
-            dst = MI.getOperand(0);
-            src0 = MI.getOperand(1);
-            vsrc1 = MI.getOperand(2);
-            //MCOperand src
+            auto [ dst, src0, vsrc1 ] = unwrapMI(MI, R0_2);
+
             mlir::Value a = sourceVectorOperand(src0, floatTy);
             mlir::Value b = sourceVectorOperand(vsrc1, floatTy);
             // overflow, side effects?
@@ -1415,21 +1456,33 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
                     result = builder.create<FAddOp>(dstVal, result);
                     break;
                 }
-                case AMDGPU::V_CVT_PKRTZ_F16_F32_e32_gfx6_gfx7:
-                {
-                    // decorate with FPRoundingMode?
-                    // OpFConvert?
-                    // OpQuantizeToF16?
-                    result = builder.create<CompositeConstructOp>(v2float32Ty, std::array{a, b});
-                    // Needs llvm/mlir patch to add this opcode
-                    result = builder.create<GLPackHalf2x16Op>(intTy, result);
-                    // TODO: spirv dialect doesn't support this? Need to change llvm?
-                    // bF16->setAttr("FPRoundingMode", builder.getI32IntegerAttr(1));
-                    break;
-                }
 
             }
             storeVectorResult32(dst, result);            
+            break;
+        }
+
+        case AMDGPU::V_CVT_PKRTZ_F16_F32_e32_gfx6_gfx7:
+        {
+            // decorate with FPRoundingMode?
+            // OpFConvert?
+            // OpQuantizeToF16?
+            auto [ dst, src0, src1 ] = unwrapMI(MI, R0_2) ;
+            mlir::Value a = sourceVectorOperand(src0, floatTy);
+            mlir::Value b = sourceVectorOperand(src1, floatTy);
+            auto pack = handleVCvtPkrtzF16F32(a, b);
+            storeVectorResult32(dst, pack);
+            break;
+        }
+
+        case AMDGPU::V_MADAK_F32_gfx6_gfx7:
+        {
+            auto [ dst, src0, src1, src2K ] = unwrapMI(MI, R0_3);
+            mlir::Value a = sourceVectorOperand(src0, floatTy);
+            mlir::Value b = sourceVectorOperand(src1, floatTy);
+            mlir::Value c = sourceVectorOperand(src2K, floatTy);
+            auto mad = handleVMadF32(a, b, c);
+            storeVectorResult32(dst, mad);
             break;
         }
 
@@ -1437,10 +1490,8 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
         case AMDGPU::V_SUB_I32_e32_gfx6_gfx7:
         {
             //assert(MI.getNumOperands() == 3);
-            MCOperand dst, src0, vsrc1;
-            dst = MI.getOperand(0);
-            src0 = MI.getOperand(1);
-            vsrc1 = MI.getOperand(2);
+            auto [ dst, src0, vsrc1 ] = unwrapMI(MI, R0_2);
+
             //MCOperand src
             mlir::Value a = sourceVectorOperand(src0, intTy);
             mlir::Value b = sourceVectorOperand(vsrc1, intTy);
@@ -1459,7 +1510,8 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
                     // Can't cast i32 -> i1 with OpUConvert because mlir forces i1 -> OpTypeBool
                     carryOut = builder.create<INotEqualOp>(getZero(carryOut.getType()), carryOut);
                     storeVectorResult32(dst, result);
-                    storeResultCC(AMDGPU::VCC, carryOut);
+                    auto store = storeResultCC(AMDGPU::VCC, carryOut);
+                    tagPredicated(store);
                     break;
                 }
                 case AMDGPU::V_SUB_I32_e32_gfx6_gfx7:
@@ -1471,7 +1523,8 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
                     // Can't cast i32 -> i1 with OpUConvert because mlir forces i1 -> OpTypeBool
                     borrowOut = builder.create<INotEqualOp>(getZero(borrowOut.getType()), borrowOut);
                     storeVectorResult32(dst, result);
-                    storeResultCC(AMDGPU::VCC, borrowOut);
+                    auto store = storeResultCC(AMDGPU::VCC, borrowOut);
+                    tagPredicated(store);
                     break;  
                 }
 
@@ -1518,6 +1571,12 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
             break;
         }
 
+        case AMDGPU::V_ADDC_U32_e32_gfx6_gfx7:
+        {
+            auto [ dst, src0, src1 ] = unwrapMI(MI, R0_2);
+            handleVAddCU32(dst, src0, src1, AMDGPU::VCC, AMDGPU::VCC);
+            break;
+        }
 
         // VOP3a
         case AMDGPU::V_MED3_F32_gfx6_gfx7:
@@ -1599,31 +1658,16 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
             mlir::Value mad = builder.create<CompositeExtractOp>(madAndCarry, std::array{0});
             mlir::Value carry = builder.create<CompositeExtractOp>(madAndCarry, std::array{1});
             carry = builder.create<INotEqualOp>(getZero(carry.getType()), carry);
-            storeResultCC(cc, carry);
+            auto store = storeResultCC(cc, carry);
+            tagPredicated(store);
             storeVectorResult64(dst.getReg(), mad);
             break;
         }
 
         case AMDGPU::V_ADDC_U32_e64_gfx6_gfx7:
         {
-            auto [ dst, cc, src0, src1, src2 ] = unwrapMI(MI, R0_4);
-            mlir::Value a = sourceVectorOperand(src0, intTy);
-            mlir::Value b = sourceVectorOperand(src1, intTy);
-            mlir::Value carryIn, carryOut1, carryOut2;
-            mlir::Value sumAndCarry1, sumAndCarry2;
-            mlir::Value sum1, sum2;
-            carryIn = sourceCCOperand(src2);
-            carryIn = builder.create<SelectOp>(carryIn, getZero(intTy), getOne(intTy));
-            sumAndCarry1 = builder.create<IAddCarryOp>(a, b);
-            sum1 = builder.create<CompositeExtractOp>(sumAndCarry1, std::array{0});
-            carryOut1 = builder.create<CompositeExtractOp>(sumAndCarry1, std::array{1});
-            carryOut1 = builder.create<INotEqualOp>(getZero(carryOut1.getType()), carryOut1);
-            sumAndCarry2 = builder.create<IAddCarryOp>(sum1, carryIn);
-            sum2 = builder.create<CompositeExtractOp>(sumAndCarry2, std::array{0});
-            carryOut2 = builder.create<CompositeExtractOp>(sumAndCarry2, std::array{1});
-            carryOut2 = builder.create<INotEqualOp>(getZero(carryOut2.getType()), carryOut2);       
-            storeResultCC(cc, carryOut2);
-            storeVectorResult32(dst.getReg(), sum2);
+            auto [ dst, ccIn, src0, src1, ccOut ] = unwrapMI(MI, R0_4);
+            handleVAddCU32(dst, src0, src1, ccIn.getReg(), ccOut.getReg());
             break;
         }
 
@@ -1638,8 +1682,8 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
             mlir::Value c = sourceVectorOperand(src2, floatTy);
             c = applyOperandModifiers(c, src2Mods);
 
-            mlir::Value mad = builder.create<FMulOp>(a, b);
-            mad = builder.create<FAddOp>(mad, c);
+            auto mad = handleVMadF32(a, b, c);
+            mad = applyResultModifiers(mad, 0, 0);
             storeVectorResult32(dst, mad);
             break;
         }
@@ -1661,6 +1705,40 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
             break;
         }
 
+        case AMDGPU::V_FMA_F32_gfx6_gfx7:
+        {
+            // Fused single-precision multiply-add. Only for double-precision parts
+            // D.f = S0.f * S1.f + S2.f
+            // Don't know why this ^ says double-precision parts TODO
+            auto [ dst, src0Mods, src0, src1Mods, src1, src2Mods, src2 ] = unwrapMI(MI, R0_6);
+            mlir::Value a, b, c;
+            a = sourceVectorOperand(src0, floatTy);
+            a = applyOperandModifiers(a, src0Mods);
+            b = sourceVectorOperand(src1, floatTy);
+            b = applyOperandModifiers(b, src1Mods);
+            c = sourceVectorOperand(src2, floatTy);
+            c = applyOperandModifiers(c, src2Mods);
+            mlir::Value fma = builder.create<FMulOp>(a, b);
+            fma = builder.create<FAddOp>(fma, c);
+            fma = applyResultModifiers(fma, 0, 0);
+            storeVectorResult32(dst, fma);
+            break;
+        }
+
+        case AMDGPU::V_CVT_PKRTZ_F16_F32_e64_gfx6_gfx7:
+        {
+            auto [ dst, src0Mods, src0, src1Mods, src1 ] = unwrapMI(MI, R0_4);
+            mlir::Value a, b;
+            a = sourceVectorOperand(src0, floatTy);
+            a = applyOperandModifiers(a, src0Mods);
+            b = sourceVectorOperand(src1, floatTy);
+            b = applyOperandModifiers(b, src1Mods);
+            auto pack = handleVCvtPkrtzF16F32(a, b);
+            pack = applyResultModifiers(pack, 0, 0);
+            storeVectorResult32(dst, pack);
+            break;
+        }
+
         // VINTRP
         case AMDGPU::V_INTERP_P1_F32_si:
         {
@@ -1672,13 +1750,12 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
             // Simple for now
             // Assume previous V_INTERP_P1 with 1st barycentric coord.
             // Assume this one uses 2nd bary coord
-            MCOperand dst, src;
+            auto [ dst, _1, _2, attrOprnd, componentOprnd ] = unwrapMI(MI, R0_4);
+
             int attrno, component;
-            dst = MI.getOperand(0); // also operand 1 (I think)
             // src = MI.getOperand(2); // holds barycentric coord (I think): ignore and let Vulkan driver handle
-            attrno = MI.getOperand(3).getImm();
-            // Dunno if this needs to be an immediate
-            component = MI.getOperand(4).getImm();
+            attrno = attrOprnd.getImm();
+            component = componentOprnd.getImm();
 
             //assert(inp)
             auto it = inputAttributes.find(attrno);
@@ -1704,22 +1781,11 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
         case AMDGPU::EXP_DONE_si:
         case AMDGPU::EXP_si:
         {
-            // The EXEC mask is applied to all exports.
-            // Only pixels with the corresponding EXEC bit set to 1 export data to the output buffer.
+            uint target, validMask;
+            auto [ targetOp, vsrc0, vsrc1, vsrc2, vsrc3, _done, _compr, validOp ] = unwrapMI(MI, R0_7);
 
-            // exp mrtz v2, off, off, off
-            // exp mrt0 v0, v0, v1, v1 done compr vm
-            MCOperand vsrc0, vsrc1, vsrc2, vsrc3;
-            uint target, done, compr, validMask;
-
-            target = MI.getOperand(0).getImm();
-            vsrc0 = MI.getOperand(1);
-            vsrc1 = MI.getOperand(2);
-            vsrc2 = MI.getOperand(3);
-            vsrc3 = MI.getOperand(4);
-            done = MI.getOperand(5).getImm();
-            compr = MI.getOperand(6).getImm();
-            validMask = MI.getOperand(7).getImm();
+            target = targetOp.getImm();
+            validMask = validOp.getImm();
 
             assert( !(isFragShader() && !isRenderTarget(target)));
             if (target != AMDGPU::Exp::Target::ET_NULL) {
@@ -1760,6 +1826,7 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
                 switch (width) {
                     case 16:
                     {
+                        assert(_compr.getImm());
                         mlir::Value src_0_1, src_2_3;
 
                         if (validMask & 0x3) {
@@ -1804,7 +1871,7 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
                 auto store = builder.create<StoreOp>(gvRef, src);
                 // exports shouldn't be written if the thread is masked off by EXEC
                 // tag with "predicated" to later generate if stmt
-                store->setDiscardableAttr(builder.getStringAttr("gcn.predicated"), builder.getUnitAttr());
+                tagPredicated(store);
             }
             break;
         }
