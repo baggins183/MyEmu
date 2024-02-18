@@ -136,52 +136,59 @@
         X(llvm::AMDGPU::V_CMP_F_I32_e32_gfx6_gfx7, GcnCmp::F, false, false, GcnCmp::I32) \
         X(llvm::AMDGPU::V_CMP_LT_I32_e32_gfx6_gfx7, GcnCmp::LT, false, false, GcnCmp::I32) \
         X(llvm::AMDGPU::V_CMP_EQ_I32_e32_gfx6_gfx7, GcnCmp::EQ, false, false, GcnCmp::I32) \
+        X(llvm::AMDGPU::V_CMP_NE_I32_e32_gfx6_gfx7, GcnCmp::NEQ, false, false, GcnCmp::I32) \
         X(llvm::AMDGPU::V_CMP_LE_I32_e32_gfx6_gfx7, GcnCmp::LE, false, false, GcnCmp::I32) \
         X(llvm::AMDGPU::V_CMP_GT_I32_e32_gfx6_gfx7, GcnCmp::GT, false, false, GcnCmp::I32) \
         X(llvm::AMDGPU::V_CMP_GE_I32_e32_gfx6_gfx7, GcnCmp::GE, false, false, GcnCmp::I32) \
         X(llvm::AMDGPU::V_CMPX_F_I32_e32_gfx6_gfx7, GcnCmp::F, true, false, GcnCmp::I32) \
         X(llvm::AMDGPU::V_CMPX_LT_I32_e32_gfx6_gfx7, GcnCmp::LT, true, false, GcnCmp::I32) \
         X(llvm::AMDGPU::V_CMPX_EQ_I32_e32_gfx6_gfx7, GcnCmp::EQ, true, false, GcnCmp::I32) \
+        X(llvm::AMDGPU::V_CMPX_NE_I32_e32_gfx6_gfx7, GcnCmp::NEQ, true, false, GcnCmp::I32) \
         X(llvm::AMDGPU::V_CMPX_LE_I32_e32_gfx6_gfx7, GcnCmp::LE, true, false, GcnCmp::I32) \
         X(llvm::AMDGPU::V_CMPX_GT_I32_e32_gfx6_gfx7, GcnCmp::GT, true, false, GcnCmp::I32) \
         X(llvm::AMDGPU::V_CMPX_GE_I32_e32_gfx6_gfx7, GcnCmp::GE, true, false, GcnCmp::I32) \
         X(llvm::AMDGPU::V_CMP_F_I64_e32_gfx6_gfx7, GcnCmp::F, false, false, GcnCmp::I64) \
         X(llvm::AMDGPU::V_CMP_LT_I64_e32_gfx6_gfx7, GcnCmp::LT, false, false, GcnCmp::I64) \
         X(llvm::AMDGPU::V_CMP_EQ_I64_e32_gfx6_gfx7, GcnCmp::EQ, false, false, GcnCmp::I64) \
+        X(llvm::AMDGPU::V_CMP_NE_I64_e32_gfx6_gfx7, GcnCmp::NEQ, false, false, GcnCmp::I64) \
         X(llvm::AMDGPU::V_CMP_LE_I64_e32_gfx6_gfx7, GcnCmp::LE, false, false, GcnCmp::I64) \
         X(llvm::AMDGPU::V_CMP_GT_I64_e32_gfx6_gfx7, GcnCmp::GT, false, false, GcnCmp::I64) \
         X(llvm::AMDGPU::V_CMP_GE_I64_e32_gfx6_gfx7, GcnCmp::GE, false, false, GcnCmp::I64) \
         X(llvm::AMDGPU::V_CMPX_F_I64_e32_gfx6_gfx7, GcnCmp::F, true, false, GcnCmp::I64) \
         X(llvm::AMDGPU::V_CMPX_LT_I64_e32_gfx6_gfx7, GcnCmp::LT, true, false, GcnCmp::I64) \
         X(llvm::AMDGPU::V_CMPX_EQ_I64_e32_gfx6_gfx7, GcnCmp::EQ, true, false, GcnCmp::I64) \
+        X(llvm::AMDGPU::V_CMPX_NE_I64_e32_gfx6_gfx7, GcnCmp::NEQ, true, false, GcnCmp::I64) \
         X(llvm::AMDGPU::V_CMPX_LE_I64_e32_gfx6_gfx7, GcnCmp::LE, true, false, GcnCmp::I64) \
         X(llvm::AMDGPU::V_CMPX_GT_I64_e32_gfx6_gfx7, GcnCmp::GT, true, false, GcnCmp::I64) \
         X(llvm::AMDGPU::V_CMPX_GE_I64_e32_gfx6_gfx7, GcnCmp::GE, true, false, GcnCmp::I64) \
         X(llvm::AMDGPU::V_CMP_F_U32_e32_gfx6_gfx7, GcnCmp::F, false, false, GcnCmp::U32) \
         X(llvm::AMDGPU::V_CMP_LT_U32_e32_gfx6_gfx7, GcnCmp::LT, false, false, GcnCmp::U32) \
         X(llvm::AMDGPU::V_CMP_EQ_U32_e32_gfx6_gfx7, GcnCmp::EQ, false, false, GcnCmp::U32) \
+        X(llvm::AMDGPU::V_CMP_NE_U32_e32_gfx6_gfx7, GcnCmp::NEQ, false, false, GcnCmp::U32) \
         X(llvm::AMDGPU::V_CMP_LE_U32_e32_gfx6_gfx7, GcnCmp::LE, false, false, GcnCmp::U32) \
         X(llvm::AMDGPU::V_CMP_GT_U32_e32_gfx6_gfx7, GcnCmp::GT, false, false, GcnCmp::U32) \
         X(llvm::AMDGPU::V_CMP_GE_U32_e32_gfx6_gfx7, GcnCmp::GE, false, false, GcnCmp::U32) \
         X(llvm::AMDGPU::V_CMPX_F_U32_e32_gfx6_gfx7, GcnCmp::F, true, false, GcnCmp::U32) \
         X(llvm::AMDGPU::V_CMPX_LT_U32_e32_gfx6_gfx7, GcnCmp::LT, true, false, GcnCmp::U32) \
         X(llvm::AMDGPU::V_CMPX_EQ_U32_e32_gfx6_gfx7, GcnCmp::EQ, true, false, GcnCmp::U32) \
+        X(llvm::AMDGPU::V_CMPX_NE_U32_e32_gfx6_gfx7, GcnCmp::NEQ, true, false, GcnCmp::U32) \
         X(llvm::AMDGPU::V_CMPX_LE_U32_e32_gfx6_gfx7, GcnCmp::LE, true, false, GcnCmp::U32) \
         X(llvm::AMDGPU::V_CMPX_GT_U32_e32_gfx6_gfx7, GcnCmp::GT, true, false, GcnCmp::U32) \
         X(llvm::AMDGPU::V_CMPX_GE_U32_e32_gfx6_gfx7, GcnCmp::GE, true, false, GcnCmp::U32) \
         X(llvm::AMDGPU::V_CMP_F_U64_e32_gfx6_gfx7, GcnCmp::F, false, false, GcnCmp::U64) \
         X(llvm::AMDGPU::V_CMP_LT_U64_e32_gfx6_gfx7, GcnCmp::LT, false, false, GcnCmp::U64) \
         X(llvm::AMDGPU::V_CMP_EQ_U64_e32_gfx6_gfx7, GcnCmp::EQ, false, false, GcnCmp::U64) \
+        X(llvm::AMDGPU::V_CMP_NE_U64_e32_gfx6_gfx7, GcnCmp::NEQ, false, false, GcnCmp::U64) \
         X(llvm::AMDGPU::V_CMP_LE_U64_e32_gfx6_gfx7, GcnCmp::LE, false, false, GcnCmp::U64) \
         X(llvm::AMDGPU::V_CMP_GT_U64_e32_gfx6_gfx7, GcnCmp::GT, false, false, GcnCmp::U64) \
         X(llvm::AMDGPU::V_CMP_GE_U64_e32_gfx6_gfx7, GcnCmp::GE, false, false, GcnCmp::U64) \
         X(llvm::AMDGPU::V_CMPX_F_U64_e32_gfx6_gfx7, GcnCmp::F, true, false, GcnCmp::U64) \
         X(llvm::AMDGPU::V_CMPX_LT_U64_e32_gfx6_gfx7, GcnCmp::LT, true, false, GcnCmp::U64) \
         X(llvm::AMDGPU::V_CMPX_EQ_U64_e32_gfx6_gfx7, GcnCmp::EQ, true, false, GcnCmp::U64) \
+        X(llvm::AMDGPU::V_CMPX_NE_U64_e32_gfx6_gfx7, GcnCmp::NEQ, true, false, GcnCmp::U64) \
         X(llvm::AMDGPU::V_CMPX_LE_U64_e32_gfx6_gfx7, GcnCmp::LE, true, false, GcnCmp::U64) \
         X(llvm::AMDGPU::V_CMPX_GT_U64_e32_gfx6_gfx7, GcnCmp::GT, true, false, GcnCmp::U64) \
         X(llvm::AMDGPU::V_CMPX_GE_U64_e32_gfx6_gfx7, GcnCmp::GE, true, false, GcnCmp::U64) \
-        \
         X(llvm::AMDGPU::V_CMP_F_F32_e64_gfx6_gfx7, GcnCmp::F, false, true, GcnCmp::F32) \
         X(llvm::AMDGPU::V_CMP_LT_F32_e64_gfx6_gfx7, GcnCmp::LT, false, true, GcnCmp::F32) \
         X(llvm::AMDGPU::V_CMP_EQ_F32_e64_gfx6_gfx7, GcnCmp::EQ, false, true, GcnCmp::F32) \
@@ -313,48 +320,56 @@
         X(llvm::AMDGPU::V_CMP_F_I32_e64_gfx6_gfx7, GcnCmp::F, false, true, GcnCmp::I32) \
         X(llvm::AMDGPU::V_CMP_LT_I32_e64_gfx6_gfx7, GcnCmp::LT, false, true, GcnCmp::I32) \
         X(llvm::AMDGPU::V_CMP_EQ_I32_e64_gfx6_gfx7, GcnCmp::EQ, false, true, GcnCmp::I32) \
+        X(llvm::AMDGPU::V_CMP_NE_I32_e64_gfx6_gfx7, GcnCmp::NEQ, false, true, GcnCmp::I32) \
         X(llvm::AMDGPU::V_CMP_LE_I32_e64_gfx6_gfx7, GcnCmp::LE, false, true, GcnCmp::I32) \
         X(llvm::AMDGPU::V_CMP_GT_I32_e64_gfx6_gfx7, GcnCmp::GT, false, true, GcnCmp::I32) \
         X(llvm::AMDGPU::V_CMP_GE_I32_e64_gfx6_gfx7, GcnCmp::GE, false, true, GcnCmp::I32) \
         X(llvm::AMDGPU::V_CMPX_F_I32_e64_gfx6_gfx7, GcnCmp::F, true, true, GcnCmp::I32) \
         X(llvm::AMDGPU::V_CMPX_LT_I32_e64_gfx6_gfx7, GcnCmp::LT, true, true, GcnCmp::I32) \
         X(llvm::AMDGPU::V_CMPX_EQ_I32_e64_gfx6_gfx7, GcnCmp::EQ, true, true, GcnCmp::I32) \
+        X(llvm::AMDGPU::V_CMPX_NE_I32_e64_gfx6_gfx7, GcnCmp::NEQ, true, true, GcnCmp::I32) \
         X(llvm::AMDGPU::V_CMPX_LE_I32_e64_gfx6_gfx7, GcnCmp::LE, true, true, GcnCmp::I32) \
         X(llvm::AMDGPU::V_CMPX_GT_I32_e64_gfx6_gfx7, GcnCmp::GT, true, true, GcnCmp::I32) \
         X(llvm::AMDGPU::V_CMPX_GE_I32_e64_gfx6_gfx7, GcnCmp::GE, true, true, GcnCmp::I32) \
         X(llvm::AMDGPU::V_CMP_F_I64_e64_gfx6_gfx7, GcnCmp::F, false, true, GcnCmp::I64) \
         X(llvm::AMDGPU::V_CMP_LT_I64_e64_gfx6_gfx7, GcnCmp::LT, false, true, GcnCmp::I64) \
         X(llvm::AMDGPU::V_CMP_EQ_I64_e64_gfx6_gfx7, GcnCmp::EQ, false, true, GcnCmp::I64) \
+        X(llvm::AMDGPU::V_CMP_NE_I64_e64_gfx6_gfx7, GcnCmp::NEQ, false, true, GcnCmp::I64) \
         X(llvm::AMDGPU::V_CMP_LE_I64_e64_gfx6_gfx7, GcnCmp::LE, false, true, GcnCmp::I64) \
         X(llvm::AMDGPU::V_CMP_GT_I64_e64_gfx6_gfx7, GcnCmp::GT, false, true, GcnCmp::I64) \
         X(llvm::AMDGPU::V_CMP_GE_I64_e64_gfx6_gfx7, GcnCmp::GE, false, true, GcnCmp::I64) \
         X(llvm::AMDGPU::V_CMPX_F_I64_e64_gfx6_gfx7, GcnCmp::F, true, true, GcnCmp::I64) \
         X(llvm::AMDGPU::V_CMPX_LT_I64_e64_gfx6_gfx7, GcnCmp::LT, true, true, GcnCmp::I64) \
         X(llvm::AMDGPU::V_CMPX_EQ_I64_e64_gfx6_gfx7, GcnCmp::EQ, true, true, GcnCmp::I64) \
+        X(llvm::AMDGPU::V_CMPX_NE_I64_e64_gfx6_gfx7, GcnCmp::NEQ, true, true, GcnCmp::I64) \
         X(llvm::AMDGPU::V_CMPX_LE_I64_e64_gfx6_gfx7, GcnCmp::LE, true, true, GcnCmp::I64) \
         X(llvm::AMDGPU::V_CMPX_GT_I64_e64_gfx6_gfx7, GcnCmp::GT, true, true, GcnCmp::I64) \
         X(llvm::AMDGPU::V_CMPX_GE_I64_e64_gfx6_gfx7, GcnCmp::GE, true, true, GcnCmp::I64) \
         X(llvm::AMDGPU::V_CMP_F_U32_e64_gfx6_gfx7, GcnCmp::F, false, true, GcnCmp::U32) \
         X(llvm::AMDGPU::V_CMP_LT_U32_e64_gfx6_gfx7, GcnCmp::LT, false, true, GcnCmp::U32) \
         X(llvm::AMDGPU::V_CMP_EQ_U32_e64_gfx6_gfx7, GcnCmp::EQ, false, true, GcnCmp::U32) \
+        X(llvm::AMDGPU::V_CMP_NE_U32_e64_gfx6_gfx7, GcnCmp::NEQ, false, true, GcnCmp::U32) \
         X(llvm::AMDGPU::V_CMP_LE_U32_e64_gfx6_gfx7, GcnCmp::LE, false, true, GcnCmp::U32) \
         X(llvm::AMDGPU::V_CMP_GT_U32_e64_gfx6_gfx7, GcnCmp::GT, false, true, GcnCmp::U32) \
         X(llvm::AMDGPU::V_CMP_GE_U32_e64_gfx6_gfx7, GcnCmp::GE, false, true, GcnCmp::U32) \
         X(llvm::AMDGPU::V_CMPX_F_U32_e64_gfx6_gfx7, GcnCmp::F, true, true, GcnCmp::U32) \
         X(llvm::AMDGPU::V_CMPX_LT_U32_e64_gfx6_gfx7, GcnCmp::LT, true, true, GcnCmp::U32) \
         X(llvm::AMDGPU::V_CMPX_EQ_U32_e64_gfx6_gfx7, GcnCmp::EQ, true, true, GcnCmp::U32) \
+        X(llvm::AMDGPU::V_CMPX_NE_U32_e64_gfx6_gfx7, GcnCmp::NEQ, true, true, GcnCmp::U32) \
         X(llvm::AMDGPU::V_CMPX_LE_U32_e64_gfx6_gfx7, GcnCmp::LE, true, true, GcnCmp::U32) \
         X(llvm::AMDGPU::V_CMPX_GT_U32_e64_gfx6_gfx7, GcnCmp::GT, true, true, GcnCmp::U32) \
         X(llvm::AMDGPU::V_CMPX_GE_U32_e64_gfx6_gfx7, GcnCmp::GE, true, true, GcnCmp::U32) \
         X(llvm::AMDGPU::V_CMP_F_U64_e64_gfx6_gfx7, GcnCmp::F, false, true, GcnCmp::U64) \
         X(llvm::AMDGPU::V_CMP_LT_U64_e64_gfx6_gfx7, GcnCmp::LT, false, true, GcnCmp::U64) \
         X(llvm::AMDGPU::V_CMP_EQ_U64_e64_gfx6_gfx7, GcnCmp::EQ, false, true, GcnCmp::U64) \
+        X(llvm::AMDGPU::V_CMP_NE_U64_e64_gfx6_gfx7, GcnCmp::NEQ, false, true, GcnCmp::U64) \
         X(llvm::AMDGPU::V_CMP_LE_U64_e64_gfx6_gfx7, GcnCmp::LE, false, true, GcnCmp::U64) \
         X(llvm::AMDGPU::V_CMP_GT_U64_e64_gfx6_gfx7, GcnCmp::GT, false, true, GcnCmp::U64) \
         X(llvm::AMDGPU::V_CMP_GE_U64_e64_gfx6_gfx7, GcnCmp::GE, false, true, GcnCmp::U64) \
         X(llvm::AMDGPU::V_CMPX_F_U64_e64_gfx6_gfx7, GcnCmp::F, true, true, GcnCmp::U64) \
         X(llvm::AMDGPU::V_CMPX_LT_U64_e64_gfx6_gfx7, GcnCmp::LT, true, true, GcnCmp::U64) \
         X(llvm::AMDGPU::V_CMPX_EQ_U64_e64_gfx6_gfx7, GcnCmp::EQ, true, true, GcnCmp::U64) \
+        X(llvm::AMDGPU::V_CMPX_NE_U64_e64_gfx6_gfx7, GcnCmp::NEQ, true, true, GcnCmp::U64) \
         X(llvm::AMDGPU::V_CMPX_LE_U64_e64_gfx6_gfx7, GcnCmp::LE, true, true, GcnCmp::U64) \
         X(llvm::AMDGPU::V_CMPX_GT_U64_e64_gfx6_gfx7, GcnCmp::GT, true, true, GcnCmp::U64) \
         X(llvm::AMDGPU::V_CMPX_GE_U64_e64_gfx6_gfx7, GcnCmp::GE, true, true, GcnCmp::U64) \
