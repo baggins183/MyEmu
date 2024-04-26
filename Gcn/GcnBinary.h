@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <cassert>
 #include <cstdint>
 #include <cstdio>
 
@@ -47,6 +48,109 @@ enum ShaderInputUsageType
 	kShaderInputUsagePtrIndirectInternalResourceTable = 0x1D, ///< Pointer to internal resource indirection table.
 	kShaderInputUsagePtrIndirectRwResourceTable = 0x1E, ///< Pointer to read/write resource indirection table.
 };
+
+static inline const char *shaderInputUsageTypeToName(ShaderInputUsageType usageType) {
+	switch (usageType) {
+		case kShaderInputUsageImmResource:
+			return "kShaderInputUsageImmResource";
+		case kShaderInputUsageImmSampler:
+			return "kShaderInputUsageImmSampler";
+		case kShaderInputUsageImmConstBuffer:
+			return "kShaderInputUsageImmConstBuffer";
+		case kShaderInputUsageImmVertexBuffer:
+			return "kShaderInputUsageImmVertexBuffer";
+		case kShaderInputUsageImmRwResource:
+			return "kShaderInputUsageImmRwResource";
+		case kShaderInputUsageImmAluFloatConst:
+			return "kShaderInputUsageImmAluFloatConst";
+		case kShaderInputUsageImmAluBool32Const:
+			return "kShaderInputUsageImmAluBool32Const";
+		case kShaderInputUsageImmGdsCounterRange:
+			return "kShaderInputUsageImmGdsCounterRange";
+		case kShaderInputUsageImmGdsMemoryRange:
+			return "kShaderInputUsageImmGdsMemoryRange";
+		case kShaderInputUsageImmGwsBase:
+			return "kShaderInputUsageImmGwsBase";
+		case kShaderInputUsageImmShaderResourceTable:
+			return "kShaderInputUsageImmShaderResourceTable";
+		case kShaderInputUsageImmLdsEsGsSize:
+			return "kShaderInputUsageImmLdsEsGsSize";
+		case kShaderInputUsageSubPtrFetchShader:
+			return "kShaderInputUsageSubPtrFetchShader";
+		case kShaderInputUsagePtrResourceTable:
+			return "kShaderInputUsagePtrResourceTable";
+		case kShaderInputUsagePtrInternalResourceTable:
+			return "kShaderInputUsagePtrInternalResourceTable";
+		case kShaderInputUsagePtrSamplerTable:
+			return "kShaderInputUsagePtrSamplerTable";
+		case kShaderInputUsagePtrConstBufferTable:
+			return "kShaderInputUsagePtrConstBufferTable";
+		case kShaderInputUsagePtrVertexBufferTable:
+			return "kShaderInputUsagePtrVertexBufferTable";
+		case kShaderInputUsagePtrSoBufferTable:
+			return "kShaderInputUsagePtrSoBufferTable";
+		case kShaderInputUsagePtrRwResourceTable:
+			return "kShaderInputUsagePtrRwResourceTable";
+		case kShaderInputUsagePtrInternalGlobalTable:
+			return "kShaderInputUsagePtrInternalGlobalTable";
+		case kShaderInputUsagePtrExtendedUserData:
+			return "kShaderInputUsagePtrExtendedUserData";
+		case kShaderInputUsagePtrIndirectResourceTable:
+			return "kShaderInputUsagePtrIndirectResourceTable";
+		case kShaderInputUsagePtrIndirectInternalResourceTable:
+			return "kShaderInputUsagePtrIndirectInternalResourceTable";
+		case kShaderInputUsagePtrIndirectRwResourceTable:
+			return "kShaderInputUsagePtrIndirectRwResourceTable";
+		default:
+			assert(false);
+			return "UNKOWN USAGE TYPE";
+	}
+}
+
+// size in bytes
+static inline int shaderInputUsageTypeToSize(ShaderInputUsageType usageType) {
+	switch (usageType) {
+		case kShaderInputUsageImmResource:
+		case kShaderInputUsageImmRwResource:
+			return -1;
+		case kShaderInputUsageImmSampler:
+			return 16;
+		case kShaderInputUsageImmConstBuffer:
+			return 16;
+		case kShaderInputUsageImmVertexBuffer:
+			return 16;
+		case kShaderInputUsageImmAluFloatConst:
+		case kShaderInputUsageImmAluBool32Const:
+		case kShaderInputUsageImmGdsCounterRange:
+		case kShaderInputUsageImmGdsMemoryRange:
+		case kShaderInputUsageImmGwsBase:
+		case kShaderInputUsageImmShaderResourceTable:
+		case kShaderInputUsageImmLdsEsGsSize:
+			return -1;
+		case kShaderInputUsageSubPtrFetchShader:
+			return 8;
+		case kShaderInputUsagePtrResourceTable:
+		case kShaderInputUsagePtrInternalResourceTable:
+		case kShaderInputUsagePtrSamplerTable:
+		case kShaderInputUsagePtrConstBufferTable:
+		case kShaderInputUsagePtrVertexBufferTable:
+			// Guessing 8 because have seen these at sgpr offsets of 2. If they were bigger,
+			// the base SGPR would be aligned to multiple of 4
+			return 8;
+		case kShaderInputUsagePtrSoBufferTable:
+		case kShaderInputUsagePtrRwResourceTable:
+		case kShaderInputUsagePtrInternalGlobalTable:
+		case kShaderInputUsagePtrExtendedUserData:
+			return 8;
+		case kShaderInputUsagePtrIndirectResourceTable:
+		case kShaderInputUsagePtrIndirectInternalResourceTable:
+		case kShaderInputUsagePtrIndirectRwResourceTable:
+			return -1;
+		default:
+			assert(false);
+			return -1;
+	}
+} 
 
 class VsShader;
 class PsShader;
@@ -168,7 +272,7 @@ public:
 	};
 };
 
-class Header
+class ShaderFileHeader
 {
 public:
 	uint8_t				m_formatVersionMajor;         ///< The version of shader binary format: major numbering. 
@@ -190,7 +294,7 @@ public:
 	SystemAttributes	m_shaderSystemAttributeInfo;  ///< The shader system attribute info.
 };
 
-class ShaderFileHeader
+class ShaderBinaryHeader
 {
 public:
 	uint32_t        m_fileHeader;			///< File identifier. Should be equal to kShaderFileHeaderId
@@ -246,6 +350,10 @@ struct ShaderBinaryInfo
     uint32_t m_crc32;        // crc32 of shader + this struct, just up till this field
 };
 
+enum ImmResourceType {
+	IMM_RESOURCE_BUFFER = 0, // V#
+	IMM_RESOURCE_IMAGE = 1, //  T#
+};
 
 struct alignas(4) InputUsageSlot
 {

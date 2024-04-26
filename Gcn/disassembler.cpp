@@ -351,7 +351,7 @@ extern "C" void  printInst(MCInst &MI) {
 
 // Different register types in Gcn.
 // Because Gcn is a hardware ISA, it has a notion of SIMD.
-// We are modeling it in SPIR-V, which is basically SIMT and mostly hides that other threads exist.
+// We are modeling it in SPIR-V, which is basically SIMT and hides that other threads exist.
 // (besides cross-workgroup ops, etc).
 // Because of this gap, it's hard to model SGPRs (scalar general puporse registers) from Gcn in spir-v.
 // In a Gcn program, two consecutive SGPRs (2 x 32 bits) could be written to by a comparison op to say,
@@ -389,6 +389,30 @@ extern "C" void  printInst(MCInst &MI) {
 // or branches.
 // """
 
+// Strategy for buffer (V#), image (T#), sampler (S#) resources
+// CI (sea islands) shaders can be programmed in immediate or flat table mode
+// immediate: SGprs are initialized with SRDs (shader resource descriptors?) on program start
+// Flat table: there's a few registers that hold a pointer to a table of SRDs. V/T/S#'s are fetched from there
+// before being used in mem instructions.
+// Strategy is to keep one descriptor set (0) for the immediates or table.
+// We will represent any SRD with a uint32 index. Members of the Flat table will be these indexes.
+// They will index into a descriptor heap that is created on the CPU/Vulkan side depending on what resources are allocated
+// by the ps4 graphics API. For any resource allocated by the host API, we'll allocate a vulkan resource, and append the handle in
+// a heap (one for buffers, one for textures maybe, etc), and pass around an index into the heap to refer to that resource.
+// For each heap, there will be a descriptor set available to shaders that can be indexed by fake SRD indexes.
+// These heaps should contain all resources allocated, so they won't need to be switched in/out often. (Just to add new resources,
+// garbage collect dead resources, etc)
+//
+// This way, we can translate how Gcn shaders work with descriptors, with arbitrary movement to/from Sgprs. Instead we pass around
+// our own handles in the variables created for those SGprs.
+//
+// When a memory instruction wants to sample, load, store, etc, create SPIRV that indexes into
+// the corresponding descriptor array (depending on the instruction's meaning) using the index stored in the sgpr variable, 
+// to fetch the right buffer address, texture, sampler, etc. Then do the SPIRV sample/load/store.
+// THis is overlooking the fact that a shader *could* generate a resource descriptor itself instead of fetching one
+// that was allocated through the graphics API on the CPU. But Im guessing that's really rare. Will worry about it when
+// I see it happen.
+
 // Holds a single 32 bit value per 64-thread wavefront.
 // Could hold a loop counter for example
 // VariableOp holds an i32 type
@@ -401,14 +425,30 @@ typedef VariableOp CCReg;
 // VariableOp holds an i32 type
 typedef VariableOp VectorReg;
 
+enum DescriptorSetKind {
+    SrdFlatTable = 0,
+    SrdImmediates = 0, // Mutually exclusive with SrdFlatTable
+    SsboHeap = 2, // Can be 1, TODO
+    TextureHeap = 3,
+    SamplerHeap = 4,
+    CombinedSamplerHeap = 6,
+};
+
+enum SrdMode {
+    Immediate,
+    FlatTable,
+};
+
 class GcnToSpirvConverter {
 public:
-    GcnToSpirvConverter(const std::vector<MCInst> &machineCode, ExecutionModel execModel, const MCSubtargetInfo *STI, MCInstPrinter *IP):
+    GcnToSpirvConverter(const std::vector<MCInst> &machineCode, ExecutionModel execModel, SrdMode srdMode, std::vector<InputUsageSlot> srdSlots, const MCSubtargetInfo *STI, MCInstPrinter *IP):
         mlirContext(), 
         builder(mlir::UnknownLoc::get(&mlirContext), &mlirContext),
         execModel(execModel),
         machineCode(machineCode),
         status(SpirvConvertResult::empty),
+        srdMode(srdMode),
+        srdSlots(srdSlots),
         mainEntryBlock(nullptr),
         moduleOp(nullptr),
         STI(STI),
@@ -441,6 +481,7 @@ public:
     SpirvConvertResult convert();
 
 private:
+    bool processSrds();
     bool prepass();
     bool convertGcnOp(const MCInst &MI);
     bool buildSpirvDialect();
@@ -449,6 +490,8 @@ private:
 
     bool isVertexShader() { return execModel == ExecutionModel::Vertex; }
     bool isFragShader() { return execModel == ExecutionModel::Fragment; }
+    bool isFlatTableSrdMode() { return srdMode == SrdMode::FlatTable; }
+    bool isImmediateSrdMode() { return srdMode == SrdMode::Immediate; }
 
     ConstantOp getZero(mlir::Type ty) { return ConstantOp::getZero(ty, builder.getLoc(), builder); }
     ConstantOp getOne(mlir::Type ty) { return ConstantOp::getOne(ty, builder.getLoc(), builder); }
@@ -1013,6 +1056,8 @@ private:
         }
         assert(!omod || resultTy.isa<mlir::FloatType>());
         switch(omod) {
+            case 0:
+                break;
             case SIOutMods::MUL2:
                 rv = builder.create<FMulOp>(rv, builder.create<ConstantOp>(resultTy, builder.getFloatAttr(resultTy, 2.0)));
                 break;
@@ -1023,9 +1068,60 @@ private:
                 rv = builder.create<FDivOp>(rv, builder.create<ConstantOp>(resultTy, builder.getFloatAttr(resultTy, 2.0)));
                 break;
             default:
+                assert(false && "Unhandled OMOD");
                 break;
         }
         return rv;
+    }
+
+    GlobalVariableOp initDescriptorHeap(DescriptorSetKind dsKind, mlir::Type type, llvm::StringRef name) {
+        auto it = descriptorSets.find((uint)dsKind);
+        if (it == descriptorSets.end()) {
+            mlir::ImplicitLocOpBuilder initBuilder(builder);
+            initBuilder.setInsertionPointToStart(mainEntryBlock);
+            PointerType ptrTy = PointerType::get(type, StorageClass::Uniform);
+            auto var = initBuilder.create<GlobalVariableOp>(ptrTy, name, nullptr);
+            var->setAttr("DescriptorSet", initBuilder.getI32IntegerAttr(dsKind));
+            var->setAttr("Binding", initBuilder.getI32IntegerAttr(0));
+            descriptorSets.insert(std::make_pair((uint)dsKind, var));
+            return var;
+        } else {
+            return it->second;
+        }
+    }
+
+    GlobalVariableOp initImmediateDataUBO(mlir::Type immDataBlockTy) {
+        // Should only be called once
+        PointerType ptrTy = PointerType::get(immDataBlockTy, StorageClass::Uniform);
+        mlir::ImplicitLocOpBuilder initBuilder(builder);
+        initBuilder.setInsertionPointToStart(mainEntryBlock);
+        auto var = initBuilder.create<GlobalVariableOp>(ptrTy, "ImmediateUserdata");
+        var->setAttr("DescriptorSet", initBuilder.getI32IntegerAttr(DescriptorSetKind::SrdImmediates));
+        var->setAttr("Binding", initBuilder.getI32IntegerAttr(0));
+        descriptorSets.insert(std::make_pair((uint)DescriptorSetKind::SrdImmediates, var));
+        return var;
+    }
+
+    GlobalVariableOp initSsboHeap() {
+        mlir::Type entryType = int64Ty;
+        mlir::Type heapTy = RuntimeArrayType::get(entryType);
+        return initDescriptorHeap(DescriptorSetKind::SsboHeap, heapTy, "ssbos");
+    }
+
+    GlobalVariableOp initTextureHeap() {
+        // TODO: mlir dialect only supports combined image samplers
+        mlir::Type entryType; // = ImageType::get()
+        mlir::Type heapTy = RuntimeArrayType::get(entryType); // = ImageType::get();
+        return initDescriptorHeap(DescriptorSetKind::TextureHeap, heapTy, "textures");
+    }
+
+    // TODO:
+    // mlir dialect doesn't support separate sampler and images, only combined samplers
+    GlobalVariableOp initCombinedSamplerHeap() {
+        ImageType imageTy = ImageType::get(floatTy, Dim::Dim2D);
+        mlir::Type entryType = SampledImageType::get(imageTy);
+        mlir::Type heapTy = RuntimeArrayType::get(entryType);
+        return initDescriptorHeap(DescriptorSetKind::CombinedSamplerHeap, heapTy, "images");
     }
 
     ///////////////////////////////////////////////////////////////////////////////////////////
@@ -1054,6 +1150,15 @@ private:
         auto store = storeResultCC(carryOutRegno, carryOut2);
         tagPredicated(store);
         storeVectorResult32(dst.getReg(), sum2);
+    }
+
+    void handleVCndMaskB32(MCOperand &dst, MCOperand &src0, MCOperand &src1, uint selRegno) {
+        mlir::Value a = sourceVectorOperand(src0, intTy);
+        mlir::Value b = sourceVectorOperand(src1, intTy);
+        mlir::Value sel = sourceCCReg(selRegno);
+        // VCC ? src1 : src0
+        mlir::Value result = builder.create<SelectOp>(sel, b, a);
+        storeVectorResult32(dst, result);
     }
 
     mlir::Value handleVMadF32(mlir::Value src0, mlir::Value src1, mlir::Value src2) {
@@ -1097,6 +1202,12 @@ private:
 
     // Used to compact the render targets MRT0...MRT7, MRTZ, etc to locations 0..N
     llvm::DenseMap<uint, uint> fragExportTargetToVkLocation;
+
+    SrdMode srdMode;
+    std::vector<InputUsageSlot> srdSlots;
+    // Assume there is one binding per descriptor set - either a UBO or an array of descriptors of the same type.
+    // Either way, an OpVariable of struct or array type
+    llvm::DenseMap<uint /*DescriptorSetKind*/, GlobalVariableOp> descriptorSets;
     
     FuncOp mainFn;
     mlir::Block *mainEntryBlock;
@@ -1117,6 +1228,8 @@ private:
     mlir::IntegerType int16Ty;
     mlir::IntegerType boolTy;
 
+    //mlir::VariableOp
+
     // struct has 2 u32 members.
     // This is used for a lot of carry procducing int ops, i.e. V_ADD_I32 -> OpIAddCarry
     StructType arithCarryTy;
@@ -1124,6 +1237,98 @@ private:
     const MCSubtargetInfo *STI;
     MCInstPrinter *IP;
 };
+
+bool GcnToSpirvConverter::processSrds() {
+    // Future: These could use push constants
+    if (isImmediateSrdMode()) {
+        // SI programming guide:
+        // USER_DATA. Up to 16 SGPRs can be loaded with data from the
+        // SPI_SHADER_USER_DATA_xx_0-15 hardware registers written by the driver with PM4 SET
+        // commands. User data is used for communicating several details to the shader, most importantly
+        // the memory address of resource constants in video memory.
+        
+        //std::vector<>
+        // For immediate resources (buffers, images, samplers) create members in a UBO (DS 0, binding 0) for indexes into
+        // descriptor heap arrays.
+        // These will be created by driver and passed via UBO
+        std::vector<std::string> names;
+        std::vector<mlir::Type> types;
+        std::vector<StructType::OffsetInfo> offsets;
+        uint curOff = 0;
+        for (uint i = 0; i < srdSlots.size(); i++) {
+            const InputUsageSlot &slot = srdSlots[i];
+            switch (slot.m_usageType) {
+                case kShaderInputUsageImmResource:
+                case kShaderInputUsageImmRwResource:
+                    if (slot.m_resourceType == IMM_RESOURCE_BUFFER) {
+                        names.emplace_back(std::string("bufferImmIdx") + std::to_string(i));
+                    } else { // IMM_RESOURCE_IMAGE
+                        names.emplace_back(std::string("imageImmIdx") + std::to_string(i));
+                    }
+                    types.push_back(intTy);
+                    offsets.push_back(curOff);
+                    curOff += 4;
+                    break;
+                case kShaderInputUsageImmSampler:
+                    // Ignore for now until figure out separate samplers
+                    break;
+                case kShaderInputUsageImmConstBuffer:
+                    // Consider making another descriptor heap for UBOs
+                    names.emplace_back(std::string("constBufferImmIdx") + std::to_string(i));
+                    types.push_back(intTy);
+                    offsets.push_back(curOff);
+                    curOff += 4;
+                    break;
+                default:
+                    break;
+            }
+        }
+        if (!names.empty()) {
+            StructType immDataUBOBlockTy;
+#if defined(_DEBUG)
+            std::vector<StructType::MemberDecorationInfo> decs;
+            for (uint i = 0; i < names.size(); i++) {
+                // TODO names for members
+#endif
+            }
+            immDataUBOBlockTy = StructType::get(types, offsets);
+            GlobalVariableOp immDataUBO = initImmediateDataUBO(immDataUBOBlockTy);
+            auto immDataUBORef = builder.create<AddressOfOp>(immDataUBO);
+
+            descriptorSets[(uint) DescriptorSetKind::SrdImmediates] = immDataUBO;
+
+            // Insert at prologue.
+            // Load descriptor heap indexes out of the immediate data UBO and into scalar gprs based on
+            // slot->m_startRegister
+            uint immDataMemberNo = 0;
+            for (uint i = 0; i < srdSlots.size(); i++) {
+                const InputUsageSlot &slot = srdSlots[i];
+                switch (slot.m_usageType) {
+                    case kShaderInputUsageImmResource:
+                    case kShaderInputUsageImmRwResource:
+                    case kShaderInputUsageImmConstBuffer:
+                    {
+                        AccessChainOp chain = builder.create<AccessChainOp>(immDataUBORef, mlir::ValueRange({ getI32Const(immDataMemberNo) }));
+                        mlir::Value resourceIdx = builder.create<LoadOp>(chain);
+                        storeScalarResult32(AMDGPU::SGPR0 + slot.m_startRegister, resourceIdx);
+                        ++immDataMemberNo;
+                        break;
+                    }
+                    case kShaderInputUsageImmSampler:
+                        // Ignore for now until figure out separate samplers
+                        break;
+                    default:
+                        break;
+                }
+            }
+        }
+    } else {
+        //assert(false && "Unhandled flat table mode");
+        // TODO
+    }
+    
+    return true;
+}
 
 bool GcnToSpirvConverter::prepass() {
     // TODO : may need to declare input attributes with specific type
@@ -1395,7 +1600,9 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
         }
 
         case AMDGPU::S_AND_B32_gfx6_gfx7:
+        case AMDGPU::S_ANDN2_B32_gfx6_gfx7:
         case AMDGPU::S_OR_B32_gfx6_gfx7:
+        case AMDGPU::S_ORN2_B32_gfx6_gfx7:
         case AMDGPU::S_XOR_B32_gfx6_gfx7:
         {
             auto [ dst, src0, src1 ] = unwrapMI(MI, R0_2);
@@ -1403,6 +1610,16 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
 
             a = sourceScalarOperandUniform(src0, intTy);
             b = sourceScalarOperandUniform(src1, intTy);
+
+            switch (opcode) {
+                case AMDGPU::S_ANDN2_B64_gfx6_gfx7:
+                case AMDGPU::S_ORN2_B64_gfx6_gfx7:
+                    b = builder.create<NotOp>(b);
+                    break;
+                default:
+                    break;
+            }
+
             mlir::Value result;
             switch (opcode) {
                 case AMDGPU::S_AND_B32_gfx6_gfx7:
@@ -1422,7 +1639,9 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
         }
 
         case AMDGPU::S_AND_B64_gfx6_gfx7:
+        case AMDGPU::S_ANDN2_B64_gfx6_gfx7:
         case AMDGPU::S_OR_B64_gfx6_gfx7:
+        case AMDGPU::S_ORN2_B64_gfx6_gfx7:
         case AMDGPU::S_XOR_B64_gfx6_gfx7:
         {
             auto [ dst, src0, src1 ] = unwrapMI(MI, R0_2);
@@ -1456,16 +1675,30 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
                 bCC = getCcArgument(src1);
             }
 
+            switch (opcode) {
+                case AMDGPU::S_ANDN2_B64_gfx6_gfx7:
+                case AMDGPU::S_ORN2_B64_gfx6_gfx7:
+                    bUni = builder.create<NotOp>(bUni);
+                    if (applyToCC) {
+                        bCC = builder.create<LogicalNotOp>(bCC);
+                    }
+                    break;
+                default:
+                    break;
+            }
+
             mlir::Value uniResult;
             mlir::Value ccResult;
             switch (opcode) {
                 case AMDGPU::S_AND_B64_gfx6_gfx7:
+                case AMDGPU::S_ANDN2_B64_gfx6_gfx7:
                     uniResult = builder.create<BitwiseAndOp>(aUni, bUni);
                     if (applyToCC) {
                         ccResult = builder.create<LogicalAndOp>(aCC, bCC);
                     }
                     break;
                 case AMDGPU::S_OR_B64_gfx6_gfx7:
+                case AMDGPU::S_ORN2_B64_gfx6_gfx7:
                     uniResult = builder.create<BitwiseOrOp>(aUni, bUni);
                     if (applyToCC) {
                         ccResult = builder.create<LogicalOrOp>(aCC, bCC);
@@ -1478,7 +1711,7 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
                     }
                     break;
             }
-            auto isNonZero = builder.create<INotEqualOp>(aUni, getZero(uniResult.getType()));
+            auto isNonZero = builder.create<INotEqualOp>(uniResult, getZero(uniResult.getType()));
             storeResultCC(AMDGPU::SCC, isNonZero);
             storeScalarResult64(dst, uniResult);
 
@@ -1496,6 +1729,9 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
             break;
         case AMDGPU::S_ENDPGM_gfx6_gfx7:
             // Do return here?
+            // TEMP
+            initSsboHeap();
+            initCombinedSamplerHeap();
             break;
 
         // VOP1
@@ -1522,11 +1758,8 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
                     break;
                 }
                 case AMDGPU::V_RCP_F32_e32_gfx6_gfx7:
-                {
-                    auto numerator = getOne(floatTy);
-                    result = builder.create<FDivOp>(numerator, srcVal);
+                    result = builder.create<FDivOp>(getOne(floatTy), srcVal);
                     break;
-                }
                 case AMDGPU::V_MOV_B32_e32_gfx6_gfx7:
                     result = srcVal;
                     break;
@@ -1778,6 +2011,13 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
         {
             auto [ dst, src0, src1 ] = unwrapMI(MI, R0_2);
             handleVAddCU32(dst, src0, src1, AMDGPU::VCC, AMDGPU::VCC);
+            break;
+        }
+
+        case AMDGPU::V_CNDMASK_B32_e32_gfx6_gfx7:
+        {
+            auto [ dst, src0, src1 ] = unwrapMI(MI, R0_2);
+            handleVCndMaskB32(dst, src0, src1, AMDGPU::VCC);
             break;
         }
 
@@ -2351,7 +2591,7 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
             }
 
             if (invert) {
-                ccOut = builder.create<SelectOp>(ccOut, getZero(boolTy), getOne(boolTy));
+                ccOut = builder.create<LogicalNotOp>(ccOut);
             }
 
             auto storeVCC = storeResultCC(dst, ccOut);
@@ -2451,15 +2691,70 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
         }
 
         // VOP3a
+
+        case AMDGPU::V_RCP_F32_e64_gfx6_gfx7:
+        {
+            // VOP3a versions of VOP1 insts
+            auto [ dst, srcMods, src, clamp, omod ] = unwrapMI(MI, R0_4);
+            mlir::Value srcVal;
+
+            srcVal = sourceVectorOperand(src, floatTy);
+            srcVal = applyOperandModifiers(srcVal, srcMods);
+
+            mlir::Value result;
+            switch (opcode) {
+                case AMDGPU::V_RCP_F32_e32_gfx6_gfx7:
+                    result = builder.create<FDivOp>(getOne(floatTy), srcVal);
+                    break;
+            }
+
+            result = applyResultModifiers(result, clamp.getImm(), omod.getImm());
+            storeVectorResult32(dst, result);
+            break;
+        }
+
+        case AMDGPU::V_ADD_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_MUL_F32_e64_gfx6_gfx7:
+        case AMDGPU::V_MAX_F32_e64_gfx6_gfx7:
+        {
+            // VOP3a versions of VOP2 insts
+            auto [ dst, src0Mods, src0, src1Mods, src1, clamp, omod ] = unwrapMI(MI, R0_6);
+            mlir::Value a, b;
+
+            a = sourceVectorOperand(src0, floatTy);
+            a = applyOperandModifiers(a, src0Mods);
+            b = sourceVectorOperand(src1, floatTy);
+            b = applyOperandModifiers(b, src1Mods);
+
+            mlir::Value result;
+            switch (opcode) {
+                case AMDGPU::V_ADD_F32_e64_gfx6_gfx7:
+                    result = builder.create<FAddOp>(a, b);
+                    break;
+                case AMDGPU::V_MUL_F32_e64_gfx6_gfx7:
+                    result = builder.create<FMulOp>(a, b);
+                    break;
+                case AMDGPU::V_MAX_F32_e64_gfx6_gfx7:
+                    result = builder.create<GLFMaxOp>(a, b);
+                    break;
+            }
+
+            result = applyResultModifiers(result, clamp.getImm(), omod.getImm());
+            storeVectorResult32(dst, result);
+            break;
+        }
+
         case AMDGPU::V_MED3_F32_gfx6_gfx7:
         {
             // TODO OMOD, CLAMP
-            auto [ dst, src0Mods, src0, src1Mods, src1, src2Mods, src2 ] = unwrapMI(MI, R0_6);
-            mlir::Value a = sourceVectorOperand(src0, floatTy);
+            auto [ dst, src0Mods, src0, src1Mods, src1, src2Mods, src2, clamp, omod ] = unwrapMI(MI, R0_8);
+            mlir::Value a, b, c;
+
+            a = sourceVectorOperand(src0, floatTy);
             a = applyOperandModifiers(a, src0Mods);
-            mlir::Value b = sourceVectorOperand(src1, floatTy);
+            b = sourceVectorOperand(src1, floatTy);
             b = applyOperandModifiers(b, src1Mods);
-            mlir::Value c = sourceVectorOperand(src2, floatTy);
+            c = sourceVectorOperand(src2, floatTy);
             c = applyOperandModifiers(c, src2Mods);
             mlir::Value result;
             //If (isNan(S0.f) || isNan(S1.f) || isNan(S2.f))
@@ -2473,7 +2768,6 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
 
             // ignore NaNs for now
             mlir::Value cmp, max_a_b, max3, max_b_c, max_a_c;
-            //cmp = builder.create<FOrdGreaterThanEqualOp>(a, b);
             max_a_b = builder.create<GLFMaxOp>(a, b);
             max_a_c = builder.create<GLFMaxOp>(a, c);
             max_b_c = builder.create<GLFMaxOp>(b, c);
@@ -2484,7 +2778,7 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
             cmp = builder.create<FOrdEqualOp>(max3, b);
             result = builder.create<SelectOp>(cmp, max_a_c, result);
 
-            break;
+            result = applyResultModifiers(result, clamp.getImm(), omod.getImm());
             storeVectorResult32(dst, result);
             break;
         }
@@ -2506,7 +2800,6 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
             auto cmp = builder.create<UGreaterThanOp>(a, b);
             absDiff = builder.create<SelectOp>(cmp, aSubB, bSubA);
             result = builder.create<IAddOp>(absDiff, c);
-            break;
             storeVectorResult32(dst, result);
             break;
         }
@@ -2563,7 +2856,7 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
         case AMDGPU::V_MAD_F32_gfx6_gfx7:
         {
             // TODO OMOD, CLAMP
-            auto [ dst, src0Mods, src0, src1Mods, src1, src2Mods, src2 ] = unwrapMI(MI, R0_6);
+            auto [ dst, src0Mods, src0, src1Mods, src1, src2Mods, src2, clamp, omod ] = unwrapMI(MI, R0_8);
             mlir::Value a = sourceVectorOperand(src0, floatTy);
             a = applyOperandModifiers(a, src0Mods);
             mlir::Value b = sourceVectorOperand(src1, floatTy);
@@ -2572,25 +2865,8 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
             c = applyOperandModifiers(c, src2Mods);
 
             auto mad = handleVMadF32(a, b, c);
-            mad = applyResultModifiers(mad, 0, 0);
+            mad = applyResultModifiers(mad, clamp.getImm(), omod.getImm());
             storeVectorResult32(dst, mad);
-            break;
-        }
-
-        case AMDGPU::V_MUL_F32_e64_gfx6_gfx7:
-        {
-            // TODO OMOD, CLAMP
-            auto [ dst, src0Mods, src0, src1Mods, src1 ] = unwrapMI(MI, R0_4);
-            mlir::Value a = sourceVectorOperand(src0, floatTy);
-            a = applyOperandModifiers(a, src0Mods);
-            mlir::Value b = sourceVectorOperand(src1, floatTy);
-            b = applyOperandModifiers(b, src1Mods);
-
-            mlir::Value mul = builder.create<FMulOp>(a, b);
-            // if ??? clamp mul
-            // TODO
-            mul = applyResultModifiers(mul, 0, 0);
-            storeVectorResult32(dst, mul);
             break;
         }
 
@@ -2599,7 +2875,7 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
             // Fused single-precision multiply-add. Only for double-precision parts
             // D.f = S0.f * S1.f + S2.f
             // Don't know why this ^ says double-precision parts TODO
-            auto [ dst, src0Mods, src0, src1Mods, src1, src2Mods, src2 ] = unwrapMI(MI, R0_6);
+            auto [ dst, src0Mods, src0, src1Mods, src1, src2Mods, src2, clamp, omod ] = unwrapMI(MI, R0_8);
             mlir::Value a, b, c;
             a = sourceVectorOperand(src0, floatTy);
             a = applyOperandModifiers(a, src0Mods);
@@ -2609,22 +2885,31 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
             c = applyOperandModifiers(c, src2Mods);
             mlir::Value fma = builder.create<FMulOp>(a, b);
             fma = builder.create<FAddOp>(fma, c);
-            fma = applyResultModifiers(fma, 0, 0);
+            fma = applyResultModifiers(fma, clamp.getImm(), omod.getImm());
             storeVectorResult32(dst, fma);
             break;
         }
 
         case AMDGPU::V_CVT_PKRTZ_F16_F32_e64_gfx6_gfx7:
         {
-            auto [ dst, src0Mods, src0, src1Mods, src1 ] = unwrapMI(MI, R0_4);
+            auto [ dst, src0Mods, src0, src1Mods, src1, clamp, omod ] = unwrapMI(MI, R0_6);
             mlir::Value a, b;
             a = sourceVectorOperand(src0, floatTy);
             a = applyOperandModifiers(a, src0Mods);
             b = sourceVectorOperand(src1, floatTy);
             b = applyOperandModifiers(b, src1Mods);
             auto pack = handleVCvtPkrtzF16F32(a, b);
-            pack = applyResultModifiers(pack, 0, 0);
+            pack = applyResultModifiers(pack, clamp.getImm(), omod.getImm());
             storeVectorResult32(dst, pack);
+            break;
+        }
+
+        case AMDGPU::V_CNDMASK_B32_e64_gfx6_gfx7:
+        {
+            auto [ dst, src0Mods, src0, src1Mods, src1, srcSel ] = unwrapMI(MI, R0_5);
+            assert(src0Mods.getImm() == 0 && src1Mods.getImm() == 0);
+            uint selNo = srcSel.getReg();
+            handleVCndMaskB32(dst, src0, src1, selNo);
             break;
         }
 
@@ -2793,9 +3078,16 @@ bool GcnToSpirvConverter::buildSpirvDialect() {
     builder.create<BranchOp>(&mainBody);
     builder.setInsertionPointToStart(&mainBody);
 
+    if ( !processSrds()) {
+        return false;
+    }
+
     if ( !prepass()) {
         return false;
     }
+
+    // TODO : load driver generated values, ie vertex index, based on shader stage/context, into initial vgpr/sgpr
+
     for (const MCInst &MI: machineCode) {
         success &= convertGcnOp(MI);
     }
@@ -2818,6 +3110,11 @@ bool GcnToSpirvConverter::finalizeModule() {
         interfaceVars.push_back(mlir::SymbolRefAttr::get(attr));
     }
 
+    // For now, consider a descriptor set to be a single block (1 binding)
+    for (const auto &[dsno, descriptorSetBlock] : descriptorSets) {
+        interfaceVars.push_back(mlir::SymbolRefAttr::get(descriptorSetBlock));
+    }
+
     builder.create<EntryPointOp>(execModel, mainFn, interfaceVars);
     if (isFragShader()) {
         llvm::SmallVector<int, 1> lits;
@@ -2825,7 +3122,7 @@ bool GcnToSpirvConverter::finalizeModule() {
     }
 
     llvm::SmallVector<Capability, 8> caps = { Capability::Shader, Capability::Float16, Capability::Int16, Capability::Int64 };
-    llvm::SmallVector<Extension, 4> exts;
+    llvm::SmallVector<Extension, 4> exts = { Extension::SPV_EXT_descriptor_indexing, Extension::SPV_KHR_physical_storage_buffer };
     auto vceTriple = VerCapExtAttr::get(Version::V_1_5, caps, exts, &mlirContext);
     moduleOp->setAttr("vce_triple", vceTriple);
 
@@ -2870,7 +3167,7 @@ SpirvConvertResult GcnToSpirvConverter::convert() {
     return SpirvConvertResult(std::move(spirvModule), SpirvConvertResult::success);
 }
 
-bool decodeAndConvertGcnCode(const std::vector<unsigned char> &gcnBytecode, ExecutionModel execModel) {
+bool decodeAndConvertGcnCode(const std::vector<unsigned char> &gcnBytecode, ExecutionModel execModel, SrdMode srdMode, std::vector<InputUsageSlot> srdSlots) {
     LLVMInitializeAMDGPUTargetInfo();
     LLVMInitializeAMDGPUTargetMC();
     LLVMInitializeAMDGPUDisassembler();
@@ -2942,7 +3239,7 @@ bool decodeAndConvertGcnCode(const std::vector<unsigned char> &gcnBytecode, Exec
         addr += size;
     }
 
-    GcnToSpirvConverter converter(machineCode, execModel, STI.get(), IP);
+    GcnToSpirvConverter converter(machineCode, execModel, srdMode, srdSlots, STI.get(), IP);
     SpirvConvertResult result = converter.convert();
     SpirvBytecodeVector spirvModule = result.takeSpirvModule();
 
@@ -3037,13 +3334,16 @@ int main(int argc, char **argv) {
         //auto *fileHeader = (ShaderFileHeader*) buf.data(); 
         //auto *common = (ShaderCommonData*) buf.data();
 
-        const ShaderFileHeader *fileHeader = reinterpret_cast<const ShaderFileHeader*>(&buf[shdrMagicOff]);
-        const Header *binaryHeader = reinterpret_cast<const Header *>(fileHeader) - 1;
-        const ShaderCommonData *shaderCommon = reinterpret_cast<const ShaderCommonData*>(fileHeader + 1);
+        const ShaderBinaryHeader *binaryHeader = reinterpret_cast<const ShaderBinaryHeader*>(&buf[shdrMagicOff]);
+        const ShaderFileHeader *fileHeader = reinterpret_cast<const ShaderFileHeader *>(binaryHeader) - 1;
+        const ShaderCommonData *shaderCommon = reinterpret_cast<const ShaderCommonData*>(binaryHeader + 1);
 
         ShaderBinaryInfo *binaryInfo = (ShaderBinaryInfo *) &buf[infoOff];
         gcnBytecode.resize(binaryInfo->m_length);
         memcpy(gcnBytecode.data(), &buf[codeOff], gcnBytecode.size());
+
+        const uint32_t *usageMasks = reinterpret_cast<uint32_t *>(binaryInfo) - binaryInfo->m_chunkUsageBaseOffsetInDW;
+        const InputUsageSlot *usageSlots = reinterpret_cast<const InputUsageSlot *>(usageMasks) - binaryInfo->m_numInputUsageSlots;
 
         ExecutionModel execModel;
         printf("Binary %i: \"Shdr\" at offset %lu, code at offset %lu, size %i, \"OrbShdr\" at offset %lu\n", i, shdrMagicOff, codeOff, binaryInfo->m_length, infoOff);
@@ -3072,6 +3372,7 @@ int main(int argc, char **argv) {
         }
 
         printf("stage type: %s\n", stringifyExecutionModel(execModel).str().c_str());
+        printf("SRD mode: %s\n", fileHeader->m_usesShaderResourceTable ? "flat table" : "immediate");
 
         switch (execModel) {
             case ExecutionModel::Vertex:
@@ -3090,11 +3391,94 @@ int main(int argc, char **argv) {
             default:
                 break;
         }
+        
+        //assert(!!binaryInfo->m_isSrt == !!fileHeader->m_usesShaderResourceTable);
+        std::vector<InputUsageSlot> srdSlots;
+
+        printf("//////////////////////////////////////////////////////////////////////////\n");
+        printf("Usage Slots\n");
+        printf("count: %i\n", binaryInfo->m_numInputUsageSlots);
+        printf("\n");
+        for (uint i = 0; i < binaryInfo->m_numInputUsageSlots; i++) {
+            const InputUsageSlot *slot = &usageSlots[i];
+            srdSlots.push_back(*slot);
+            ShaderInputUsageType usageType = static_cast<ShaderInputUsageType>(slot->m_usageType);
+            printf("/---------------------------------------------------\n");
+            printf("| slot %i\n", i);
+            printf("| type: %s\n", shaderInputUsageTypeToName(usageType));
+            printf("| m_apiSlot: %i\n", slot->m_apiSlot);
+            printf("| m_startRegister: %i\n", slot->m_startRegister);
+            printf("| m_registerCount: %i\n", slot->m_registerCount);
+            printf("| m_resourceType: %i\n", slot->m_resourceType);
+            printf("| m_reserved: %i\n", slot->m_reserved);
+            printf("| m_chunkMask: %i\n", slot->m_chunkMask);
+            printf("| m_srtSizeInDWordMinusOne: %i\n", slot->m_srtSizeInDWordMinusOne);
+            printf("| \n");
+            int resourceSize = shaderInputUsageTypeToSize(usageType);
+            if (resourceSize > 0) {
+                printf("| size: %i Bytes\n", resourceSize);
+                printf("| registers: [%i:%i]\n", slot->m_startRegister, slot->m_startRegister + resourceSize/4 - 1);
+            }
+            switch (ShaderInputUsageType(slot->m_usageType)) {
+	            case kShaderInputUsageImmShaderResourceTable:
+                    break;
+
+	            case kShaderInputUsageImmResource:
+	            case kShaderInputUsageImmRwResource:
+                    // If 0, resource type <c>V#</c>; if 1, resource type <c>T#</c>, in case of a Gnm::kShaderInputUsageImmResource
+                    if (slot->m_resourceType == IMM_RESOURCE_BUFFER) {
+                        printf("|   *** Resource is a V# - buffer resource constant - 128 bits \n");
+                    } else { // IMM_RESOURCE_IMAGE
+                        // T# image constants can be 128 or 256 bits. 
+                        //
+                        // All image resource view descriptors (T#’s) are written by the driver as 256 bits.
+                        // It is permissible to use only the first 128 bits when a simple 1D or 2D (not an
+                        // array) is bound. This is specified in the MIMG R128 instruction field.
+                        // The MIMG-format instructions have a DeclareArray (DA) bit that reflects whether
+                        // the shader was expecting an array-texture or simple texture to be bound. When
+                        // DA is zero, the hardware does not send an array index to the texture cache. If
+                        // the texture map was indexed, the hardware supplies an index value of zero.
+                        // Indices sent for non-indexed texture maps are ignored.
+                        printf("|   *** Resource is a T# - image resource constant - 128/256 bits\n");                        
+                    }
+                    break;
+	            case kShaderInputUsageImmSampler:
+	            case kShaderInputUsageImmConstBuffer:
+	            case kShaderInputUsageImmVertexBuffer:
+	            case kShaderInputUsageImmAluFloatConst:
+	            case kShaderInputUsageImmAluBool32Const:
+	            case kShaderInputUsageImmGdsCounterRange:
+	            case kShaderInputUsageImmGdsMemoryRange:
+	            case kShaderInputUsageImmGwsBase:
+	            case kShaderInputUsageImmLdsEsGsSize:
+	            case kShaderInputUsageSubPtrFetchShader:
+	            case kShaderInputUsagePtrResourceTable:
+	            case kShaderInputUsagePtrInternalResourceTable:
+	            case kShaderInputUsagePtrSamplerTable:
+	            case kShaderInputUsagePtrConstBufferTable:
+	            case kShaderInputUsagePtrVertexBufferTable:
+	            case kShaderInputUsagePtrSoBufferTable:
+	            case kShaderInputUsagePtrRwResourceTable:
+	            case kShaderInputUsagePtrInternalGlobalTable:
+	            case kShaderInputUsagePtrExtendedUserData:
+	            case kShaderInputUsagePtrIndirectResourceTable:
+	            case kShaderInputUsagePtrIndirectInternalResourceTable:
+	            case kShaderInputUsagePtrIndirectRwResourceTable:
+                    break;
+
+                default:
+                    printf("Warning: unhandled usage type in input slots");
+                    break;
+            }
+            printf("\\---------------------------------------------------\n");
+
+        }
+        printf("//////////////////////////////////////////////////////////////////////////\n");
 
         if (auto dumpPath = getGcnBinaryDumpPath()) {
             auto outfile = createDumpFile(dumpPath.value(), ".sb", FileNum);
             if (outfile) {
-                outfile->write(reinterpret_cast<const char *>(fileHeader), binaryHeader->m_codeSize);
+                outfile->write(reinterpret_cast<const char *>(fileHeader), fileHeader->m_codeSize + sizeof(ShaderFileHeader));
                 if (outfile->has_error()) {
                     printf("Couldn't dump gcn bytecode to file %s\n", dumpPath.value().c_str());
                     return 1;
@@ -3102,7 +3486,7 @@ int main(int argc, char **argv) {
             }
         }
 
-        decodeAndConvertGcnCode(gcnBytecode, execModel);
+        decodeAndConvertGcnCode(gcnBytecode, execModel, fileHeader->m_usesShaderResourceTable ? SrdMode::FlatTable : SrdMode::Immediate, srdSlots);
         ++FileNum;
     }
 
