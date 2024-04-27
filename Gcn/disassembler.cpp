@@ -167,6 +167,36 @@ uint vgprPairToVgprBase(uint regno) {
     return AMDGPU::VGPR0 + vgprPairOffset(regno);
 }
 
+uint sgprGroupToSgprBase(uint regno) {
+    if (isSgpr(regno)) {
+        return regno;
+    } else if (isSgprPair(regno)) {
+        return sgprPairToSgprBase(regno);
+    } else if (regno >= AMDGPU::SGPR0_SGPR1_SGPR2_SGPR3
+                && regno <= AMDGPU::SGPR100_SGPR101_SGPR102_SGPR103) {
+        return AMDGPU::SGPR0 + 4 * (regno - AMDGPU::SGPR0_SGPR1_SGPR2_SGPR3);
+    } else if (regno >= AMDGPU::SGPR0_SGPR1_SGPR2_SGPR3_SGPR4_SGPR5_SGPR6_SGPR7
+                && regno <= AMDGPU::SGPR96_SGPR97_SGPR98_SGPR99_SGPR100_SGPR101_SGPR102_SGPR103) {
+        return AMDGPU::SGPR0 + 4 * (regno - AMDGPU::SGPR0_SGPR1_SGPR2_SGPR3_SGPR4_SGPR5_SGPR6_SGPR7);
+    } else if (regno >= AMDGPU::SGPR0_SGPR1_SGPR2_SGPR3_SGPR4_SGPR5_SGPR6_SGPR7_SGPR8_SGPR9_SGPR10_SGPR11_SGPR12_SGPR13_SGPR14_SGPR15
+                && regno <= AMDGPU::SGPR88_SGPR89_SGPR90_SGPR91_SGPR92_SGPR93_SGPR94_SGPR95_SGPR96_SGPR97_SGPR98_SGPR99_SGPR100_SGPR101_SGPR102_SGPR103) {
+        return AMDGPU::SGPR0 + 4 * (regno - AMDGPU::SGPR0_SGPR1_SGPR2_SGPR3_SGPR4_SGPR5_SGPR6_SGPR7_SGPR8_SGPR9_SGPR10_SGPR11_SGPR12_SGPR13_SGPR14_SGPR15);
+    }
+    assert(false);
+}
+
+uint vgprGroupToVgprBase(uint regno) {
+    if (isVgpr(regno)) {
+        return regno;
+    } else if (isVgprPair(regno)) {
+        return vgprPairToVgprBase(regno);
+    } else if (regno >= AMDGPU::VGPR0_VGPR1_VGPR2_VGPR3
+                && regno <= AMDGPU::VGPR252_VGPR253_VGPR254_VGPR255) {
+        return AMDGPU::VGPR0 + regno - AMDGPU::VGPR0_VGPR1_VGPR2_VGPR3;
+    }
+    assert(false);
+}
+
 bool isRenderTarget(uint target) {
     return target >= AMDGPU::Exp::ET_MRT0 && target <= AMDGPU::Exp::ET_NULL;
 }
@@ -469,8 +499,13 @@ public:
         int64Ty = builder.getI64Type();
         int16Ty = builder.getI16Type();
         boolTy = builder.getI1Type();
+        v2intTy = mlir::VectorType::get({2}, intTy);
+        v3intTy = mlir::VectorType::get({3}, intTy);
 
         arithCarryTy = StructType::get({ intTy, intTy });
+
+        auto dwordArrayType = RuntimeArrayType::get(intTy, 4);
+        ssboBlockDwordPtrType = PointerType::get(dwordArrayType, StorageClass::PhysicalStorageBuffer);
 
 #if defined(_DEBUG)
         ThreadIP = IP;
@@ -1103,16 +1138,20 @@ private:
     }
 
     GlobalVariableOp initSsboHeap() {
-        mlir::Type entryType = int64Ty;
+        // { address : 64, stride : 32, num_records : 32 }
+        mlir::Type entryType = StructType::get({int64Ty, intTy, intTy}, {0, 8, 12});
         mlir::Type heapTy = RuntimeArrayType::get(entryType);
-        return initDescriptorHeap(DescriptorSetKind::SsboHeap, heapTy, "ssbos");
+        // separate UBO and SSBO heap?
+        // probably not because given SGPR(s) in a memory inst, we don't know which heap to index if they're separate
+        return initDescriptorHeap(DescriptorSetKind::SsboHeap, heapTy, "SsboHeap");
     }
 
     GlobalVariableOp initTextureHeap() {
+        assert(false && "separate texture heap unimplemented");
         // TODO: mlir dialect only supports combined image samplers
         mlir::Type entryType; // = ImageType::get()
         mlir::Type heapTy = RuntimeArrayType::get(entryType); // = ImageType::get();
-        return initDescriptorHeap(DescriptorSetKind::TextureHeap, heapTy, "textures");
+        return initDescriptorHeap(DescriptorSetKind::TextureHeap, heapTy, "TextureHeap");
     }
 
     // TODO:
@@ -1121,7 +1160,7 @@ private:
         ImageType imageTy = ImageType::get(floatTy, Dim::Dim2D);
         mlir::Type entryType = SampledImageType::get(imageTy);
         mlir::Type heapTy = RuntimeArrayType::get(entryType);
-        return initDescriptorHeap(DescriptorSetKind::CombinedSamplerHeap, heapTy, "images");
+        return initDescriptorHeap(DescriptorSetKind::CombinedSamplerHeap, heapTy, "ImageHeap");
     }
 
     ///////////////////////////////////////////////////////////////////////////////////////////
@@ -1227,12 +1266,16 @@ private:
     mlir::IntegerType int64Ty;
     mlir::IntegerType int16Ty;
     mlir::IntegerType boolTy;
+    mlir::VectorType v2intTy;
+    mlir::VectorType v3intTy;
 
     //mlir::VariableOp
 
     // struct has 2 u32 members.
     // This is used for a lot of carry procducing int ops, i.e. V_ADD_I32 -> OpIAddCarry
     StructType arithCarryTy;
+
+    PointerType ssboBlockDwordPtrType;
 
     const MCSubtargetInfo *STI;
     MCInstPrinter *IP;
@@ -1308,7 +1351,7 @@ bool GcnToSpirvConverter::processSrds() {
                     case kShaderInputUsageImmRwResource:
                     case kShaderInputUsageImmConstBuffer:
                     {
-                        AccessChainOp chain = builder.create<AccessChainOp>(immDataUBORef, mlir::ValueRange({ getI32Const(immDataMemberNo) }));
+                        auto chain = builder.create<AccessChainOp>(immDataUBORef, mlir::ValueRange({ getI32Const(immDataMemberNo) }));
                         mlir::Value resourceIdx = builder.create<LoadOp>(chain);
                         storeScalarResult32(AMDGPU::SGPR0 + slot.m_startRegister, resourceIdx);
                         ++immDataMemberNo;
@@ -1734,12 +1777,100 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
             initCombinedSamplerHeap();
             break;
 
+        // SMRD
+        case AMDGPU::S_LOAD_DWORD_IMM_si:
+        case AMDGPU::S_LOAD_DWORDX2_IMM_si:
+        case AMDGPU::S_LOAD_DWORDX4_IMM_si:
+        case AMDGPU::S_LOAD_DWORDX8_IMM_si:
+        case AMDGPU::S_LOAD_DWORDX16_IMM_si:
+        case AMDGPU::S_BUFFER_LOAD_DWORD_IMM_si:
+        case AMDGPU::S_BUFFER_LOAD_DWORDX2_IMM_si:
+        case AMDGPU::S_BUFFER_LOAD_DWORDX4_IMM_si:
+        case AMDGPU::S_BUFFER_LOAD_DWORDX8_IMM_si:
+        case AMDGPU::S_BUFFER_LOAD_DWORDX16_IMM_si:
+        {
+            auto [ dst, buffer, offset, _] = unwrapMI(MI, R0_3);
+            assert(_.getImm() == 0);
+
+            uint numDwords;
+            switch (opcode) {
+                case AMDGPU::S_LOAD_DWORD_IMM_si:
+                case AMDGPU::S_BUFFER_LOAD_DWORD_IMM_si:
+                    numDwords = 1;
+                    break;
+                case AMDGPU::S_LOAD_DWORDX2_IMM_si:
+                case AMDGPU::S_BUFFER_LOAD_DWORDX2_IMM_si:
+                    numDwords = 2;
+                    break;
+                case AMDGPU::S_LOAD_DWORDX4_IMM_si:
+                case AMDGPU::S_BUFFER_LOAD_DWORDX4_IMM_si:
+                    numDwords = 4;
+                    break;
+                case AMDGPU::S_LOAD_DWORDX8_IMM_si:
+                case AMDGPU::S_BUFFER_LOAD_DWORDX8_IMM_si:
+                    numDwords = 8;
+                    break;
+                case AMDGPU::S_LOAD_DWORDX16_IMM_si:
+                case AMDGPU::S_BUFFER_LOAD_DWORDX16_IMM_si:
+                    numDwords = 16;
+                    break;
+                default:
+                    assert(false);
+                    break;
+            }
+
+            bool useStride = false;
+            switch (opcode) {
+                case AMDGPU::S_BUFFER_LOAD_DWORD_IMM_si:
+                case AMDGPU::S_BUFFER_LOAD_DWORDX2_IMM_si:
+                case AMDGPU::S_BUFFER_LOAD_DWORDX4_IMM_si:
+                case AMDGPU::S_BUFFER_LOAD_DWORDX8_IMM_si:
+                case AMDGPU::S_BUFFER_LOAD_DWORDX16_IMM_si:
+                    useStride = true;
+                    break;
+                default:
+                    break;
+            }
+            // Have seen S_LOAD* used with kShaderInputUsagePtrExtendedUserData resources.
+            // These should be created by the API similarly to buffers. Treat them the same (index to ssbo heap)
+
+            mlir::Value stride, numRecords;
+
+            uint dstRegno = sgprGroupToSgprBase(dst.getReg());
+            uint bufferConstRegno = sgprGroupToSgprBase(buffer.getReg());
+            // we stash idx into ssbo descriptor heap in the base register
+            mlir::Value ssboIdx = sourceUniformReg(bufferConstRegno);
+            GlobalVariableOp ssboHeap = initSsboHeap();
+            auto ssboHeapRef = builder.create<AddressOfOp>(ssboHeap);
+            auto heapChain = builder.create<AccessChainOp>(ssboHeapRef, mlir::ValueRange({ ssboIdx }));
+            mlir::Value ssboDescriptor = builder.create<LoadOp>(heapChain);
+            mlir::Value ssboAddr = builder.create<CompositeExtractOp>(ssboDescriptor, std::array{0});
+            // TODO clamp based on stride
+            if (useStride) {
+                //mlir::Value ssboStride = builder.create<CompositeExtractOp>(ssboDescriptor, std::array{1});
+            }
+            mlir::Value ssboBasePtr = builder.create<BitcastOp>(ssboBlockDwordPtrType, ssboAddr);
+            mlir::Value offsetVal = getI32Const(offset.getImm());
+            // For immediate offset, offset is given in dwords, not bytes
+            for (uint i = 0; i < numDwords; i++) {
+                auto src = builder.create<AccessChainOp>(ssboBasePtr, mlir::ValueRange({offsetVal}));
+                auto dword = builder.create<LoadOp>(src, MemoryAccessAttr::get(&mlirContext, MemoryAccess::Aligned), builder.getI32IntegerAttr(4));
+                storeScalarResult32(dstRegno + i, dword);
+                if (i < numDwords - 1) {
+                    offsetVal = builder.create<IAddOp>(offsetVal, getOne(intTy));
+                }
+            }
+            break;
+        }
+
         // VOP1
         case AMDGPU::V_FLOOR_F32_e32_gfx6_gfx7:
         case AMDGPU::V_FRACT_F32_e32_gfx6_gfx7:
         case AMDGPU::V_RCP_F32_e32_gfx6_gfx7:
         case AMDGPU::V_MOV_B32_e32_gfx6_gfx7:
         case AMDGPU::V_CVT_U32_F32_e32_gfx6_gfx7:
+        case AMDGPU::V_CVT_I32_F32_e32_gfx6_gfx7:
+
         case AMDGPU::V_EXP_F32_e32_gfx6_gfx7:
         {
             auto [ dst, src ] = unwrapMI(MI, 0, 1);
@@ -1771,7 +1902,12 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
                     // -inf & NaN & 0 & -0 → 0
                     // Inf → max_uint
                     // D.u = (unsigned)S0.f
+
+                    // TODO special value handling
                     result = builder.create<ConvertFToUOp>(intTy, srcVal);
+                    break;
+                case AMDGPU::V_CVT_I32_F32_e32_gfx6_gfx7:
+                    result = builder.create<ConvertFToSOp>(intTy, srcVal);
                     break;
                 case AMDGPU::V_EXP_F32_e32_gfx6_gfx7:
                     result = builder.create<GLExp2Op>(srcVal);
@@ -2948,7 +3084,85 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
             break;
         }
 
+        // MIMG
+        case AMDGPU::IMAGE_GET_RESINFO_V2_V1:
+        {
+            auto [dst, mipLevel, imageConst, dmask, _4, _5, _6, _7, _8, _9] = unwrapMI(MI, R0_9);
+            assert(_4.getImm() == 0 && _5.getImm() == 0 && _6.getImm() == 0 && _7.getImm() == 0 && _8.getImm() == 0 && _9.getImm() == 0);
 
+            int dmaskImm = dmask.getImm();
+            // spec:
+            // No sampler. Returns resource info into four VGPRs for the speci-
+            // fied MIP level. These are 32-bit integer values:
+            // Vdata3-0 = { #mipLevels, depth, height, width }
+            // For cubemaps, depth = 6 * Number_of_array_slices.
+
+            // Think arg 1 is the mip level. Otherwise depth, height, width don't make sense
+
+            // TODO: need to be tagging things like image reads as predicated, for V_ instructions, because they might cause exceptions
+
+            uint dstRegno = vgprGroupToVgprBase(dst.getReg());
+            uint imageConstRegno = sgprGroupToSgprBase(imageConst.getReg());
+            // we stash idx into ssbo descriptor heap in the base register
+            mlir::Value imageIdx = sourceUniformReg(imageConstRegno);
+            GlobalVariableOp combinedSamplerHeap = initCombinedSamplerHeap();
+            auto combinedSamplerHeapRef = builder.create<AddressOfOp>(combinedSamplerHeap);
+            auto heapChain = builder.create<AccessChainOp>(combinedSamplerHeapRef, mlir::ValueRange({ imageIdx }));
+            mlir::Value combinedSamplerDescriptor = builder.create<LoadOp>(heapChain);
+            auto imageDescriptor = builder.create<ImageOp>(combinedSamplerDescriptor);
+
+            mlir::Value mipLevelVal = sourceVectorOperand(mipLevel, intTy);
+
+            mlir::Type dimsType;
+            if (dmaskImm & 4) {
+                // depth
+                dimsType = v3intTy;
+            } else if (dmaskImm & 2) {
+                // height
+                dimsType = v2intTy;
+            } else if (dmaskImm & 1) {
+                // width
+                dimsType = intTy;
+            }
+
+            if (dmaskImm & 7) {
+                // For now, extract the contained image from the combined image sampler.
+                // The type of the image arg to ImageQuery* must be OpTypeImage
+                auto sizeQuery = builder.create<ImageQuerySizeLodOp>(dimsType, imageDescriptor, mipLevelVal);
+                if (dmaskImm & 1) {
+                    mlir::Value width = sizeQuery;
+                    if (dmaskImm & (4 | 2)) {
+                        // vector
+                        width = builder.create<CompositeExtractOp>(sizeQuery, std::array{0});
+                    }
+                    storeVectorResult32(dstRegno, width);
+                }
+                if (dmaskImm & 2) {
+                    mlir::Value height = builder.create<CompositeExtractOp>(sizeQuery, std::array{1});
+                    storeVectorResult32(dstRegno + 1, height);
+                }
+                if (dmaskImm & 4) {
+                    mlir::Value depth = builder.create<CompositeExtractOp>(sizeQuery, std::array{2});
+                    storeVectorResult32(dstRegno + 2, depth);
+                }
+            }
+
+            if (dmaskImm & 8) {
+                // query num levels
+                mlir::Value numLevels = builder.create<ImageQueryLevelsOp>(intTy, imageDescriptor);
+                storeVectorResult32(dstRegno + 3, numLevels);
+            }
+
+            // TODO store results
+
+            if (dmaskImm & 8) {
+                
+            }
+
+            break;
+        }
+
+        // EXP
         case AMDGPU::EXP_DONE_si:
         case AMDGPU::EXP_si:
         {
@@ -3019,7 +3233,11 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
                                 mlir::Value component = builder.create<CompositeExtractOp>(half, std::array{i&1});
                                 // float -> float16
                                 component = builder.create<FConvertOp>(float16Ty, component);
-                                src = builder.create<CompositeInsertOp>(component, src, std::array{i});
+                                if (dstNumComponents > 1) {
+                                    src = builder.create<CompositeInsertOp>(component, src, std::array{i});
+                                } else {
+                                    src = component;
+                                }
                             }
                         }
                         break;
@@ -3030,7 +3248,11 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
                         for (int i = 0; i < dstNumComponents; i++) {
                             if (validMask & (1 << i)) {
                                 mlir::Value component = sourceVectorOperand(srcRegs[i], eltTy);
-                                src = builder.create<CompositeInsertOp>(component, src, std::array{i});
+                                if (dstNumComponents > 1) {
+                                    src = builder.create<CompositeInsertOp>(component, src, std::array{i});
+                                } else {
+                                    src = component;
+                                }
                             }
                         }                        
                         break;
@@ -3060,7 +3282,7 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
 
 bool GcnToSpirvConverter::buildSpirvDialect() {
     bool success = true;
-    moduleOp = builder.create<ModuleOp>(AddressingModel::Logical, MemoryModel::GLSL450);
+    moduleOp = builder.create<ModuleOp>(AddressingModel::PhysicalStorageBuffer64, MemoryModel::GLSL450);
     mlir::Region &region = moduleOp.getBodyRegion();
     //mlir::Block &entryBlock = region.emplaceBlock();
     assert(region.hasOneBlock());
@@ -3121,7 +3343,8 @@ bool GcnToSpirvConverter::finalizeModule() {
         builder.create<ExecutionModeOp>(mainFn, ExecutionMode::OriginUpperLeft, lits);
     }
 
-    llvm::SmallVector<Capability, 8> caps = { Capability::Shader, Capability::Float16, Capability::Int16, Capability::Int64 };
+    // TODO be conservative with Capabilities/extensions
+    llvm::SmallVector<Capability, 8> caps = { Capability::Shader, Capability::Float16, Capability::Int16, Capability::Int64, Capability::PhysicalStorageBufferAddresses, Capability::ImageQuery };
     llvm::SmallVector<Extension, 4> exts = { Extension::SPV_EXT_descriptor_indexing, Extension::SPV_KHR_physical_storage_buffer };
     auto vceTriple = VerCapExtAttr::get(Version::V_1_5, caps, exts, &mlirContext);
     moduleOp->setAttr("vce_triple", vceTriple);
