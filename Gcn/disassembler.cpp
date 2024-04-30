@@ -11,7 +11,6 @@
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/Value.h"
 #include "mlir/IR/Visitors.h"
-#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
@@ -20,12 +19,10 @@
 #include <cstdio>
 #include <cassert>
 #include <cstring>
-#include <fstream>
 #include <tuple>
 #include <llvm/MC/MCInst.h>
 #include <llvm/Support/raw_ostream.h>
 #include <optional>
-#include <sstream>
 #include <sys/types.h>
 #include <system_error>
 #include <vector>
@@ -44,16 +41,11 @@ namespace fs = std::filesystem;
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/InitLLVM.h"
-
 #include "llvm/Support/TargetSelect.h"
-
 #include "mlir/Dialect/SPIRV/IR/SPIRVDialect.h"
 #include "mlir/Target/SPIRV/Serialization.h"
 #include "mlir/Dialect/SPIRV/IR/SPIRVOps.h"
 #include "mlir/IR/ImplicitLocOpBuilder.h"
-
-#include "mlir/Dialect/Arith/IR/Arith.h"
-
 #include "llvm/MC/MCDisassembler/MCDisassembler.h"
 
 #include "GcnBinary.h"
@@ -77,6 +69,7 @@ cl::opt<std::string> MlirDumpPath("dump-mlir", cl::desc("dump generated mlir mod
 cl::opt<std::string> DumpAllPath("dump", cl::desc("dump all info (spirv, spirv-asm, gcn, mlir) to a prefix starting with given name"), cl::value_desc("filename"), cl::cat(MyCategory));
 cl::opt<bool> PrintGcn("p", cl::desc("print gcn bytecode to stdout"));
 cl::opt<bool> Quiet("q", cl::desc("don't print warnings"));
+cl::opt<bool> PrintSlots("s", cl::desc("dump info about input usage slots"));
 
 cl::opt<std::string> InputGcnPath(cl::Positional, cl::desc("<input file>"), cl::Required, cl::value_desc("filename"), cl::cat(MyCategory));
 
@@ -463,6 +456,10 @@ enum DescriptorSetKind {
     Image2DHeap,
     Image3DHeap,
     ImageMetadataHeap,
+    Texture1DHeap,
+    Texture2DHeap,
+    Texture3DHeap,
+    TextureMetadataHeap,
     SamplerHeap,
     CombinedSamplerHeap,
     NUM_KINDS
@@ -478,8 +475,12 @@ static int getDescriptorSetNumber(DescriptorSetKind dsKind) {
         2, // Image2DHeap
         2, // Image3DHeap
         3, // ImageMetadataHeap
-        4, // SamplerHeap
-        5, // CombinedSamplerHeap
+        4, // Texture1DHeap,
+        4, // Texture2DHeap,
+        4, // Texture3DHeap,
+        5, // TextureMetadataHeap,
+        6, // SamplerHeap
+        7, // CombinedSamplerHeap
     };
 
     return descriptorSetKindToNumber[dsKind];
@@ -1203,6 +1204,27 @@ private:
         return initDescriptorHeap(DescriptorSetKind::Image3DHeap, heapTy, "Image3DHeap");
     }
 
+    GlobalVariableOp initTexture1DHeap() {
+        mlir::Type entryType = ImageType::get(floatTy, Dim::Dim1D, ImageDepthInfo::DepthUnknown, ImageArrayedInfo::NonArrayed,
+                ImageSamplingInfo::SingleSampled, ImageSamplerUseInfo::NeedSampler);
+        mlir::Type heapTy = RuntimeArrayType::get(entryType);
+        return initDescriptorHeap(DescriptorSetKind::Texture1DHeap, heapTy, "Texture1DHeap");
+    }
+
+    GlobalVariableOp initTexture2DHeap() {
+        mlir::Type entryType = ImageType::get(floatTy, Dim::Dim2D, ImageDepthInfo::DepthUnknown, ImageArrayedInfo::NonArrayed,
+                ImageSamplingInfo::SingleSampled, ImageSamplerUseInfo::NeedSampler);
+        mlir::Type heapTy = RuntimeArrayType::get(entryType);
+        return initDescriptorHeap(DescriptorSetKind::Texture2DHeap, heapTy, "Texture2DHeap");
+    }
+
+    GlobalVariableOp initTexture3DHeap() {
+        mlir::Type entryType = ImageType::get(floatTy, Dim::Dim3D, ImageDepthInfo::DepthUnknown, ImageArrayedInfo::NonArrayed,
+                ImageSamplingInfo::SingleSampled, ImageSamplerUseInfo::NeedSampler);
+        mlir::Type heapTy = RuntimeArrayType::get(entryType);
+        return initDescriptorHeap(DescriptorSetKind::Texture3DHeap, heapTy, "Texture3DHeap");
+    }
+
     mlir::Value extractImageDimType(mlir::Value imageMetadataRecord) {
         return builder.create<CompositeExtractOp>(imageMetadataRecord, std::array{0});
     }
@@ -1212,6 +1234,13 @@ private:
         mlir::Type entryType = StructType::get({int8Ty}, {0});
         mlir::Type heapTy = RuntimeArrayType::get(entryType);
         return initDescriptorHeap(DescriptorSetKind::ImageMetadataHeap, heapTy, "ImageMetadataHeap");
+    }
+
+    GlobalVariableOp initTextureMetadataHeap() {
+        // { int Dims : 8 }
+        mlir::Type entryType = StructType::get({int8Ty}, {0});
+        mlir::Type heapTy = RuntimeArrayType::get(entryType);
+        return initDescriptorHeap(DescriptorSetKind::TextureMetadataHeap, heapTy, "TextureMetadataHeap");
     }
 
     // TODO:
@@ -1262,10 +1291,39 @@ private:
         return builder.create<LoadOp>(heapChain);
     }
 
+    mlir::Value lookupTextureDescriptor1D(mlir::Value imageIdx) {
+        GlobalVariableOp heap = initTexture1DHeap();
+        auto heapRef = builder.create<AddressOfOp>(heap);
+        auto heapChain = builder.create<AccessChainOp>(heapRef, mlir::ValueRange({ imageIdx }));
+        return builder.create<LoadOp>(heapChain);
+    }
+
+    mlir::Value lookupTextureDescriptor2D(mlir::Value imageIdx) {
+        GlobalVariableOp heap = initTexture2DHeap();
+        auto heapRef = builder.create<AddressOfOp>(heap);
+        auto heapChain = builder.create<AccessChainOp>(heapRef, mlir::ValueRange({ imageIdx }));
+        return builder.create<LoadOp>(heapChain);
+    }
+
+    mlir::Value lookupTextureDescriptor3D(mlir::Value imageIdx) {
+        GlobalVariableOp heap = initTexture3DHeap();
+        auto heapRef = builder.create<AddressOfOp>(heap);
+        auto heapChain = builder.create<AccessChainOp>(heapRef, mlir::ValueRange({ imageIdx }));
+        return builder.create<LoadOp>(heapChain);
+    }
+
     mlir::Value lookupImageMetaData(mlir::Value imageIdx) {
         GlobalVariableOp imageMetadataHeap = initImageMetadataHeap();
         auto imageMetadataHeapRef = builder.create<AddressOfOp>(imageMetadataHeap);
         auto heapChain = builder.create<AccessChainOp>(imageMetadataHeapRef, mlir::ValueRange({ imageIdx }));
+        // record
+        return builder.create<LoadOp>(heapChain);
+    }
+
+    mlir::Value lookupTextureMetaData(mlir::Value imageIdx) {
+        GlobalVariableOp heap = initTextureMetadataHeap();
+        auto heapRef = builder.create<AddressOfOp>(heap);
+        auto heapChain = builder.create<AccessChainOp>(heapRef, mlir::ValueRange({ imageIdx }));
         // record
         return builder.create<LoadOp>(heapChain);
     }
@@ -3206,6 +3264,8 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
         // MIMG
         case AMDGPU::IMAGE_LOAD_V1_V1:
         case AMDGPU::IMAGE_LOAD_V4_V1:
+
+        case AMDGPU::IMAGE_LOAD_MIP_V4_V1:
         {
             // TODO: Hack AF: should figure out how to write helper functions in glsl/opencl, compile to spirv, link with the MLIR module
 
@@ -3218,7 +3278,22 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
             uint imageConstBaseSgpr = sgprGroupToSgprBase(imageConst.getReg());
             mlir::Value imageIdx = sourceUniformReg(imageConstBaseSgpr);
 
-            mlir::Value imageMetadataRecord = lookupImageMetaData(imageIdx);
+            bool useMip;
+            bool useTexDesc;
+            bool doSample;
+            switch (opcode) {
+                case AMDGPU::IMAGE_LOAD_MIP_V4_V1:
+                    useMip = true;
+                    useTexDesc = true;
+                    break;
+                default:
+                    useMip = false;
+                    useTexDesc = true;
+                    doSample = false;
+                    break;
+            }
+
+            mlir::Value imageMetadataRecord = useTexDesc ? lookupTextureMetaData(imageIdx) : lookupImageMetaData(imageIdx);
             mlir::Value dimTypeVal = extractImageDimType(imageMetadataRecord);
 
             // V4_V1 : V4(#channels)_V1(???)
@@ -3315,21 +3390,20 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
                     builder.create<BranchConditionalOp>(cmp, thenBlock, mlir::ValueRange(), elseBlock, mlir::ValueRange(), std::nullopt);
 
                     builder.setInsertionPointToEnd(thenBlock);
-                    // TODO
                     {
                         mlir::Value imageDescriptor;
                         int numAddrComponents = 0;
                         switch (dim) {
                             case Dim::Dim1D:
-                                imageDescriptor = lookupImageDescriptor1D(imageIdx);
+                                imageDescriptor = useTexDesc ? lookupTextureDescriptor1D(imageIdx) : lookupImageDescriptor1D(imageIdx);
                                 numAddrComponents = 1;
                                 break;
                             case Dim::Dim2D:
-                                imageDescriptor = lookupImageDescriptor2D(imageIdx);
+                                imageDescriptor = useTexDesc ? lookupTextureDescriptor2D(imageIdx) : lookupImageDescriptor2D(imageIdx);
                                 numAddrComponents = 2;
                                 break;
                             case Dim::Dim3D:
-                                imageDescriptor = lookupImageDescriptor3D(imageIdx);
+                                imageDescriptor = useTexDesc ? lookupTextureDescriptor3D(imageIdx) : lookupImageDescriptor3D(imageIdx);
                                 numAddrComponents = 3;
                                 break;
                             default:
@@ -3349,7 +3423,25 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
                                 addrVal = component;
                             }
                         }
-                        auto texel = builder.create<ImageReadOp>(texelTy, imageDescriptor, addrVal, ImageOperandsAttr::get(&mlirContext, ImageOperands::None), mlir::ValueRange());
+
+
+                        mlir::Value texel;
+                        ImageOperands imageOperandsAttr = ImageOperands::None;
+                        llvm::SmallVector<mlir::Value, 2> imageOperands;
+                        if (useMip) {
+                            // TODO: need to use image with sampled bit and OpImageFetch.
+                            // Lod image oprnd not allowed with OpImageRead
+                            imageOperandsAttr = imageOperandsAttr | ImageOperands::Lod;
+                            mlir::Value mipLevelVal = sourceVectorGpr(addrRegBase + numAddrComponents);
+                            imageOperands.push_back(mipLevelVal);
+                            texel = builder.create<ImageFetchOp>(texelTy, imageDescriptor, addrVal, 
+                                    ImageOperandsAttr::get(&mlirContext, imageOperandsAttr), imageOperands);
+                        } else if (doSample) {
+                        
+                        } else {
+                            texel = builder.create<ImageReadOp>(texelTy, imageDescriptor, addrVal, 
+                                    ImageOperandsAttr::get(&mlirContext, imageOperandsAttr), imageOperands);
+                        }
                         builder.create<StoreOp>(texelTempReg, texel);
                     }
                     builder.create<BranchOp>(mergeBlock);
@@ -3903,85 +3995,87 @@ int main(int argc, char **argv) {
         //assert(!!binaryInfo->m_isSrt == !!fileHeader->m_usesShaderResourceTable);
         std::vector<InputUsageSlot> srdSlots;
 
-        printf("//////////////////////////////////////////////////////////////////////////\n");
-        printf("Usage Slots\n");
-        printf("count: %i\n", binaryInfo->m_numInputUsageSlots);
-        printf("\n");
-        for (uint i = 0; i < binaryInfo->m_numInputUsageSlots; i++) {
-            const InputUsageSlot *slot = &usageSlots[i];
-            srdSlots.push_back(*slot);
-            ShaderInputUsageType usageType = static_cast<ShaderInputUsageType>(slot->m_usageType);
-            printf("/---------------------------------------------------\n");
-            printf("| slot %i\n", i);
-            printf("| type: %s\n", shaderInputUsageTypeToName(usageType));
-            printf("| m_apiSlot: %i\n", slot->m_apiSlot);
-            printf("| m_startRegister: %i\n", slot->m_startRegister);
-            printf("| m_registerCount: %i\n", slot->m_registerCount);
-            printf("| m_resourceType: %i\n", slot->m_resourceType);
-            printf("| m_reserved: %i\n", slot->m_reserved);
-            printf("| m_chunkMask: %i\n", slot->m_chunkMask);
-            printf("| m_srtSizeInDWordMinusOne: %i\n", slot->m_srtSizeInDWordMinusOne);
-            printf("| \n");
-            int resourceSize = shaderInputUsageTypeToSize(usageType);
-            if (resourceSize > 0) {
-                printf("| size: %i Bytes\n", resourceSize);
-                printf("| registers: [%i:%i]\n", slot->m_startRegister, slot->m_startRegister + resourceSize/4 - 1);
+        if (PrintSlots) {
+            printf("//////////////////////////////////////////////////////////////////////////\n");
+            printf("Usage Slots\n");
+            printf("count: %i\n", binaryInfo->m_numInputUsageSlots);
+            printf("\n");
+            for (uint i = 0; i < binaryInfo->m_numInputUsageSlots; i++) {
+                const InputUsageSlot *slot = &usageSlots[i];
+                srdSlots.push_back(*slot);
+                ShaderInputUsageType usageType = static_cast<ShaderInputUsageType>(slot->m_usageType);
+                printf("/---------------------------------------------------\n");
+                printf("| slot %i\n", i);
+                printf("| type: %s\n", shaderInputUsageTypeToName(usageType));
+                printf("| m_apiSlot: %i\n", slot->m_apiSlot);
+                printf("| m_startRegister: %i\n", slot->m_startRegister);
+                printf("| m_registerCount: %i\n", slot->m_registerCount);
+                printf("| m_resourceType: %i\n", slot->m_resourceType);
+                printf("| m_reserved: %i\n", slot->m_reserved);
+                printf("| m_chunkMask: %i\n", slot->m_chunkMask);
+                printf("| m_srtSizeInDWordMinusOne: %i\n", slot->m_srtSizeInDWordMinusOne);
+                printf("| \n");
+                int resourceSize = shaderInputUsageTypeToSize(usageType);
+                if (resourceSize > 0) {
+                    printf("| size: %i Bytes\n", resourceSize);
+                    printf("| registers: [%i:%i]\n", slot->m_startRegister, slot->m_startRegister + resourceSize/4 - 1);
+                }
+                switch (ShaderInputUsageType(slot->m_usageType)) {
+                    case kShaderInputUsageImmShaderResourceTable:
+                        break;
+
+                    case kShaderInputUsageImmResource:
+                    case kShaderInputUsageImmRwResource:
+                        // If 0, resource type <c>V#</c>; if 1, resource type <c>T#</c>, in case of a Gnm::kShaderInputUsageImmResource
+                        if (slot->m_resourceType == IMM_RESOURCE_BUFFER) {
+                            printf("|   *** Resource is a V# - buffer resource constant - 128 bits \n");
+                        } else { // IMM_RESOURCE_IMAGE
+                            // T# image constants can be 128 or 256 bits. 
+                            //
+                            // All image resource view descriptors (T#’s) are written by the driver as 256 bits.
+                            // It is permissible to use only the first 128 bits when a simple 1D or 2D (not an
+                            // array) is bound. This is specified in the MIMG R128 instruction field.
+                            // The MIMG-format instructions have a DeclareArray (DA) bit that reflects whether
+                            // the shader was expecting an array-texture or simple texture to be bound. When
+                            // DA is zero, the hardware does not send an array index to the texture cache. If
+                            // the texture map was indexed, the hardware supplies an index value of zero.
+                            // Indices sent for non-indexed texture maps are ignored.
+                            printf("|   *** Resource is a T# - image resource constant - 128/256 bits\n");                        
+                        }
+                        break;
+                    case kShaderInputUsageImmSampler:
+                    case kShaderInputUsageImmConstBuffer:
+                    case kShaderInputUsageImmVertexBuffer:
+                    case kShaderInputUsageImmAluFloatConst:
+                    case kShaderInputUsageImmAluBool32Const:
+                    case kShaderInputUsageImmGdsCounterRange:
+                    case kShaderInputUsageImmGdsMemoryRange:
+                    case kShaderInputUsageImmGwsBase:
+                    case kShaderInputUsageImmLdsEsGsSize:
+                    case kShaderInputUsageSubPtrFetchShader:
+                    case kShaderInputUsagePtrResourceTable:
+                    case kShaderInputUsagePtrInternalResourceTable:
+                    case kShaderInputUsagePtrSamplerTable:
+                    case kShaderInputUsagePtrConstBufferTable:
+                    case kShaderInputUsagePtrVertexBufferTable:
+                    case kShaderInputUsagePtrSoBufferTable:
+                    case kShaderInputUsagePtrRwResourceTable:
+                    case kShaderInputUsagePtrInternalGlobalTable:
+                    case kShaderInputUsagePtrExtendedUserData:
+                    case kShaderInputUsagePtrIndirectResourceTable:
+                    case kShaderInputUsagePtrIndirectInternalResourceTable:
+                    case kShaderInputUsagePtrIndirectRwResourceTable:
+                        break;
+
+                    default:
+                        printf("Warning: unhandled usage type in input slots");
+                        break;
+                }
+                printf("\\---------------------------------------------------\n");
+
             }
-            switch (ShaderInputUsageType(slot->m_usageType)) {
-	            case kShaderInputUsageImmShaderResourceTable:
-                    break;
-
-	            case kShaderInputUsageImmResource:
-	            case kShaderInputUsageImmRwResource:
-                    // If 0, resource type <c>V#</c>; if 1, resource type <c>T#</c>, in case of a Gnm::kShaderInputUsageImmResource
-                    if (slot->m_resourceType == IMM_RESOURCE_BUFFER) {
-                        printf("|   *** Resource is a V# - buffer resource constant - 128 bits \n");
-                    } else { // IMM_RESOURCE_IMAGE
-                        // T# image constants can be 128 or 256 bits. 
-                        //
-                        // All image resource view descriptors (T#’s) are written by the driver as 256 bits.
-                        // It is permissible to use only the first 128 bits when a simple 1D or 2D (not an
-                        // array) is bound. This is specified in the MIMG R128 instruction field.
-                        // The MIMG-format instructions have a DeclareArray (DA) bit that reflects whether
-                        // the shader was expecting an array-texture or simple texture to be bound. When
-                        // DA is zero, the hardware does not send an array index to the texture cache. If
-                        // the texture map was indexed, the hardware supplies an index value of zero.
-                        // Indices sent for non-indexed texture maps are ignored.
-                        printf("|   *** Resource is a T# - image resource constant - 128/256 bits\n");                        
-                    }
-                    break;
-	            case kShaderInputUsageImmSampler:
-	            case kShaderInputUsageImmConstBuffer:
-	            case kShaderInputUsageImmVertexBuffer:
-	            case kShaderInputUsageImmAluFloatConst:
-	            case kShaderInputUsageImmAluBool32Const:
-	            case kShaderInputUsageImmGdsCounterRange:
-	            case kShaderInputUsageImmGdsMemoryRange:
-	            case kShaderInputUsageImmGwsBase:
-	            case kShaderInputUsageImmLdsEsGsSize:
-	            case kShaderInputUsageSubPtrFetchShader:
-	            case kShaderInputUsagePtrResourceTable:
-	            case kShaderInputUsagePtrInternalResourceTable:
-	            case kShaderInputUsagePtrSamplerTable:
-	            case kShaderInputUsagePtrConstBufferTable:
-	            case kShaderInputUsagePtrVertexBufferTable:
-	            case kShaderInputUsagePtrSoBufferTable:
-	            case kShaderInputUsagePtrRwResourceTable:
-	            case kShaderInputUsagePtrInternalGlobalTable:
-	            case kShaderInputUsagePtrExtendedUserData:
-	            case kShaderInputUsagePtrIndirectResourceTable:
-	            case kShaderInputUsagePtrIndirectInternalResourceTable:
-	            case kShaderInputUsagePtrIndirectRwResourceTable:
-                    break;
-
-                default:
-                    printf("Warning: unhandled usage type in input slots");
-                    break;
-            }
-            printf("\\---------------------------------------------------\n");
-
+            printf("//////////////////////////////////////////////////////////////////////////\n");
         }
-        printf("//////////////////////////////////////////////////////////////////////////\n");
 
         if (auto dumpPath = getGcnBinaryDumpPath()) {
             auto outfile = createDumpFile(dumpPath.value(), ".sb", FileNum);
@@ -4000,4 +4094,3 @@ int main(int argc, char **argv) {
 
     return err;
 }
-
