@@ -456,13 +456,34 @@ typedef VariableOp CCReg;
 typedef VariableOp VectorReg;
 
 enum DescriptorSetKind {
-    SrdFlatTable = 0,
-    SrdImmediates = 0, // Mutually exclusive with SrdFlatTable
-    SsboHeap = 2, // Can be 1, TODO
-    TextureHeap = 3,
-    SamplerHeap = 4,
-    CombinedSamplerHeap = 6,
+    SrdFlatTable,// = 0,
+    SrdImmediates,// = 0, // Mutually exclusive with SrdFlatTable
+    SsboHeap,
+    Image1DHeap,
+    Image2DHeap,
+    Image3DHeap,
+    ImageMetadataHeap,
+    SamplerHeap,
+    CombinedSamplerHeap,
+    NUM_KINDS
 };
+
+// Some descriptor sets/bindings alias
+static int getDescriptorSetNumber(DescriptorSetKind dsKind) {
+    static int descriptorSetKindToNumber[DescriptorSetKind::NUM_KINDS] = {
+        0, // SrdFlatTable
+        0, // SrdImmediates
+        1, // SsboHeap
+        2, // Image1DHeap
+        2, // Image2DHeap
+        2, // Image3DHeap
+        3, // ImageMetadataHeap
+        4, // SamplerHeap
+        5, // CombinedSamplerHeap
+    };
+
+    return descriptorSetKindToNumber[dsKind];
+}
 
 enum SrdMode {
     Immediate,
@@ -498,6 +519,7 @@ public:
         sint64Ty = builder.getIntegerType(64, true);
         int64Ty = builder.getI64Type();
         int16Ty = builder.getI16Type();
+        int8Ty = builder.getI8Type();
         boolTy = builder.getI1Type();
         v2intTy = mlir::VectorType::get({2}, intTy);
         v3intTy = mlir::VectorType::get({3}, intTy);
@@ -534,6 +556,7 @@ private:
     ConstantOp getF64Const(double d) { return builder.create<ConstantOp>(f64Ty, builder.getF64FloatAttr(d)); }
     ConstantOp getI32Const(int n) { return builder.create<ConstantOp>(intTy, builder.getI32IntegerAttr(n)); }
     ConstantOp getI64Const(int n) { return builder.create<ConstantOp>(int64Ty, builder.getI64IntegerAttr(n)); }
+    ConstantOp getI8Const(int n) { return builder.create<ConstantOp>(int8Ty, builder.getI8IntegerAttr(n)); }
 
     // build a VariableOp for the CC (condition code) register, and attach a name
     CCReg buildCCReg(llvm::StringRef name) {
@@ -554,6 +577,18 @@ private:
         auto intPtrTy = PointerType::get(intTy, StorageClass::Function);
         auto var = initBuilder.create<VariableOp>(intPtrTy, StorageClassAttr::get(&mlirContext, StorageClass::Function), nullptr);
 #if defined(_DEBUG)
+        var->setDiscardableAttr(builder.getStringAttr("gcn.varname"), builder.getStringAttr(name));
+#endif
+        return var;
+    }
+
+    VariableOp buildTempReg(llvm::StringRef name, mlir::Type dataType) {
+        mlir::ImplicitLocOpBuilder initBuilder(builder);
+        initBuilder.setInsertionPointToStart(mainEntryBlock);
+        auto ptrTy = PointerType::get(dataType, StorageClass::Function);
+        auto var = initBuilder.create<VariableOp>(ptrTy, StorageClassAttr::get(&mlirContext, StorageClass::Function), nullptr);
+#if defined(_DEBUG)
+        // TODO handle dup names. Don't matter though for function, just reading
         var->setDiscardableAttr(builder.getStringAttr("gcn.varname"), builder.getStringAttr(name));
 #endif
         return var;
@@ -943,6 +978,7 @@ private:
 #define R0_7 R0_6, 7
 #define R0_8 R0_7, 8
 #define R0_9 R0_8, 9
+#define R0_10 R0_9, 10
 
     void storeScalarResult32(uint regno, mlir::Value result) {
         mlir::Type resultTy = result.getType();
@@ -1110,15 +1146,16 @@ private:
     }
 
     GlobalVariableOp initDescriptorHeap(DescriptorSetKind dsKind, mlir::Type type, llvm::StringRef name) {
-        auto it = descriptorSets.find((uint)dsKind);
+        uint setNumber = getDescriptorSetNumber(dsKind);
+        auto it = descriptorSets.find(dsKind);
         if (it == descriptorSets.end()) {
             mlir::ImplicitLocOpBuilder initBuilder(builder);
             initBuilder.setInsertionPointToStart(mainEntryBlock);
             PointerType ptrTy = PointerType::get(type, StorageClass::Uniform);
             auto var = initBuilder.create<GlobalVariableOp>(ptrTy, name, nullptr);
-            var->setAttr("DescriptorSet", initBuilder.getI32IntegerAttr(dsKind));
+            var->setAttr("DescriptorSet", initBuilder.getI32IntegerAttr(setNumber));
             var->setAttr("Binding", initBuilder.getI32IntegerAttr(0));
-            descriptorSets.insert(std::make_pair((uint)dsKind, var));
+            descriptorSets.insert(std::make_pair(dsKind, var));
             return var;
         } else {
             return it->second;
@@ -1127,13 +1164,15 @@ private:
 
     GlobalVariableOp initImmediateDataUBO(mlir::Type immDataBlockTy) {
         // Should only be called once
+        DescriptorSetKind dsKind = DescriptorSetKind::SrdImmediates; 
+        uint setNumber = getDescriptorSetNumber(dsKind);
         PointerType ptrTy = PointerType::get(immDataBlockTy, StorageClass::Uniform);
         mlir::ImplicitLocOpBuilder initBuilder(builder);
         initBuilder.setInsertionPointToStart(mainEntryBlock);
         auto var = initBuilder.create<GlobalVariableOp>(ptrTy, "ImmediateUserdata");
-        var->setAttr("DescriptorSet", initBuilder.getI32IntegerAttr(DescriptorSetKind::SrdImmediates));
+        var->setAttr("DescriptorSet", initBuilder.getI32IntegerAttr(setNumber));
         var->setAttr("Binding", initBuilder.getI32IntegerAttr(0));
-        descriptorSets.insert(std::make_pair((uint)DescriptorSetKind::SrdImmediates, var));
+        descriptorSets.insert(std::make_pair(dsKind, var));
         return var;
     }
 
@@ -1146,21 +1185,89 @@ private:
         return initDescriptorHeap(DescriptorSetKind::SsboHeap, heapTy, "SsboHeap");
     }
 
-    GlobalVariableOp initTextureHeap() {
-        assert(false && "separate texture heap unimplemented");
-        // TODO: mlir dialect only supports combined image samplers
-        mlir::Type entryType; // = ImageType::get()
-        mlir::Type heapTy = RuntimeArrayType::get(entryType); // = ImageType::get();
-        return initDescriptorHeap(DescriptorSetKind::TextureHeap, heapTy, "TextureHeap");
+    GlobalVariableOp initImage1DHeap() {
+        mlir::Type entryType = ImageType::get(floatTy, Dim::Dim1D);
+        mlir::Type heapTy = RuntimeArrayType::get(entryType);
+        return initDescriptorHeap(DescriptorSetKind::Image1DHeap, heapTy, "Image1DHeap");
+    }
+
+    GlobalVariableOp initImage2DHeap() {
+        mlir::Type entryType = ImageType::get(floatTy, Dim::Dim2D);
+        mlir::Type heapTy = RuntimeArrayType::get(entryType);
+        return initDescriptorHeap(DescriptorSetKind::Image2DHeap, heapTy, "Image2DHeap");
+    }
+
+    GlobalVariableOp initImage3DHeap() {
+        mlir::Type entryType = ImageType::get(floatTy, Dim::Dim3D);
+        mlir::Type heapTy = RuntimeArrayType::get(entryType);
+        return initDescriptorHeap(DescriptorSetKind::Image3DHeap, heapTy, "Image3DHeap");
+    }
+
+    mlir::Value extractImageDimType(mlir::Value imageMetadataRecord) {
+        return builder.create<CompositeExtractOp>(imageMetadataRecord, std::array{0});
+    }
+
+    GlobalVariableOp initImageMetadataHeap() {
+        // { int Dims : 8 }
+        mlir::Type entryType = StructType::get({int8Ty}, {0});
+        mlir::Type heapTy = RuntimeArrayType::get(entryType);
+        return initDescriptorHeap(DescriptorSetKind::ImageMetadataHeap, heapTy, "ImageMetadataHeap");
     }
 
     // TODO:
     // mlir dialect doesn't support separate sampler and images, only combined samplers
     GlobalVariableOp initCombinedSamplerHeap() {
+        // %28 = OpTypeImage %float 2D 2 0 0 0 Unknown
+        // %float: sampled type, 2D : dim, 2 : depth, 0: arrayed, 0 : MS (multi-sampled), 0 (not statically known) : sampled, Unknown : Image format
         ImageType imageTy = ImageType::get(floatTy, Dim::Dim2D);
         mlir::Type entryType = SampledImageType::get(imageTy);
         mlir::Type heapTy = RuntimeArrayType::get(entryType);
-        return initDescriptorHeap(DescriptorSetKind::CombinedSamplerHeap, heapTy, "ImageHeap");
+        return initDescriptorHeap(DescriptorSetKind::CombinedSamplerHeap, heapTy, "CombinedSamplerHeap");
+    }
+
+    // sgprBase: regno for an sgpr holding an index into the combined sampler heap.
+    //
+    // The Sgpr should match the first register of a 4 or 8 sgpr group which would normally hold a T#
+    // resource constant in a real gcn shader.
+    // In the emulated shaders, we will pass around indexes into descriptor heaps, that way for any gcn code which
+    // moves a T# from one block of registers into another group, the emulated shader will move the index that points
+    // to the image/sampler descriptor into the virtual sgpr (Spirv OpVariable)
+    //
+    // This function returns the Spirv OpSampledImage from the combined sampler heap.
+    mlir::Value lookupCombinedSamplerDescriptor(mlir::Value imageIdx) {
+        GlobalVariableOp combinedSamplerHeap = initCombinedSamplerHeap();
+        auto combinedSamplerHeapRef = builder.create<AddressOfOp>(combinedSamplerHeap);
+        auto heapChain = builder.create<AccessChainOp>(combinedSamplerHeapRef, mlir::ValueRange({ imageIdx }));
+        return builder.create<LoadOp>(heapChain);
+    }
+
+    mlir::Value lookupImageDescriptor1D(mlir::Value imageIdx) {
+        GlobalVariableOp heap = initImage1DHeap();
+        auto heapRef = builder.create<AddressOfOp>(heap);
+        auto heapChain = builder.create<AccessChainOp>(heapRef, mlir::ValueRange({ imageIdx }));
+        return builder.create<LoadOp>(heapChain);
+    }
+
+    mlir::Value lookupImageDescriptor2D(mlir::Value imageIdx) {
+        GlobalVariableOp heap = initImage2DHeap();
+        auto heapRef = builder.create<AddressOfOp>(heap);
+        auto heapChain = builder.create<AccessChainOp>(heapRef, mlir::ValueRange({ imageIdx }));
+        return builder.create<LoadOp>(heapChain);
+    }
+
+    mlir::Value lookupImageDescriptor3D(mlir::Value imageIdx) {
+        GlobalVariableOp heap = initImage3DHeap();
+        auto heapRef = builder.create<AddressOfOp>(heap);
+        auto heapChain = builder.create<AccessChainOp>(heapRef, mlir::ValueRange({ imageIdx }));
+        return builder.create<LoadOp>(heapChain);
+    }
+
+    mlir::Value lookupImageMetaData(mlir::Value imageIdx) {
+        GlobalVariableOp imageMetadataHeap = initImageMetadataHeap();
+        auto imageMetadataHeapRef = builder.create<AddressOfOp>(imageMetadataHeap);
+        auto heapChain = builder.create<AccessChainOp>(imageMetadataHeapRef, mlir::ValueRange({ imageIdx }));
+        // record
+        return builder.create<LoadOp>(heapChain);
     }
 
     ///////////////////////////////////////////////////////////////////////////////////////////
@@ -1265,6 +1372,7 @@ private:
     mlir::IntegerType sint64Ty;
     mlir::IntegerType int64Ty;
     mlir::IntegerType int16Ty;
+    mlir::IntegerType int8Ty;
     mlir::IntegerType boolTy;
     mlir::VectorType v2intTy;
     mlir::VectorType v3intTy;
@@ -3084,7 +3192,197 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
             break;
         }
 
+        // TODO: one descriptor heap per image dims? (1D, 2D, 3D, ...)
+        // Can you always tell what dimensions an image is given an instruction?
+        //     -> don't think so
+        // Need some kind of indirection for separate heaps?
+        // Option 1:
+        // Two level heap for images: First level heap (all images) stores record (enum for next heap, index)
+        // Option 2:
+        // One heap for all images, another with matching array for metadata.
+        // Can you put 1D, 2D, etc image descriptors in one runtime array?
+        // Should be able to: in vulkan, they should share the same 
+
         // MIMG
+        case AMDGPU::IMAGE_LOAD_V1_V1:
+        case AMDGPU::IMAGE_LOAD_V4_V1:
+        {
+            // TODO: Hack AF: should figure out how to write helper functions in glsl/opencl, compile to spirv, link with the MLIR module
+
+            // V4_V1: 4 components of image, 1D address?
+            // How else would we determine #components in address?
+            auto [dst, addr, imageConst, dmask, unorm, _5, _6, _7, _8, _9, _10] = unwrapMI(MI, R0_10);
+            assert(_5.getImm() == 0 && _6.getImm() == 0 && _7.getImm() == 0 && _8.getImm() == 0 && _9.getImm() == 0 && _10.getImm() == 0);
+
+            uint dstRegno = vgprGroupToVgprBase(dst.getReg());
+            uint imageConstBaseSgpr = sgprGroupToSgprBase(imageConst.getReg());
+            mlir::Value imageIdx = sourceUniformReg(imageConstBaseSgpr);
+
+            mlir::Value imageMetadataRecord = lookupImageMetaData(imageIdx);
+            mlir::Value dimTypeVal = extractImageDimType(imageMetadataRecord);
+
+            // V4_V1 : V4(#channels)_V1(???)
+            // -> don't know what 2nd (V1) means. I've seen situations like
+	        //      v_sad_u32 v4, vcc_lo, 0, v0
+	        //      v_sad_u32 v5, s16, 0, v1
+	        //      image_load_mip v[0:3], v4, s[0:7] dmask:0xf
+            // where v4 is the only coord listed but v5 is written, when it would be otherwise dead after
+            // the load. 
+
+            uint addrRegBase = vgprGroupToVgprBase(dst.getReg());
+
+            // "For image opcodes with no sampler, all VGPR address values are taken as uint"
+            // Look at table 8.8 for addr
+
+            // Use OpImageFetch or OpImageRead?
+            // Difference is "Sampled" opeand of OpTypeImage
+            // Spirv spec:
+            // 0 indicates this is only known at run time, not at compile time
+            // 1 indicates an image compatible with sampling operations
+            // 2 indicates an image compatible with read/write operations (a storage or subpass data image).
+
+            // "Reads: DMASK specifies which elements of the resource are returned to"
+            // "consecutive VGPRs. The texture system reads data from memory and based"
+            // "on the data format expands it to a canonical RGBA form, filling in zero or"
+            // "one for missing components. Then, DMASK is applied, and only those"
+            // "components selected are returned to the shader."
+
+            // "Writes: When writing an image object, it is only possible to write an entire"
+            // "element (all components), not just individual components. The components"
+            // "come from consecutive VGPRs, and the texture system fills in the value zero"
+            // "for any missing components of the image’s data format; it ignores any values"
+            // "that are not part of the stored data format. For example, if the DMASK=1001,"
+            // "the shader sends Red from VGPR_N, and Alpha from VGPR_N+1, to the"
+            // "texture unit. If the image object is RGB, the texel is overwritten with Red from"
+            // "the VGPR_N, Green and Blue set to zero, and Alpha from the shader"
+            // "ignored."
+
+            uint dmaskImm = dmask.getImm();
+            int texelNumComponents = 0;
+            // Basically find the index of the MSB of validMask
+            if (dmaskImm & 8) {
+                texelNumComponents = 4;
+            } else if (dmaskImm & 4) {
+                texelNumComponents = 3;
+            } else if (dmaskImm & 2) {
+                texelNumComponents = 2;
+            } else if (dmaskImm & 1) {
+                texelNumComponents = 1;
+            }
+
+            assert(texelNumComponents != 0);
+
+            // "Result Type must be a scalar or vector of floating-point type or integer type."
+            // "It must be a scalar or vector with component type the same as Sampled Type of the OpTypeImage (unless that Sampled Type is OpTypeVoid)."
+            // TODO: probably do runtime switch based on format
+            // Not sure if "sampled type" in OpTypeImage matters though, or if it's just a bitcast
+            // on the read/fetch result.
+            mlir::Type eltTy = floatTy;
+
+            mlir::Type texelTy;
+            if (texelNumComponents > 1) {
+                texelTy = mlir::VectorType::get({texelNumComponents}, eltTy);
+            } else {
+                texelTy = eltTy;
+            }
+
+            mlir::Value texelTempReg = buildTempReg("imageLoadTexelTemp", texelTy);
+            {
+                mlir::Block *topLevelBlock = builder.getBlock();
+
+                // TODO generate functions to factor this stuff out
+                // TODO OpSwitch not supported in MLIR yet
+                std::array<mlir::spirv::Dim, 3> dimTypes = { Dim::Dim1D, Dim::Dim2D, Dim::Dim3D };
+                for (uint i = 0; i < dimTypes.size(); i++) {
+                    mlir::spirv::Dim dim = dimTypes[i];
+                    mlir::Block *headerBlock, *thenBlock, *elseBlock, *mergeBlock;
+
+                    auto selection = builder.create<SelectionOp>(SelectionControl::None);
+                    mlir::Region &selectionRegion = selection.getRegion();
+
+                    headerBlock = &selectionRegion.emplaceBlock();
+                    thenBlock = &selectionRegion.emplaceBlock();
+                    mergeBlock = &selectionRegion.emplaceBlock();
+                    if (i == dimTypes.size() - 1) {
+                        elseBlock = mergeBlock;
+                    } else {
+                        elseBlock = new mlir::Block();
+                        elseBlock->insertBefore(mergeBlock);
+                    }
+
+                    builder.setInsertionPointToEnd(headerBlock);
+                    mlir::Value cmp = builder.create<IEqualOp>(dimTypeVal, getI8Const(static_cast<uint>(dim)));
+                    builder.create<BranchConditionalOp>(cmp, thenBlock, mlir::ValueRange(), elseBlock, mlir::ValueRange(), std::nullopt);
+
+                    builder.setInsertionPointToEnd(thenBlock);
+                    // TODO
+                    {
+                        mlir::Value imageDescriptor;
+                        int numAddrComponents = 0;
+                        switch (dim) {
+                            case Dim::Dim1D:
+                                imageDescriptor = lookupImageDescriptor1D(imageIdx);
+                                numAddrComponents = 1;
+                                break;
+                            case Dim::Dim2D:
+                                imageDescriptor = lookupImageDescriptor2D(imageIdx);
+                                numAddrComponents = 2;
+                                break;
+                            case Dim::Dim3D:
+                                imageDescriptor = lookupImageDescriptor3D(imageIdx);
+                                numAddrComponents = 3;
+                                break;
+                            default:
+                                assert(false);
+                                break;
+                        }
+                        mlir::Type addrType = intTy;
+                        if (numAddrComponents > 1) {
+                            addrType = mlir::VectorType::get({numAddrComponents}, addrType);
+                        }
+                        mlir::Value addrVal = getZero(addrType);
+                        for (int i = 0 ; i < numAddrComponents; i++) {
+                            mlir::Value component = sourceVectorGpr(addrRegBase + i);
+                            if (numAddrComponents > 1) {
+                                addrVal = builder.create<CompositeInsertOp>(component, addrVal, std::array{i});
+                            } else {
+                                addrVal = component;
+                            }
+                        }
+                        auto texel = builder.create<ImageReadOp>(texelTy, imageDescriptor, addrVal, ImageOperandsAttr::get(&mlirContext, ImageOperands::None), mlir::ValueRange());
+                        builder.create<StoreOp>(texelTempReg, texel);
+                    }
+                    builder.create<BranchOp>(mergeBlock);
+
+                    builder.setInsertionPointToEnd(mergeBlock);
+                    builder.create<MergeOp>();
+
+                    builder.setInsertionPointToEnd(elseBlock);
+                    if (i != dimTypes.size() - 1) {
+                        auto term = builder.create<BranchOp>(mergeBlock);
+                        builder.setInsertionPoint(term);
+                    }
+                }
+
+                builder.setInsertionPointToEnd(topLevelBlock);
+            }
+
+            auto texel = builder.create<LoadOp>(texelTempReg);
+            for (int i = 0; i < texelNumComponents; i++) {
+                if (dmaskImm & (1 << i)) {
+                    mlir::Value component = texel;
+                    if (isa<mlir::VectorType>(texelTy)) {
+                        component = builder.create<CompositeExtractOp>(component, std::array{i});
+                    }
+                    // TODO: do we tightly pack the returned components based on dmask (Like data provided for writes)?
+                    // If not, then store to dstRegno + i, don't bump dstRegno
+                    storeVectorResult32(dstRegno, component);
+                    ++dstRegno;
+                }
+            }
+            break;
+        }
+
         case AMDGPU::IMAGE_GET_RESINFO_V2_V1:
         {
             auto [dst, mipLevel, imageConst, dmask, _4, _5, _6, _7, _8, _9] = unwrapMI(MI, R0_9);
@@ -3097,53 +3395,45 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
             // Vdata3-0 = { #mipLevels, depth, height, width }
             // For cubemaps, depth = 6 * Number_of_array_slices.
 
-            // Think arg 1 is the mip level. Otherwise depth, height, width don't make sense
-
             // TODO: need to be tagging things like image reads as predicated, for V_ instructions, because they might cause exceptions
 
             uint dstRegno = vgprGroupToVgprBase(dst.getReg());
-            uint imageConstRegno = sgprGroupToSgprBase(imageConst.getReg());
-            // we stash idx into ssbo descriptor heap in the base register
-            mlir::Value imageIdx = sourceUniformReg(imageConstRegno);
-            GlobalVariableOp combinedSamplerHeap = initCombinedSamplerHeap();
-            auto combinedSamplerHeapRef = builder.create<AddressOfOp>(combinedSamplerHeap);
-            auto heapChain = builder.create<AccessChainOp>(combinedSamplerHeapRef, mlir::ValueRange({ imageIdx }));
-            mlir::Value combinedSamplerDescriptor = builder.create<LoadOp>(heapChain);
-            auto imageDescriptor = builder.create<ImageOp>(combinedSamplerDescriptor);
+            uint imageConstBaseSgpr = sgprGroupToSgprBase(imageConst.getReg());
+            mlir::Value imageIdx = sourceUniformReg(imageConstBaseSgpr);
+            mlir::Value imageDescriptor = lookupImageDescriptor2D(imageIdx);
+            // For now, extract the contained image from the combined image sampler.
+            // The type of the image arg to ImageQuery* must be OpTypeImage
 
             mlir::Value mipLevelVal = sourceVectorOperand(mipLevel, intTy);
 
-            mlir::Type dimsType;
+            uint numDimComponents = 0;
             if (dmaskImm & 4) {
                 // depth
-                dimsType = v3intTy;
+                numDimComponents = 3;
             } else if (dmaskImm & 2) {
                 // height
-                dimsType = v2intTy;
+                numDimComponents = 2;
             } else if (dmaskImm & 1) {
                 // width
-                dimsType = intTy;
+                numDimComponents = 1;
+            }
+            
+            mlir::Type dimsType = intTy;
+            if (numDimComponents > 1) {
+                dimsType = mlir::VectorType::get({numDimComponents}, dimsType);
             }
 
-            if (dmaskImm & 7) {
-                // For now, extract the contained image from the combined image sampler.
-                // The type of the image arg to ImageQuery* must be OpTypeImage
+            if (numDimComponents > 0) {
                 auto sizeQuery = builder.create<ImageQuerySizeLodOp>(dimsType, imageDescriptor, mipLevelVal);
-                if (dmaskImm & 1) {
-                    mlir::Value width = sizeQuery;
-                    if (dmaskImm & (4 | 2)) {
-                        // vector
-                        width = builder.create<CompositeExtractOp>(sizeQuery, std::array{0});
+
+                for (int i = 0; i < 3; i++) {
+                    if (dmaskImm & (1 << i)) {
+                        mlir::Value component = sizeQuery;
+                        if (isa<mlir::VectorType>(dimsType)) {
+                            component = builder.create<CompositeExtractOp>(component, std::array{i});
+                        }
+                        storeVectorResult32(dstRegno + i, component);
                     }
-                    storeVectorResult32(dstRegno, width);
-                }
-                if (dmaskImm & 2) {
-                    mlir::Value height = builder.create<CompositeExtractOp>(sizeQuery, std::array{1});
-                    storeVectorResult32(dstRegno + 1, height);
-                }
-                if (dmaskImm & 4) {
-                    mlir::Value depth = builder.create<CompositeExtractOp>(sizeQuery, std::array{2});
-                    storeVectorResult32(dstRegno + 2, depth);
                 }
             }
 
@@ -3151,12 +3441,6 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
                 // query num levels
                 mlir::Value numLevels = builder.create<ImageQueryLevelsOp>(intTy, imageDescriptor);
                 storeVectorResult32(dstRegno + 3, numLevels);
-            }
-
-            // TODO store results
-
-            if (dmaskImm & 8) {
-                
             }
 
             break;
@@ -3344,7 +3628,8 @@ bool GcnToSpirvConverter::finalizeModule() {
     }
 
     // TODO be conservative with Capabilities/extensions
-    llvm::SmallVector<Capability, 8> caps = { Capability::Shader, Capability::Float16, Capability::Int16, Capability::Int64, Capability::PhysicalStorageBufferAddresses, Capability::ImageQuery };
+    llvm::SmallVector<Capability, 8> caps = { Capability::Shader, Capability::Float16, Capability::Int16, Capability::Int64, Capability::PhysicalStorageBufferAddresses, Capability::ImageQuery,
+            Capability::StorageImageReadWithoutFormat, Capability::StorageImageWriteWithoutFormat, Capability::Sampled1D, Capability::Int8 };
     llvm::SmallVector<Extension, 4> exts = { Extension::SPV_EXT_descriptor_indexing, Extension::SPV_KHR_physical_storage_buffer };
     auto vceTriple = VerCapExtAttr::get(Version::V_1_5, caps, exts, &mlirContext);
     moduleOp->setAttr("vce_triple", vceTriple);

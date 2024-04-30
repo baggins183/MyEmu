@@ -1,0 +1,159 @@
+; SPIR-V
+; Version: 1.0
+; Generator: Khronos Glslang Reference Front End; 11
+; Bound: 92
+; Schema: 0
+               OpCapability Shader
+               OpCapability Sampled1D
+               OpCapability Image1D
+               OpCapability StorageImageReadWithoutFormat
+               OpCapability RuntimeDescriptorArray
+               OpExtension "SPV_EXT_descriptor_indexing"
+          %1 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Fragment %main "main"
+               OpExecutionMode %main OriginUpperLeft
+               OpSource GLSL 460
+               OpSourceExtension "GL_EXT_nonuniform_qualifier"
+               OpSourceExtension "GL_EXT_shader_image_load_formatted"
+               OpName %main "main"
+               OpName %dims "dims"
+               OpName %ImageMetadata "ImageMetadata"
+               OpMemberName %ImageMetadata 0 "dims"
+               OpName %ImageMetadataArrayBlock "ImageMetadataArrayBlock"
+               OpMemberName %ImageMetadataArrayBlock 0 "imageMetadata"
+               OpName %_ ""
+               OpName %PcBlock "PcBlock"
+               OpMemberName %PcBlock 0 "imageIdx"
+               OpName %__0 ""
+               OpName %ImageHeap1D "ImageHeap1D"
+               OpName %ImageHeap2D "ImageHeap2D"
+               OpName %ImageHeap3D "ImageHeap3D"
+               OpName %samp "samp"
+               OpName %TextureHeap1D "TextureHeap1D"
+               OpName %TextureHeap2D "TextureHeap2D"
+               OpName %TextureHeap3D "TextureHeap3D"
+               OpName %TexMetadataArrayBlock "TexMetadataArrayBlock"
+               OpMemberName %TexMetadataArrayBlock 0 "textureMetadata"
+               OpName %__1 ""
+               OpMemberDecorate %ImageMetadata 0 Offset 0
+               OpDecorate %_runtimearr_ImageMetadata ArrayStride 4
+               OpMemberDecorate %ImageMetadataArrayBlock 0 Offset 0
+               OpDecorate %ImageMetadataArrayBlock BufferBlock
+               OpDecorate %_ DescriptorSet 4
+               OpDecorate %_ Binding 0
+               OpMemberDecorate %PcBlock 0 Offset 0
+               OpDecorate %PcBlock Block
+               OpDecorate %ImageHeap1D DescriptorSet 3
+               OpDecorate %ImageHeap1D Binding 0
+               OpDecorate %ImageHeap2D DescriptorSet 3
+               OpDecorate %ImageHeap2D Binding 0
+               OpDecorate %ImageHeap3D DescriptorSet 3
+               OpDecorate %ImageHeap3D Binding 0
+               OpDecorate %samp DescriptorSet 0
+               OpDecorate %samp Binding 0
+               OpDecorate %TextureHeap1D DescriptorSet 1
+               OpDecorate %TextureHeap1D Binding 0
+               OpDecorate %TextureHeap2D DescriptorSet 1
+               OpDecorate %TextureHeap2D Binding 0
+               OpDecorate %TextureHeap3D DescriptorSet 1
+               OpDecorate %TextureHeap3D Binding 0
+               OpDecorate %_runtimearr_ImageMetadata_0 ArrayStride 4
+               OpMemberDecorate %TexMetadataArrayBlock 0 Offset 0
+               OpDecorate %TexMetadataArrayBlock BufferBlock
+               OpDecorate %__1 DescriptorSet 2
+               OpDecorate %__1 Binding 0
+       %void = OpTypeVoid
+          %3 = OpTypeFunction %void
+       %uint = OpTypeInt 32 0
+%_ptr_Function_uint = OpTypePointer Function %uint
+%ImageMetadata = OpTypeStruct %uint
+%_runtimearr_ImageMetadata = OpTypeRuntimeArray %ImageMetadata
+%ImageMetadataArrayBlock = OpTypeStruct %_runtimearr_ImageMetadata
+%_ptr_Uniform_ImageMetadataArrayBlock = OpTypePointer Uniform %ImageMetadataArrayBlock
+          %_ = OpVariable %_ptr_Uniform_ImageMetadataArrayBlock Uniform
+        %int = OpTypeInt 32 1
+      %int_0 = OpConstant %int 0
+    %PcBlock = OpTypeStruct %uint
+%_ptr_PushConstant_PcBlock = OpTypePointer PushConstant %PcBlock
+        %__0 = OpVariable %_ptr_PushConstant_PcBlock PushConstant
+%_ptr_PushConstant_uint = OpTypePointer PushConstant %uint
+%_ptr_Uniform_uint = OpTypePointer Uniform %uint
+      %float = OpTypeFloat 32
+         %32 = OpTypeImage %float 1D 0 0 0 2 Unknown
+%_runtimearr_32 = OpTypeRuntimeArray %32
+%_ptr_UniformConstant__runtimearr_32 = OpTypePointer UniformConstant %_runtimearr_32
+%ImageHeap1D = OpVariable %_ptr_UniformConstant__runtimearr_32 UniformConstant
+%_ptr_UniformConstant_32 = OpTypePointer UniformConstant %32
+    %v4float = OpTypeVector %float 4
+         %44 = OpTypeImage %float 2D 0 0 0 2 Unknown
+%_runtimearr_44 = OpTypeRuntimeArray %44
+%_ptr_UniformConstant__runtimearr_44 = OpTypePointer UniformConstant %_runtimearr_44
+%ImageHeap2D = OpVariable %_ptr_UniformConstant__runtimearr_44 UniformConstant
+%_ptr_UniformConstant_44 = OpTypePointer UniformConstant %44
+      %v2int = OpTypeVector %int 2
+         %54 = OpConstantComposite %v2int %int_0 %int_0
+         %57 = OpTypeImage %float 3D 0 0 0 2 Unknown
+%_runtimearr_57 = OpTypeRuntimeArray %57
+%_ptr_UniformConstant__runtimearr_57 = OpTypePointer UniformConstant %_runtimearr_57
+%ImageHeap3D = OpVariable %_ptr_UniformConstant__runtimearr_57 UniformConstant
+%_ptr_UniformConstant_57 = OpTypePointer UniformConstant %57
+      %v3int = OpTypeVector %int 3
+         %67 = OpConstantComposite %v3int %int_0 %int_0 %int_0
+         %72 = OpTypeSampler
+%_ptr_UniformConstant_72 = OpTypePointer UniformConstant %72
+       %samp = OpVariable %_ptr_UniformConstant_72 UniformConstant
+         %75 = OpTypeImage %float 1D 0 0 0 1 Unknown
+     %uint_1 = OpConstant %uint 1
+%_arr_75_uint_1 = OpTypeArray %75 %uint_1
+%_ptr_UniformConstant__arr_75_uint_1 = OpTypePointer UniformConstant %_arr_75_uint_1
+%TextureHeap1D = OpVariable %_ptr_UniformConstant__arr_75_uint_1 UniformConstant
+         %80 = OpTypeImage %float 2D 0 0 0 1 Unknown
+%_arr_80_uint_1 = OpTypeArray %80 %uint_1
+%_ptr_UniformConstant__arr_80_uint_1 = OpTypePointer UniformConstant %_arr_80_uint_1
+%TextureHeap2D = OpVariable %_ptr_UniformConstant__arr_80_uint_1 UniformConstant
+         %84 = OpTypeImage %float 3D 0 0 0 1 Unknown
+%_arr_84_uint_1 = OpTypeArray %84 %uint_1
+%_ptr_UniformConstant__arr_84_uint_1 = OpTypePointer UniformConstant %_arr_84_uint_1
+%TextureHeap3D = OpVariable %_ptr_UniformConstant__arr_84_uint_1 UniformConstant
+%_runtimearr_ImageMetadata_0 = OpTypeRuntimeArray %ImageMetadata
+%TexMetadataArrayBlock = OpTypeStruct %_runtimearr_ImageMetadata_0
+%_ptr_Uniform_TexMetadataArrayBlock = OpTypePointer Uniform %TexMetadataArrayBlock
+        %__1 = OpVariable %_ptr_Uniform_TexMetadataArrayBlock Uniform
+       %main = OpFunction %void None %3
+          %5 = OpLabel
+       %dims = OpVariable %_ptr_Function_uint Function
+         %20 = OpAccessChain %_ptr_PushConstant_uint %__0 %int_0
+         %21 = OpLoad %uint %20
+         %23 = OpAccessChain %_ptr_Uniform_uint %_ %int_0 %21 %int_0
+         %24 = OpLoad %uint %23
+               OpStore %dims %24
+         %25 = OpLoad %uint %dims
+               OpSelectionMerge %30 None
+               OpSwitch %25 %29 0 %26 1 %27 2 %28
+         %29 = OpLabel
+               OpBranch %30
+         %26 = OpLabel
+         %36 = OpAccessChain %_ptr_PushConstant_uint %__0 %int_0
+         %37 = OpLoad %uint %36
+         %39 = OpAccessChain %_ptr_UniformConstant_32 %ImageHeap1D %37
+         %40 = OpLoad %32 %39
+         %42 = OpImageRead %v4float %40 %int_0
+               OpBranch %30
+         %27 = OpLabel
+         %48 = OpAccessChain %_ptr_PushConstant_uint %__0 %int_0
+         %49 = OpLoad %uint %48
+         %51 = OpAccessChain %_ptr_UniformConstant_44 %ImageHeap2D %49
+         %52 = OpLoad %44 %51
+         %55 = OpImageRead %v4float %52 %54
+               OpBranch %30
+         %28 = OpLabel
+         %61 = OpAccessChain %_ptr_PushConstant_uint %__0 %int_0
+         %62 = OpLoad %uint %61
+         %64 = OpAccessChain %_ptr_UniformConstant_57 %ImageHeap3D %62
+         %65 = OpLoad %57 %64
+         %68 = OpImageRead %v4float %65 %67
+               OpBranch %30
+         %30 = OpLabel
+               OpReturn
+               OpFunctionEnd
