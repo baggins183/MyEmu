@@ -1,6 +1,4 @@
-#find_package(LLVM PATHS /opt/llvm-git/lib/cmake/llvm/ NO_DEFAULT_PATH REQUIRED CONFIG)
-#find_package(LLVM PATHS "$ENV{HOME}/programming/llvm-project/build/lib/cmake/llvm/" NO_DEFAULT_PATH REQUIRED CONFIG)
-
+# TODO add LLVM as submodule and build automatically
 find_package(LLVM PATHS "$ENV{HOME}/programming/llvm-project/build/install/lib/cmake/llvm/" NO_DEFAULT_PATH REQUIRED CONFIG)
 find_package(MLIR PATHS "$ENV{HOME}/programming/llvm-project/build/install/lib/cmake/mlir/" NO_DEFAULT_PATH REQUIRED CONFIG)
 
@@ -32,10 +30,10 @@ set(LIBS
         ${conversion_libs}
         MLIRGcn
         LLVM
+        MLIR
+        SPIRV-Tools-link
 )
 
-#FILE(GLOB SOURCES *.cpp *.c)
-#add_llvm_executable(gcn-dis ${SOURCES})
 add_executable(gcn-dis disassembler.cpp utils.cpp)
 target_compile_options(gcn-dis PUBLIC -fno-rtti)
 target_link_libraries(gcn-dis PRIVATE ${LIBS})

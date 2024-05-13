@@ -9,8 +9,10 @@
 #include "mlir/IR/Dialect.h"
 #include "mlir/IR/Location.h"
 #include "mlir/IR/MLIRContext.h"
+#include "mlir/IR/OwningOpRef.h"
 #include "mlir/IR/Value.h"
 #include "mlir/IR/Visitors.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
@@ -43,7 +45,9 @@ namespace fs = std::filesystem;
 #include "llvm/Support/InitLLVM.h"
 #include "llvm/Support/TargetSelect.h"
 #include "mlir/Dialect/SPIRV/IR/SPIRVDialect.h"
+
 #include "mlir/Target/SPIRV/Serialization.h"
+#include "mlir/Target/SPIRV/Deserialization.h"
 #include "mlir/Dialect/SPIRV/IR/SPIRVOps.h"
 #include "mlir/IR/ImplicitLocOpBuilder.h"
 #include "llvm/MC/MCDisassembler/MCDisassembler.h"
@@ -51,10 +55,17 @@ namespace fs = std::filesystem;
 #include "GcnBinary.h"
 #include "utils.h"
 
+#define GET_INSTRINFO_ENUM 1
 #include "AMDGPUGenInstrInfo_INSTRINFO.inc"
+#define GET_REGINFO_ENUM 1
 #include "AMDGPUGenRegisterInfo_REGINFO.inc"
 #include "SIDefines.h"
 
+#include "spirv-tools/linker.hpp"
+
+namespace SpirvHelperModules {
+#include "SpirvLibs/libMiscHelpers.spv.h"
+};
 
 using namespace llvm;
 using namespace mlir::spirv;
@@ -79,6 +90,25 @@ std::optional<fs::path> getSpirvAsmDumpPath() { return !SpirvAsmDumpPath.empty()
 std::optional<fs::path> getMlirDumpPath() { return !MlirDumpPath.empty() ? MlirDumpPath.getValue() : (!DumpAllPath.empty() ? DumpAllPath.getValue() : std::optional<fs::path>() ); }
 
 static int FileNum = 0;
+
+static bool readFileBytes(fs::path filepath, std::vector<uint8_t> &bytes) {
+    bool success = true;
+    FILE *f = fopen(filepath.c_str(), "r");
+    if (!f) {
+        printf("Couldn't open %s for reading\n", filepath.c_str());
+        return 1;
+    }
+    fseek(f, 0, SEEK_END);
+    size_t len = ftell(f);
+    bytes.resize(len);
+    fseek(f, 0, SEEK_SET);
+    if (1 != fread(bytes.data(), len, 1, f)) {
+        printf("Error reading from %s: %s\n", filepath.c_str(), strerror(errno));
+        success = false;
+    }
+    fclose(f);
+    return success;
+}
 
 std::unique_ptr<raw_fd_ostream> createDumpFile(fs::path prefix, fs::path extension, int number) {
     std::unique_ptr<raw_fd_ostream> ptr;
@@ -336,7 +366,7 @@ GcnRegType regnoToType(uint regno) {
     return GcnRegType::Special;
 }
 
-typedef llvm::SmallVector<uint32_t, 0> SpirvBytecodeVector;
+typedef std::vector<uint32_t> SpirvBytecodeVector;
 
 class SpirvConvertResult {
 public:
@@ -496,6 +526,7 @@ public:
     GcnToSpirvConverter(const std::vector<MCInst> &machineCode, ExecutionModel execModel, SrdMode srdMode, std::vector<InputUsageSlot> srdSlots, const MCSubtargetInfo *STI, MCInstPrinter *IP):
         mlirContext(), 
         builder(mlir::UnknownLoc::get(&mlirContext), &mlirContext),
+        functionBuilder(mlir::UnknownLoc::get(&mlirContext), &mlirContext),
         execModel(execModel),
         machineCode(machineCode),
         status(SpirvConvertResult::empty),
@@ -530,6 +561,8 @@ public:
         auto dwordArrayType = RuntimeArrayType::get(intTy, 4);
         ssboBlockDwordPtrType = PointerType::get(dwordArrayType, StorageClass::PhysicalStorageBuffer);
 
+        initSpirvLibraries();
+
 #if defined(_DEBUG)
         ThreadIP = IP;
         ThreadSTI = STI;
@@ -558,6 +591,103 @@ private:
     ConstantOp getI32Const(int n) { return builder.create<ConstantOp>(intTy, builder.getI32IntegerAttr(n)); }
     ConstantOp getI64Const(int n) { return builder.create<ConstantOp>(int64Ty, builder.getI64IntegerAttr(n)); }
     ConstantOp getI8Const(int n) { return builder.create<ConstantOp>(int8Ty, builder.getI8IntegerAttr(n)); }
+
+    enum SpirvLibrary {
+        MISC_HELPER_FUNCTIONS,
+        NUM_SPIRV_LIBRARIES
+    };
+
+    std::array<ArrayRef<uint32_t>, NUM_SPIRV_LIBRARIES> spirvLibraries;
+    std::array<bool, NUM_SPIRV_LIBRARIES> usedSpirvLibraries {};
+
+    void initSpirvLibraries() {
+        spirvLibraries[MISC_HELPER_FUNCTIONS] = ArrayRef(reinterpret_cast<const uint32_t *>(SpirvHelperModules::g_miscHelpersBytes)
+                , sizeof(SpirvHelperModules::g_miscHelpersBytes) / 4);
+    }
+
+    ArrayRef<uint32_t> loadSpirvLibrary(SpirvLibrary library) {
+        usedSpirvLibraries[library] = true;
+        return spirvLibraries[library];
+    }
+
+    // For now assume no overloading - all names unique
+    // TODO: enumerate all library functions? Make table w/ names and types?
+    llvm::StringMap<FuncOp> libraryFunctionDeclarations;
+
+    FuncOp getOrInsertLibraryCallDecl(StringRef name, SmallVector<mlir::Type, 4> paramValueTypes, mlir::Type retTy) {
+        auto it = libraryFunctionDeclarations.find(name);
+        if (it != libraryFunctionDeclarations.end()) {
+            return it->second;
+        }
+
+        llvm::SmallVector<mlir::Type, 4> paramRefTypes;
+        for (mlir::Type valueType: paramValueTypes) {
+            // For now convert all params to pointer type.
+            // TODO match the spir-v generator (only do vectors and primitives?)
+            mlir::Type refType = PointerType::get(valueType, StorageClass::Function);
+            paramRefTypes.push_back(refType);
+        }
+
+        mlir::FunctionType fTy = mlir::FunctionType::get(&mlirContext, paramRefTypes, retTy);
+        auto fn = functionBuilder.create<FuncOp>(name, fTy);
+        fn.setLinkageAttributesAttr(LinkageAttributesAttr::get(&mlirContext, functionBuilder.getStringAttr(name), LinkageTypeAttr::get(&mlirContext, LinkageType::Import)));
+
+        libraryFunctionDeclarations[name] = fn;
+        return fn;
+    }
+
+    FunctionCallOp createLibraryCall(FuncOp fn, ArrayRef<mlir::Value> args) {
+        mlir::FunctionType fTy = fn.getFunctionType();
+        auto ref = mlir::FlatSymbolRefAttr::get(fn);
+
+        // Create OpVariables for each arg and store the args to those.
+        // Pass the OpVariable to the call.
+        // The OpFunctionParameters will be setup as pointers,
+        // since that's what glslang and dxc generate.
+        SmallVector<mlir::Value, 4> spirvParams;
+        for (uint i = 0; i < args.size(); i++) {
+            auto arg = args[i];
+            SmallString<24> paramName;
+            Twine twine;
+            twine.concat(fn->getName().getStringRef())
+                    .concat(".param")
+                    .concat(Twine(i))
+                    .toStringRef(paramName);
+            VariableOp param = buildTempReg(paramName, arg.getType());
+
+            builder.create<StoreOp>(param, arg);
+            spirvParams.push_back(param);
+        }
+
+        return builder.create<FunctionCallOp>(fTy.getResult(0), ref, spirvParams);
+    }
+
+    bool linkSpirvModules(SpirvBytecodeVector mainModule, const std::vector<ArrayRef<uint32_t>> &libraries, SpirvBytecodeVector &linkedModule) {
+        spvtools::Context spvtoolsCtx(spv_target_env::SPV_ENV_VULKAN_1_3);
+        spvtoolsCtx.SetMessageConsumer([](spv_message_level_t /* level */, const char* /* source */,
+                const spv_position_t& /* position */, const char* message) {
+            llvm::errs() << message << "\n";
+        });
+
+        std::vector<const uint32_t *> allInputModules;
+        std::vector<size_t> moduleSizes;
+
+        allInputModules.push_back(mainModule.data());
+        moduleSizes.push_back(mainModule.size());
+
+        for (auto lib: libraries) {
+            allInputModules.push_back(lib.data());
+            moduleSizes.push_back(lib.size());
+        }
+
+        spvtools::LinkerOptions linkOptions;
+        linkOptions.SetVerifyIds(true);
+        linkOptions.SetCreateLibrary(false);
+        
+        //spvtoolsCtx.SetMessageConsumer(MessageConsumer consumer)
+        auto res = spvtools::Link(spvtoolsCtx, allInputModules.data(), moduleSizes.data(), allInputModules.size(), &linkedModule, linkOptions);
+        return res == SPV_SUCCESS;
+    }
 
     // build a VariableOp for the CC (condition code) register, and attach a name
     CCReg buildCCReg(llvm::StringRef name) {
@@ -1385,6 +1515,7 @@ private:
 
     mlir::MLIRContext mlirContext;
     mlir::ImplicitLocOpBuilder builder;
+    mlir::ImplicitLocOpBuilder functionBuilder;
     ExecutionModel execModel;
 
     std::vector<MCInst> machineCode;
@@ -1434,8 +1565,6 @@ private:
     mlir::IntegerType boolTy;
     mlir::VectorType v2intTy;
     mlir::VectorType v3intTy;
-
-    //mlir::VariableOp
 
     // struct has 2 u32 members.
     // This is used for a lot of carry procducing int ops, i.e. V_ADD_I32 -> OpIAddCarry
@@ -3646,26 +3775,35 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
         }
 
         default:
+        {
+            static bool flag = false;
+            if ( !flag) {
+                // Test
+                loadSpirvLibrary(SpirvLibrary::MISC_HELPER_FUNCTIONS);
+
+                FuncOp fn = getOrInsertLibraryCallDecl("mySum", {floatTy, floatTy}, floatTy);
+                createLibraryCall(fn, {getF32Const(7.7), getF32Const(8.8)});
+            }
             if (!Quiet) {
                 llvm::errs() << "Unhandled instruction: \n";
                 IP->printInst(&MI, 0, "", *STI, llvm::errs());
                 llvm::errs() << "\n";
             }
             return false;
+        }
     }
     return true;
 }
 
 bool GcnToSpirvConverter::buildSpirvDialect() {
     bool success = true;
-    moduleOp = builder.create<ModuleOp>(AddressingModel::PhysicalStorageBuffer64, MemoryModel::GLSL450);
+    moduleOp = functionBuilder.create<ModuleOp>(AddressingModel::PhysicalStorageBuffer64, MemoryModel::GLSL450);
     mlir::Region &region = moduleOp.getBodyRegion();
-    //mlir::Block &entryBlock = region.emplaceBlock();
     assert(region.hasOneBlock());
-    builder.setInsertionPointToEnd(&(*region.begin()));
+    functionBuilder.setInsertionPointToEnd(&(*region.begin()));
 
-    mlir::FunctionType mainFTy = mlir::FunctionType::get(&mlirContext, {}, builder.getNoneType());
-    mainFn = builder.create<FuncOp>("main", mainFTy);
+    mlir::FunctionType mainFTy = mlir::FunctionType::get(&mlirContext, {}, functionBuilder.getNoneType());
+    mainFn = functionBuilder.create<FuncOp>("main", mainFTy);
 
     assert(mainFn->getNumRegions() == 1);
     mlir::Region &mainRegion = mainFn->getRegion(0);
@@ -3721,9 +3859,9 @@ bool GcnToSpirvConverter::finalizeModule() {
 
     // TODO be conservative with Capabilities/extensions
     llvm::SmallVector<Capability, 8> caps = { Capability::Shader, Capability::Float16, Capability::Int16, Capability::Int64, Capability::PhysicalStorageBufferAddresses, Capability::ImageQuery,
-            Capability::StorageImageReadWithoutFormat, Capability::StorageImageWriteWithoutFormat, Capability::Sampled1D, Capability::Int8 };
+            Capability::StorageImageReadWithoutFormat, Capability::StorageImageWriteWithoutFormat, Capability::Sampled1D, Capability::Int8, Capability::Linkage };
     llvm::SmallVector<Extension, 4> exts = { Extension::SPV_EXT_descriptor_indexing, Extension::SPV_KHR_physical_storage_buffer };
-    auto vceTriple = VerCapExtAttr::get(Version::V_1_5, caps, exts, &mlirContext);
+    auto vceTriple = VerCapExtAttr::get(Version::V_1_6, caps, exts, &mlirContext);
     moduleOp->setAttr("vce_triple", vceTriple);
 
     if (auto dumpPath = getMlirDumpPath()) {
@@ -3750,8 +3888,56 @@ bool GcnToSpirvConverter::generateSpirvBytecode() {
         }
     });
 
-    auto res = mlir::spirv::serialize(moduleOp, spirvModule);
-    return res.succeeded();
+    {
+        // Stupid vector copy
+        llvm::SmallVector<uint32_t, 0> tempSpirvModule;
+        auto res = mlir::spirv::serialize(moduleOp, tempSpirvModule);
+        if (res.failed()) {
+            return false;
+        }
+        spirvModule.resize(tempSpirvModule.size());
+        std::copy(tempSpirvModule.begin(), tempSpirvModule.end(), spirvModule.begin());
+    }
+
+    std::vector<ArrayRef<uint32_t>> inputLibs;
+    for (uint i = 0 ; i < spirvLibraries.size(); i++) {
+        if (usedSpirvLibraries[i]) {
+            inputLibs.push_back(spirvLibraries[i]);
+        }
+    }
+    bool needsLink = !inputLibs.empty();
+    if (needsLink) {
+        if (auto dumpPath = getSpirvDumpPath()) {
+            auto outfile = createDumpFile(dumpPath.value(), "-before-link.spv", FileNum);
+            if (outfile) {
+                outfile->write(reinterpret_cast<const char *>(spirvModule.data()), spirvModule.size() * sizeof(uint32_t));
+                if (outfile->has_error()) {
+                    printf("Couldn't dump spirv bytecode to file %s\n", dumpPath.value().c_str());
+                    return 1;
+                }
+            }
+        }
+
+        std::vector<uint32_t> linkedModule;
+        if ( !linkSpirvModules(spirvModule, inputLibs, linkedModule)) {
+            return false;
+        }
+        spirvModule = std::move(linkedModule);
+    }
+
+    if (auto dumpPath = getSpirvDumpPath()) {
+        std::string extension = needsLink ? "-after-link.spv" : ".spv";
+        auto outfile = createDumpFile(dumpPath.value(), "-after-link.spv", FileNum);
+        if (outfile) {
+            outfile->write(reinterpret_cast<const char *>(spirvModule.data()), spirvModule.size() * sizeof(uint32_t));
+            if (outfile->has_error()) {
+                printf("Couldn't dump spirv bytecode to file %s\n", dumpPath.value().c_str());
+                return 1;
+            }
+        }
+    }
+
+    return true;
 }
 
 SpirvConvertResult GcnToSpirvConverter::convert() {
@@ -3843,17 +4029,6 @@ bool decodeAndConvertGcnCode(const std::vector<unsigned char> &gcnBytecode, Exec
     SpirvConvertResult result = converter.convert();
     SpirvBytecodeVector spirvModule = result.takeSpirvModule();
 
-    if (auto dumpPath = getSpirvDumpPath()) {
-        auto outfile = createDumpFile(dumpPath.value(), ".spv", FileNum);
-        if (outfile) {
-            outfile->write(reinterpret_cast<const char *>(spirvModule.data()), spirvModule.size_in_bytes());
-            if (outfile->has_error()) {
-                printf("Couldn't dump spirv bytecode to file %s\n", dumpPath.value().c_str());
-                return 1;
-            }
-        }
-    }
-
     llvm_shutdown();
     return result;
 }
@@ -3865,19 +4040,10 @@ int main(int argc, char **argv) {
     cl::HideUnrelatedOptions(MyCategory);
     cl::ParseCommandLineOptions(argc, argv);
 
-    FILE *gcnFile = fopen(InputGcnPath.c_str(), "r");
-    if (!gcnFile) {
-        printf("Couldn't open %s for reading\n", InputGcnPath.c_str());
+    if (!readFileBytes(InputGcnPath.getValue(), buf)) {
         return 1;
     }
-    fseek(gcnFile, 0, SEEK_END);
-    size_t len = ftell(gcnFile);
-    buf.resize(len);
-    fseek(gcnFile, 0, SEEK_SET);
-    if (1 != fread(buf.data(), len, 1, gcnFile)) {
-        printf("Error reading from %s: %s\n", InputGcnPath.c_str(), strerror(errno));
-        return 1;
-    }
+    size_t len = buf.size();
 
     const char *magic = "OrbShdr";
     const uint32_t fileHeaderMagic = 0x72646853; // "Shdr"

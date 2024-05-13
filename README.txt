@@ -152,3 +152,12 @@ TODO - add llvm fork as submodule and generalize CMakeLists.txt
 
 Building project
 cmake <project_root> [-G <whatever>]
+
+
+
+dependencies:
+llvm (my fork) - including MLIR
+spirv-tools (spirv-link)
+spirv-headers
+nlohmann-json
+...

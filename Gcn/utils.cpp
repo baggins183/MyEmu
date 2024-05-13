@@ -1,4 +1,5 @@
 #include "utils.h"
+#define GET_INSTRINFO_ENUM 1
 #include "AMDGPUGenInstrInfo_INSTRINFO.inc"
 #include <cassert>
 #include <unordered_map>
