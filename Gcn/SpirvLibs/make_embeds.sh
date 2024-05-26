@@ -16,4 +16,5 @@
 #    shift
 #done
 
-dxc -spirv libMiscHelpers.hlsl -T lib_6_7 -fspv-target-env=vulkan1.3 -Fh libMiscHelpers.spv.h -Vn g_miscHelpersBytes
+dxc -spirv libMiscHelpers.hlsl  -T lib_6_7 -fspv-target-env=vulkan1.3 -Fh libMiscHelpers.spv.h  -Vn g_miscHelpersBytes
+dxc -spirv libImageHelpers.hlsl -T lib_6_7 -fspv-target-env=vulkan1.3 -Fh libImageHelpers.spv.h -Vn g_imageHelpersBytes

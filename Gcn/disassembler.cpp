@@ -63,9 +63,7 @@ namespace fs = std::filesystem;
 
 #include "spirv-tools/linker.hpp"
 
-namespace SpirvHelperModules {
-#include "SpirvLibs/libMiscHelpers.spv.h"
-};
+#include "SpirvLibs/all_libs.h"
 
 using namespace llvm;
 using namespace mlir::spirv;
@@ -555,6 +553,7 @@ public:
         boolTy = builder.getI1Type();
         v2intTy = mlir::VectorType::get({2}, intTy);
         v3intTy = mlir::VectorType::get({3}, intTy);
+        v4intTy = mlir::VectorType::get({4}, intTy);
 
         arithCarryTy = StructType::get({ intTy, intTy });
 
@@ -594,6 +593,7 @@ private:
 
     enum SpirvLibrary {
         MISC_HELPER_FUNCTIONS,
+        IMAGE_HELPER_FUNCTIONS,
         NUM_SPIRV_LIBRARIES
     };
 
@@ -603,6 +603,8 @@ private:
     void initSpirvLibraries() {
         spirvLibraries[MISC_HELPER_FUNCTIONS] = ArrayRef(reinterpret_cast<const uint32_t *>(SpirvHelperModules::g_miscHelpersBytes)
                 , sizeof(SpirvHelperModules::g_miscHelpersBytes) / 4);
+        spirvLibraries[IMAGE_HELPER_FUNCTIONS] = ArrayRef(reinterpret_cast<const uint32_t *>(SpirvHelperModules::g_imageHelpersBytes)
+                , sizeof(SpirvHelperModules::g_imageHelpersBytes) / 4);
     }
 
     ArrayRef<uint32_t> loadSpirvLibrary(SpirvLibrary library) {
@@ -1236,11 +1238,11 @@ private:
         uint mods = operandMods.getImm();
         mlir::Value rv = src;
         if (mods & SISrcMods::ABS) {
-            assert(src.getType().isa<mlir::FloatType>());
+            assert(mlir::isa<mlir::FloatType>(src.getType()));
             rv = builder.create<GLFAbsOp>(rv);
         }
         if (mods & SISrcMods::NEG) {
-            assert(src.getType().isa<mlir::FloatType>());
+            assert(mlir::isa<mlir::FloatType>(src.getType()));
             rv = builder.create<FNegateOp>(rv);
         }
         return rv;
@@ -1253,10 +1255,10 @@ private:
         mlir::Type resultTy = result.getType();
         if (clamp) {
             assert(!(clamp & ~1));
-            assert(resultTy.isa<mlir::FloatType>());
+            assert(mlir::isa<mlir::FloatType>(resultTy));
             rv = builder.create<GLFClampOp>(resultTy, rv, getZero(resultTy), getOne(resultTy));
         }
-        assert(!omod || resultTy.isa<mlir::FloatType>());
+        assert(!omod || mlir::isa<mlir::FloatType>(resultTy));
         switch(omod) {
             case 0:
                 break;
@@ -1565,6 +1567,7 @@ private:
     mlir::IntegerType boolTy;
     mlir::VectorType v2intTy;
     mlir::VectorType v3intTy;
+    mlir::VectorType v4intTy;
 
     // struct has 2 u32 members.
     // This is used for a lot of carry procducing int ops, i.e. V_ADD_I32 -> OpIAddCarry
@@ -2975,7 +2978,7 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
                         break;
                 }
             } else {
-                assert(argTy.isa<mlir::IntegerType>());
+                assert(mlir::isa<mlir::IntegerType>(argTy));
                 switch (cmpOp) {
                     case GcnCmp::F:
                         ccOut = getZero(boolTy);
@@ -3779,10 +3782,13 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
             static bool flag = false;
             if ( !flag) {
                 // Test
-                loadSpirvLibrary(SpirvLibrary::MISC_HELPER_FUNCTIONS);
+                (void)loadSpirvLibrary(SpirvLibrary::MISC_HELPER_FUNCTIONS);
+                (void)loadSpirvLibrary(SpirvLibrary::IMAGE_HELPER_FUNCTIONS);
 
-                FuncOp fn = getOrInsertLibraryCallDecl("mySum", {floatTy, floatTy}, floatTy);
-                createLibraryCall(fn, {getF32Const(7.7), getF32Const(8.8)});
+                //FuncOp fn = getOrInsertLibraryCallDecl("mySum", {floatTy, floatTy}, floatTy);
+                // TODO use spirv reflection to automatically lookup function and types: also deserialize to mlir?
+                FuncOp fn = getOrInsertLibraryCallDecl("imageLoadHelper", {intTy, v3intTy }, v4intTy);
+                createLibraryCall(fn, { getZero(intTy), getZero(v3intTy), getZero(intTy) });
             }
             if (!Quiet) {
                 llvm::errs() << "Unhandled instruction: \n";
