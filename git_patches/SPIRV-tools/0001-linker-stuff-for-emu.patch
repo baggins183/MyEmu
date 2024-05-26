@@ -1,0 +1,92 @@
+From 8d7accec6eb4ca099713cecdb4db70f3e9a362ee Mon Sep 17 00:00:00 2001
+From: Frodo Baggins <baggins31084@proton.me>
+Date: Sun, 26 May 2024 10:48:05 -0700
+Subject: [PATCH] linker stuff for emu
+
+---
+ source/link/linker.cpp | 27 +++++++++++++++++++++++++--
+ tools/diff/diff.cpp    |  2 +-
+ 2 files changed, 26 insertions(+), 3 deletions(-)
+
+diff --git a/source/link/linker.cpp b/source/link/linker.cpp
+index 58930e45..7e77736c 100644
+--- a/source/link/linker.cpp
++++ b/source/link/linker.cpp
+@@ -41,6 +41,8 @@
+ #include "source/util/make_unique.h"
+ #include "source/util/string_utils.h"
+ #include "spirv-tools/libspirv.hpp"
++#include "spirv/unified1/spirv.hpp"
++#include "spirv/unified1/spirv.hpp11"
+ 
+ namespace spvtools {
+ namespace {
+@@ -240,6 +242,25 @@ spv_result_t GenerateHeader(const MessageConsumer& consumer,
+   return SPV_SUCCESS;
+ }
+ 
++// Return true if we can merge the addressing models.
++// Pick the more permissive addressing model if they are compatible
++ bool mergeAddressingModels(uint32_t linked_addressing_model, uint32_t module_addressing_model, uint32_t &merged_model) {
++  if (linked_addressing_model > module_addressing_model) {
++    std::swap(linked_addressing_model, module_addressing_model);
++  }
++
++  if (linked_addressing_model == module_addressing_model) {
++    merged_model = linked_addressing_model;
++    return true;
++  }
++  if (spv::AddressingModel(linked_addressing_model) == spv::AddressingModel::Logical
++      && spv::AddressingModel(module_addressing_model) == spv::AddressingModel::PhysicalStorageBuffer64) {
++    merged_model = uint32_t(spv::AddressingModel::PhysicalStorageBuffer64);
++    return true;
++  }
++  return false;
++}
++
+ spv_result_t MergeModules(const MessageConsumer& consumer,
+                           const std::vector<Module*>& input_modules,
+                           const AssemblyGrammar& grammar,
+@@ -274,7 +295,7 @@ spv_result_t MergeModules(const MessageConsumer& consumer,
+     return DiagnosticStream(position, consumer, "", SPV_ERROR_INVALID_BINARY)
+            << "Input module 1 is lacking an OpMemoryModel instruction.";
+   }
+-  const uint32_t linked_addressing_model =
++  uint32_t linked_addressing_model =
+       linked_memory_model_inst->GetSingleWordOperand(0u);
+   const uint32_t linked_memory_model =
+       linked_memory_model_inst->GetSingleWordOperand(1u);
+@@ -289,7 +310,8 @@ spv_result_t MergeModules(const MessageConsumer& consumer,
+ 
+     const uint32_t module_addressing_model =
+         memory_model_inst->GetSingleWordOperand(0u);
+-    if (module_addressing_model != linked_addressing_model) {
++    bool addr_models_compatible = mergeAddressingModels(linked_addressing_model, module_addressing_model, linked_addressing_model);
++    if (!addr_models_compatible) {
+       spv_operand_desc linked_desc = nullptr, module_desc = nullptr;
+       grammar.lookupOperand(SPV_OPERAND_TYPE_ADDRESSING_MODEL,
+                             linked_addressing_model, &linked_desc);
+@@ -317,6 +339,7 @@ spv_result_t MergeModules(const MessageConsumer& consumer,
+   }
+   linked_module->SetMemoryModel(std::unique_ptr<Instruction>(
+       linked_memory_model_inst->Clone(linked_context)));
++  linked_module->GetMemoryModel()->SetOperand(0u, { uint32_t(linked_addressing_model) });
+ 
+   std::vector<std::pair<uint32_t, std::string>> entry_points;
+   for (const auto& module : input_modules)
+diff --git a/tools/diff/diff.cpp b/tools/diff/diff.cpp
+index 2217896c..b9fcae51 100644
+--- a/tools/diff/diff.cpp
++++ b/tools/diff/diff.cpp
+@@ -87,7 +87,7 @@ std::unique_ptr<spvtools::opt::IRContext> load_module(const char* path) {
+     return spvtools::BuildModule(
+         kDefaultEnvironment, spvtools::utils::CLIMessageConsumer,
+         std::string(contents.begin(), contents.end()),
+-        spvtools::SpirvTools::kDefaultAssembleOption |
++        uint32_t(spvtools::SpirvTools::kDefaultAssembleOption) |
+             SPV_TEXT_TO_BINARY_OPTION_PRESERVE_NUMERIC_IDS);
+   }
+ 
+-- 
+2.45.0
+
