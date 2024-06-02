@@ -106,7 +106,7 @@ export uint4 imageLoadHelper(uint heapIdx, uint3 coords) {
             texel = readTexel(Image2DHeap[heapIdx], coords.xy, numChannels);
             break;
         case Dim::Dim3D:
-            texel = readTexel(Image3DHeap[heapIdx], coords.xyz, numChannels);
+            texel = readTexel(Image3DHeap[heapIdx], coords.xyz, numChannels); 
             break;
         default:
             // unhandled

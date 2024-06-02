@@ -62,6 +62,7 @@ namespace fs = std::filesystem;
 #include "SIDefines.h"
 
 #include "spirv-tools/linker.hpp"
+#include "spirv-tools/libspirv.hpp"
 
 #include "SpirvLibs/all_libs.h"
 
@@ -134,6 +135,17 @@ std::unique_ptr<raw_fd_ostream> createDumpFile(fs::path prefix, fs::path extensi
         printf("Couldn't open dump file %s: %s\n", fullPath.c_str(), ec.message().c_str());
     }
     return ptr;
+}
+
+bool dumpToFile(fs::path prefix, fs::path extension, int number, const unsigned char *data, size_t len) {
+    auto outfile = createDumpFile(prefix, extension, number);
+    if (outfile) {
+        outfile->write(reinterpret_cast<const char *>(data), len);
+        if (!outfile->has_error()) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // Input vertex attributes (interpolated in frag stage)
@@ -665,11 +677,20 @@ private:
     }
 
     bool linkSpirvModules(SpirvBytecodeVector mainModule, const std::vector<ArrayRef<uint32_t>> &libraries, SpirvBytecodeVector &linkedModule) {
-        spvtools::Context spvtoolsCtx(spv_target_env::SPV_ENV_VULKAN_1_3);
-        spvtoolsCtx.SetMessageConsumer([](spv_message_level_t /* level */, const char* /* source */,
+        spvtools::Context linkContext(spv_target_env::SPV_ENV_VULKAN_1_3);
+        spvtools::SpirvTools spirvTools(spv_target_env::SPV_ENV_VULKAN_1_3);
+
+        std::vector<const char *> messages;
+        auto messageConsumer = [&messages](spv_message_level_t /* level */, const char* /* source */,
                 const spv_position_t& /* position */, const char* message) {
-            llvm::errs() << message << "\n";
-        });
+            messages.push_back(message);
+            //llvm::errs() << message << "\n";
+        };
+
+        spirvTools.SetMessageConsumer(messageConsumer);
+        linkContext.SetMessageConsumer(messageConsumer);
+
+        //spirvTools.Validate(mainModule);
 
         std::vector<const uint32_t *> allInputModules;
         std::vector<size_t> moduleSizes;
@@ -686,8 +707,22 @@ private:
         linkOptions.SetVerifyIds(true);
         linkOptions.SetCreateLibrary(false);
         
-        //spvtoolsCtx.SetMessageConsumer(MessageConsumer consumer)
-        auto res = spvtools::Link(spvtoolsCtx, allInputModules.data(), moduleSizes.data(), allInputModules.size(), &linkedModule, linkOptions);
+        auto res = spvtools::Link(linkContext, allInputModules.data(), moduleSizes.data(), allInputModules.size(), &linkedModule, linkOptions);
+        if (!messages.empty()) {
+            llvm::errs() << "SPIR-V failed link:\n";
+            for (const char *message: messages) {
+                llvm::errs() << message << "\n";
+            }
+        }
+        messages.clear();
+
+        spirvTools.Validate(linkedModule);
+        if (!messages.empty()) {
+            llvm::errs() << "SPIR-V failed validation:\n";
+            for (const char *message: messages) {
+                llvm::errs() << message << "\n";
+            }
+        }
         return res == SPV_SUCCESS;
     }
 
@@ -3788,7 +3823,7 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
                 //FuncOp fn = getOrInsertLibraryCallDecl("mySum", {floatTy, floatTy}, floatTy);
                 // TODO use spirv reflection to automatically lookup function and types: also deserialize to mlir?
                 FuncOp fn = getOrInsertLibraryCallDecl("imageLoadHelper", {intTy, v3intTy }, v4intTy);
-                createLibraryCall(fn, { getZero(intTy), getZero(v3intTy), getZero(intTy) });
+                createLibraryCall(fn, { getZero(intTy), getZero(v3intTy) });
             }
             if (!Quiet) {
                 llvm::errs() << "Unhandled instruction: \n";
@@ -3864,7 +3899,7 @@ bool GcnToSpirvConverter::finalizeModule() {
     }
 
     // TODO be conservative with Capabilities/extensions
-    llvm::SmallVector<Capability, 8> caps = { Capability::Shader, Capability::Float16, Capability::Int16, Capability::Int64, Capability::PhysicalStorageBufferAddresses, Capability::ImageQuery,
+    llvm::SmallVector<Capability, 8> caps = { Capability::Shader, Capability::Float64, Capability::Float16, Capability::Int16, Capability::Int64, Capability::PhysicalStorageBufferAddresses, Capability::ImageQuery,
             Capability::StorageImageReadWithoutFormat, Capability::StorageImageWriteWithoutFormat, Capability::Sampled1D, Capability::Int8, Capability::Linkage };
     llvm::SmallVector<Extension, 4> exts = { Extension::SPV_EXT_descriptor_indexing, Extension::SPV_KHR_physical_storage_buffer };
     auto vceTriple = VerCapExtAttr::get(Version::V_1_6, caps, exts, &mlirContext);
@@ -3911,15 +3946,22 @@ bool GcnToSpirvConverter::generateSpirvBytecode() {
             inputLibs.push_back(spirvLibraries[i]);
         }
     }
+
+    spvtools::SpirvTools spirvTools(spv_target_env::SPV_ENV_VULKAN_1_3);
+
     bool needsLink = !inputLibs.empty();
     if (needsLink) {
         if (auto dumpPath = getSpirvDumpPath()) {
-            auto outfile = createDumpFile(dumpPath.value(), "-before-link.spv", FileNum);
-            if (outfile) {
-                outfile->write(reinterpret_cast<const char *>(spirvModule.data()), spirvModule.size() * sizeof(uint32_t));
-                if (outfile->has_error()) {
-                    printf("Couldn't dump spirv bytecode to file %s\n", dumpPath.value().c_str());
-                    return 1;
+            if (!dumpToFile(dumpPath.value(), "-before-link.spv", FileNum, reinterpret_cast<unsigned char *>(spirvModule.data()), spirvModule.size() * sizeof(uint32_t))) {
+                printf("Couldn't dump spirv bytecode to file %s\n", dumpPath.value().c_str());
+            }
+        }
+
+        if (auto dumpPath = getSpirvAsmDumpPath()) {
+            std::string spvasm;
+            if (spirvTools.Disassemble(spirvModule, &spvasm)) {
+                if (!dumpToFile(dumpPath.value(), "-before-link.spvasm", FileNum, reinterpret_cast<const unsigned char *>(spvasm.c_str()), spvasm.size())) {
+                    printf("Couldn't dump spirv assembly to file %s\n", dumpPath.value().c_str());
                 }
             }
         }
@@ -3933,12 +3975,17 @@ bool GcnToSpirvConverter::generateSpirvBytecode() {
 
     if (auto dumpPath = getSpirvDumpPath()) {
         std::string extension = needsLink ? "-after-link.spv" : ".spv";
-        auto outfile = createDumpFile(dumpPath.value(), "-after-link.spv", FileNum);
-        if (outfile) {
-            outfile->write(reinterpret_cast<const char *>(spirvModule.data()), spirvModule.size() * sizeof(uint32_t));
-            if (outfile->has_error()) {
-                printf("Couldn't dump spirv bytecode to file %s\n", dumpPath.value().c_str());
-                return 1;
+        if (!dumpToFile(dumpPath.value(), extension, FileNum, reinterpret_cast<unsigned char *>(spirvModule.data()), spirvModule.size() * sizeof(uint32_t))) {
+            printf("Couldn't dump spirv bytecode to file %s\n", dumpPath.value().c_str());
+        }
+    }
+
+    if (auto dumpPath = getSpirvAsmDumpPath()) {
+        std::string spvasm;
+        if (spirvTools.Disassemble(spirvModule, &spvasm)) {
+            std::string extension = needsLink ? "-after-link.spvasm" : ".spvasm";
+            if (!dumpToFile(dumpPath.value(), extension, FileNum, reinterpret_cast<const unsigned char *>(spvasm.data()), spvasm.size())) {
+                printf("Couldn't dump spirv assembly to file %s\n", dumpPath.value().c_str());
             }
         }
     }
