@@ -378,30 +378,6 @@ GcnRegType regnoToType(uint regno) {
 
 typedef std::vector<uint32_t> SpirvBytecodeVector;
 
-class SpirvConvertResult {
-public:
-    enum ConvertStatus {
-        success,
-        fail,
-        empty,
-    };
-
-    operator bool() { return status == ConvertStatus::success; }
-
-    SpirvConvertResult(SpirvBytecodeVector &&spirvModule, ConvertStatus status):
-        module(std::move(spirvModule)), status(status) 
-        {}
-
-     SpirvBytecodeVector takeSpirvModule() {
-        assert(status == success);
-        return std::move(module);
-    }
-
-private:
-    SpirvBytecodeVector module;
-    ConvertStatus status;
-};
-
 #if defined(_DEBUG)
 // For printing from GDB
 thread_local MCInstPrinter *ThreadIP = nullptr;
@@ -539,7 +515,6 @@ public:
         functionBuilder(mlir::UnknownLoc::get(&mlirContext), &mlirContext),
         execModel(execModel),
         machineCode(machineCode),
-        status(SpirvConvertResult::empty),
         srdMode(srdMode),
         srdSlots(srdSlots),
         mainEntryBlock(nullptr),
@@ -580,7 +555,7 @@ public:
 #endif
     }
 
-    SpirvConvertResult convert();
+    bool convert(SpirvBytecodeVector &spirv);
 
 private:
     bool processSrds();
@@ -588,7 +563,7 @@ private:
     bool convertGcnOp(const MCInst &MI);
     bool buildSpirvDialect();
     bool finalizeModule();
-    bool generateSpirvBytecode();
+    bool generateSpirvBytecode(SpirvBytecodeVector &spirvModule);
 
     bool isVertexShader() { return execModel == ExecutionModel::Vertex; }
     bool isFragShader() { return execModel == ExecutionModel::Fragment; }
@@ -1556,8 +1531,6 @@ private:
     ExecutionModel execModel;
 
     std::vector<MCInst> machineCode;
-    SpirvBytecodeVector spirvModule;
-    SpirvConvertResult::ConvertStatus status;
 
     llvm::DenseMap<uint, VectorReg> usedVgprs;
     // Includes Sgprs (CC), EXEC, VCC, etc
@@ -3814,17 +3787,6 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
 
         default:
         {
-            static bool flag = false;
-            if ( !flag) {
-                // Test
-                (void)loadSpirvLibrary(SpirvLibrary::MISC_HELPER_FUNCTIONS);
-                (void)loadSpirvLibrary(SpirvLibrary::IMAGE_HELPER_FUNCTIONS);
-
-                //FuncOp fn = getOrInsertLibraryCallDecl("mySum", {floatTy, floatTy}, floatTy);
-                // TODO use spirv reflection to automatically lookup function and types: also deserialize to mlir?
-                FuncOp fn = getOrInsertLibraryCallDecl("imageLoadHelper", {intTy, v3intTy }, v4intTy);
-                createLibraryCall(fn, { getZero(intTy), getZero(v3intTy) });
-            }
             if (!Quiet) {
                 llvm::errs() << "Unhandled instruction: \n";
                 IP->printInst(&MI, 0, "", *STI, llvm::errs());
@@ -3918,7 +3880,8 @@ bool GcnToSpirvConverter::finalizeModule() {
     return true;
 }
 
-bool GcnToSpirvConverter::generateSpirvBytecode() {
+bool GcnToSpirvConverter::generateSpirvBytecode(SpirvBytecodeVector &spirvModule) {
+    assert(spirvModule.empty());
     // TODO - temp
     // strip off added attributes
     moduleOp.walk([&](mlir::Operation *op) {
@@ -3952,7 +3915,7 @@ bool GcnToSpirvConverter::generateSpirvBytecode() {
     bool needsLink = !inputLibs.empty();
     if (needsLink) {
         if (auto dumpPath = getSpirvDumpPath()) {
-            if (!dumpToFile(dumpPath.value(), "-before-link.spv", FileNum, reinterpret_cast<unsigned char *>(spirvModule.data()), spirvModule.size() * sizeof(uint32_t))) {
+            if ( !dumpToFile(dumpPath.value(), "-before-link.spv", FileNum, reinterpret_cast<unsigned char *>(spirvModule.data()), spirvModule.size() * sizeof(uint32_t))) {
                 printf("Couldn't dump spirv bytecode to file %s\n", dumpPath.value().c_str());
             }
         }
@@ -3960,7 +3923,7 @@ bool GcnToSpirvConverter::generateSpirvBytecode() {
         if (auto dumpPath = getSpirvAsmDumpPath()) {
             std::string spvasm;
             if (spirvTools.Disassemble(spirvModule, &spvasm)) {
-                if (!dumpToFile(dumpPath.value(), "-before-link.spvasm", FileNum, reinterpret_cast<const unsigned char *>(spvasm.c_str()), spvasm.size())) {
+                if ( !dumpToFile(dumpPath.value(), "-before-link.spvasm", FileNum, reinterpret_cast<const unsigned char *>(spvasm.c_str()), spvasm.size())) {
                     printf("Couldn't dump spirv assembly to file %s\n", dumpPath.value().c_str());
                 }
             }
@@ -3975,7 +3938,7 @@ bool GcnToSpirvConverter::generateSpirvBytecode() {
 
     if (auto dumpPath = getSpirvDumpPath()) {
         std::string extension = needsLink ? "-after-link.spv" : ".spv";
-        if (!dumpToFile(dumpPath.value(), extension, FileNum, reinterpret_cast<unsigned char *>(spirvModule.data()), spirvModule.size() * sizeof(uint32_t))) {
+        if ( !dumpToFile(dumpPath.value(), extension, FileNum, reinterpret_cast<unsigned char *>(spirvModule.data()), spirvModule.size() * sizeof(uint32_t))) {
             printf("Couldn't dump spirv bytecode to file %s\n", dumpPath.value().c_str());
         }
     }
@@ -3984,7 +3947,7 @@ bool GcnToSpirvConverter::generateSpirvBytecode() {
         std::string spvasm;
         if (spirvTools.Disassemble(spirvModule, &spvasm)) {
             std::string extension = needsLink ? "-after-link.spvasm" : ".spvasm";
-            if (!dumpToFile(dumpPath.value(), extension, FileNum, reinterpret_cast<const unsigned char *>(spvasm.data()), spvasm.size())) {
+            if ( !dumpToFile(dumpPath.value(), extension, FileNum, reinterpret_cast<const unsigned char *>(spvasm.data()), spvasm.size())) {
                 printf("Couldn't dump spirv assembly to file %s\n", dumpPath.value().c_str());
             }
         }
@@ -3993,17 +3956,18 @@ bool GcnToSpirvConverter::generateSpirvBytecode() {
     return true;
 }
 
-SpirvConvertResult GcnToSpirvConverter::convert() {
+bool GcnToSpirvConverter::convert(SpirvBytecodeVector &spirvModule) {
+    spirvModule.clear();
     if ( !buildSpirvDialect()) {
-        return SpirvConvertResult({}, SpirvConvertResult::fail);
+        return false;
     }
     if ( !finalizeModule()) {
-        return SpirvConvertResult({}, SpirvConvertResult::fail);
+        return false;
     }
-    if ( !generateSpirvBytecode()) {
-        return SpirvConvertResult({}, SpirvConvertResult::fail);
+    if ( !generateSpirvBytecode(spirvModule)) {
+        return false;
     }
-    return SpirvConvertResult(std::move(spirvModule), SpirvConvertResult::success);
+    return true;
 }
 
 bool decodeAndConvertGcnCode(const std::vector<unsigned char> &gcnBytecode, ExecutionModel execModel, SrdMode srdMode, std::vector<InputUsageSlot> srdSlots) {
@@ -4079,11 +4043,11 @@ bool decodeAndConvertGcnCode(const std::vector<unsigned char> &gcnBytecode, Exec
     }
 
     GcnToSpirvConverter converter(machineCode, execModel, srdMode, srdSlots, STI.get(), IP);
-    SpirvConvertResult result = converter.convert();
-    SpirvBytecodeVector spirvModule = result.takeSpirvModule();
+    SpirvBytecodeVector spirvModule;
+    bool res = converter.convert(spirvModule);
 
     llvm_shutdown();
-    return result;
+    return res;
 }
 
 int main(int argc, char **argv) {
@@ -4297,13 +4261,8 @@ int main(int argc, char **argv) {
         }
 
         if (auto dumpPath = getGcnBinaryDumpPath()) {
-            auto outfile = createDumpFile(dumpPath.value(), ".sb", FileNum);
-            if (outfile) {
-                outfile->write(reinterpret_cast<const char *>(fileHeader), fileHeader->m_codeSize + sizeof(ShaderFileHeader));
-                if (outfile->has_error()) {
-                    printf("Couldn't dump gcn bytecode to file %s\n", dumpPath.value().c_str());
-                    return 1;
-                }
+            if ( !dumpToFile(dumpPath.value(), ".sb", FileNum, reinterpret_cast<const unsigned char *>(fileHeader), fileHeader->m_codeSize + sizeof(ShaderFileHeader))) {
+                printf("Couldn't dump gcn bytecode to file %s\n", dumpPath.value().c_str());
             }
         }
 

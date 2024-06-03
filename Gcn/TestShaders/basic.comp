@@ -1,0 +1,13 @@
+#version 460
+
+layout (binding = 0) buffer InBlock {
+    int arr_in[];
+};
+
+layout (binding = 1) buffer OutBlock {
+    int arr_out[];
+};
+
+void main() {
+    uint idx = gl_localInvocationId;
+}
