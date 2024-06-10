@@ -507,6 +507,108 @@ enum SrdMode {
     FlatTable,
 };
 
+class SwitchBuilder {
+public:
+    SwitchBuilder(mlir::ImplicitLocOpBuilder &builder):
+        builder(builder), topLevelBlock(nullptr), caseCount(0), numTotalCases(-1), initialized(false),
+        inCase(false), val(nullptr) {}
+
+    // numCases includes default
+    void beginSwitch(mlir::Value targetVal, uint numCases) {
+        assert(!initialized);
+        numTotalCases = numCases;
+        topLevelBlock = builder.getBlock();
+        caseCount = 0;
+        inCase = false;
+        val = targetVal;
+
+        initialized = true;
+    }
+
+    void beginCase(mlir::Value caseVal) {
+        assert(!inCase);
+        assert((caseCount < numTotalCases) && "too many cases in switch");
+        mlir::Block *headerBlock, *thenBlock;
+
+        auto selection = builder.create<SelectionOp>(SelectionControl::None);
+        mlir::Region &selectionRegion = selection.getRegion();
+
+        headerBlock = &selectionRegion.emplaceBlock();
+        thenBlock = &selectionRegion.emplaceBlock();
+        mergeBlock = &selectionRegion.emplaceBlock();
+        if (caseCount == numTotalCases - 1) {
+            elseBlock = mergeBlock;
+        } else {
+            elseBlock = new mlir::Block();
+            elseBlock->insertBefore(mergeBlock);
+        }
+
+        builder.setInsertionPointToEnd(headerBlock);
+        mlir::Value cmp = builder.create<IEqualOp>(val, caseVal);
+        builder.create<BranchConditionalOp>(cmp, thenBlock, mlir::ValueRange(), elseBlock, mlir::ValueRange(), std::nullopt);
+        builder.setInsertionPointToEnd(thenBlock);
+
+        inCase = true;
+        ++caseCount;
+    }
+
+    void endCase() {
+        assert(inCase);
+        builder.create<BranchOp>(mergeBlock);
+
+        builder.setInsertionPointToEnd(mergeBlock);
+        builder.create<MergeOp>();
+
+        builder.setInsertionPointToEnd(elseBlock);
+        if (caseCount != numTotalCases) {
+            auto term = builder.create<BranchOp>(mergeBlock);
+            builder.setInsertionPoint(term);
+        }
+
+        inCase = false;
+    }
+
+    void endSwitch() {
+        assert((caseCount == numTotalCases) && "not enough cases in switch");
+        assert(!inCase);
+        builder.setInsertionPointToEnd(topLevelBlock);
+        initialized = false;
+    };
+
+// MLIR doesn't support OpSwitch right now, so make
+
+// switch (v) {
+//      case A:
+//          // do a
+//          break;
+//        case B:
+//          // do b
+//          break;
+//        ...
+//        case Z:
+//          // do z;
+//          break;
+//
+// }
+//
+// ->
+//
+// if (A) { // do a }
+// else if (B) { // do b }
+// ...
+// else if (Z) { // do z }    
+
+private:
+    mlir::ImplicitLocOpBuilder &builder;
+    mlir::Block *topLevelBlock;
+    int caseCount;
+    int numTotalCases;
+    bool initialized;
+    bool inCase;
+    mlir::Value val;
+    mlir::Block *elseBlock, *mergeBlock;
+};
+
 class GcnToSpirvConverter {
 public:
     GcnToSpirvConverter(const std::vector<MCInst> &machineCode, ExecutionModel execModel, SrdMode srdMode, std::vector<InputUsageSlot> srdSlots, const MCSubtargetInfo *STI, MCInstPrinter *IP):
@@ -3503,33 +3605,16 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
 
             mlir::Value texelTempReg = buildTempReg("imageLoadTexelTemp", texelTy);
             {
-                mlir::Block *topLevelBlock = builder.getBlock();
+                SwitchBuilder switchBuilder(builder);
+                std::array<mlir::spirv::Dim, 3> dimTypes = { Dim::Dim1D, Dim::Dim2D, Dim::Dim3D };
+                switchBuilder.beginSwitch(dimTypeVal, dimTypes.size());
 
                 // TODO generate functions to factor this stuff out
                 // TODO OpSwitch not supported in MLIR yet
-                std::array<mlir::spirv::Dim, 3> dimTypes = { Dim::Dim1D, Dim::Dim2D, Dim::Dim3D };
                 for (uint i = 0; i < dimTypes.size(); i++) {
                     mlir::spirv::Dim dim = dimTypes[i];
-                    mlir::Block *headerBlock, *thenBlock, *elseBlock, *mergeBlock;
 
-                    auto selection = builder.create<SelectionOp>(SelectionControl::None);
-                    mlir::Region &selectionRegion = selection.getRegion();
-
-                    headerBlock = &selectionRegion.emplaceBlock();
-                    thenBlock = &selectionRegion.emplaceBlock();
-                    mergeBlock = &selectionRegion.emplaceBlock();
-                    if (i == dimTypes.size() - 1) {
-                        elseBlock = mergeBlock;
-                    } else {
-                        elseBlock = new mlir::Block();
-                        elseBlock->insertBefore(mergeBlock);
-                    }
-
-                    builder.setInsertionPointToEnd(headerBlock);
-                    mlir::Value cmp = builder.create<IEqualOp>(dimTypeVal, getI8Const(static_cast<uint>(dim)));
-                    builder.create<BranchConditionalOp>(cmp, thenBlock, mlir::ValueRange(), elseBlock, mlir::ValueRange(), std::nullopt);
-
-                    builder.setInsertionPointToEnd(thenBlock);
+                    switchBuilder.beginCase(getI8Const(static_cast<uint>(dim)));
                     {
                         mlir::Value imageDescriptor;
                         int numAddrComponents = 0;
@@ -3584,19 +3669,10 @@ bool GcnToSpirvConverter::convertGcnOp(const MCInst &MI) {
                         }
                         builder.create<StoreOp>(texelTempReg, texel);
                     }
-                    builder.create<BranchOp>(mergeBlock);
-
-                    builder.setInsertionPointToEnd(mergeBlock);
-                    builder.create<MergeOp>();
-
-                    builder.setInsertionPointToEnd(elseBlock);
-                    if (i != dimTypes.size() - 1) {
-                        auto term = builder.create<BranchOp>(mergeBlock);
-                        builder.setInsertionPoint(term);
-                    }
+                    switchBuilder.endCase();
                 }
 
-                builder.setInsertionPointToEnd(topLevelBlock);
+                switchBuilder.endSwitch();
             }
 
             auto texel = builder.create<LoadOp>(texelTempReg);
